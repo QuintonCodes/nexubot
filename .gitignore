@@ -1,0 +1,22 @@
+# Python
+pycache/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+*.sqlite
+*.bak
