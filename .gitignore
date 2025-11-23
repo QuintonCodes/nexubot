@@ -20,3 +20,4 @@ env/
 *.db
 *.sqlite
 *.bak
+*.pkl

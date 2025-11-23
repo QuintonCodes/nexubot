@@ -1,2 +1,5 @@
 aiohttp
 python-dotenv
+pandas
+numpy
+aiodns
