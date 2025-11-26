@@ -10,6 +10,8 @@ class UnicodeStreamHandler(logging.StreamHandler):
             msg = self.format(record)
             stream = self.stream
 
+            # Write message with explicit newline
+            # Use 'replace' to handle potential encoding errors gracefully
             if hasattr(stream, 'buffer'):
                 stream.buffer.write((msg + '\n').encode('utf-8', errors='replace'))
                 stream.buffer.flush()
@@ -23,6 +25,7 @@ def setup_logging():
     """
     Initialize the logging configuration for the application
     """
+    # Create a root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
