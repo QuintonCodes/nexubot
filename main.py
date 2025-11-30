@@ -1,8 +1,3 @@
-"""
-Nexubot - Command Line Edition
-Professional Binary Options Signal Bot
-"""
-
 import asyncio
 import sys
 import os

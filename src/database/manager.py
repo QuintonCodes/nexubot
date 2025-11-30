@@ -3,8 +3,8 @@ import logging
 import re
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import text, select
-from src.config import DATABASE_URL
+from sqlalchemy import select, desc
+from src.config import DATABASE_URL, LOSS_COOLDOWN_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +13,7 @@ class Base(DeclarativeBase):
     pass
 
 class TradeResult(Base):
-    """Stores individual trade signals"""
     __tablename__ = "trade_results"
-
     id: Mapped[str] = mapped_column(primary_key=True)
     timestamp: Mapped[float] = mapped_column()
     symbol: Mapped[str] = mapped_column()
@@ -28,9 +26,7 @@ class TradeResult(Base):
     strategy: Mapped[str] = mapped_column()
 
 class SessionAnalytics(Base):
-    """Stores summary data per session for long-term AI analysis"""
     __tablename__ = "session_analytics"
-
     session_id: Mapped[str] = mapped_column(primary_key=True)
     start_time: Mapped[float] = mapped_column()
     end_time: Mapped[float] = mapped_column()
@@ -71,12 +67,7 @@ class DatabaseManager:
         try:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-
-            # Test connection
-            async with self.engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-
-            logger.info("✅ Connected to Neon DB (PostgreSQL)")
+            logger.info("✅ DB Connected")
         except Exception as e:
             logger.error(f"DB Init Failed: {e}")
 
@@ -121,6 +112,44 @@ class DatabaseManager:
                 logger.info("💾 Session analytics saved to Cloud DB")
             except Exception as e:
                 logger.error(f"Failed to log session: {e}")
+
+    async def check_recent_loss(self, symbol: str) -> bool:
+        """
+        Returns True if the symbol had a loss recently (Cool-down check).
+        Prevents overusage of failing pairs.
+        """
+        async with self.async_session() as session:
+            try:
+                # Look back X seconds
+                cutoff = time.time() - LOSS_COOLDOWN_DURATION
+                stmt = select(TradeResult).where(
+                    TradeResult.symbol == symbol,
+                    TradeResult.timestamp > cutoff,
+                    TradeResult.result == 0 # 0 is Loss
+                ).order_by(desc(TradeResult.timestamp))
+
+                result = await session.execute(stmt)
+                recent_loss = result.scalars().first()
+
+                if recent_loss:
+                    # logger.warning(f"❄️ Cooldown active for {symbol} due to recent loss.")
+                    return True
+                return False
+            except Exception:
+                return False
+
+    async def get_strategy_performance(self, strategy_name: str) -> float:
+        """Returns the win rate (0.0 to 1.0) of a specific strategy from DB."""
+        async with self.async_session() as session:
+            try:
+                stmt = select(TradeResult.result).where(TradeResult.strategy == strategy_name)
+                result = await session.execute(stmt)
+                results = result.scalars().all()
+
+                if not results: return 0.5 # Neutral if no data
+                return sum(results) / len(results)
+            except Exception:
+                return 0.5
 
     async def close(self):
         await self.engine.dispose()

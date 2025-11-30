@@ -8,64 +8,82 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.2.0"
+VERSION = "v1.3.1"
 
 # ---------------------------------------------------------
-# DATABASE (NEON / POSTGRES)
+# DATABASE & API
 # ---------------------------------------------------------
-# Ensure your .env has DATABASE_URL=postgresql://...
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# ---------------------------------------------------------
-# API & NETWORK
-# ---------------------------------------------------------
 BINANCE_API_URL = "https://api.binance.com/api/v3"
 
 # ---------------------------------------------------------
 # MARKET SELECTION
 # ---------------------------------------------------------
-USE_DYNAMIC_SYMBOLS = False # Auto-find best pairs?
-TOP_SYMBOLS_COUNT = 15 # Number of pairs to scan
-
+TOP_SYMBOLS_COUNT = 15
 # Fallback list if dynamic scan fails or is disabled
 STATIC_SYMBOLS: list[str] = [
-  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT',
-  'PEPEUSDT', 'SHIBUSDT', 'BNBUSDT', 'ADAUSDT', 'AVAXUSDT'
+  # --- HFM Crypto Majors ---
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'TRXUSDT', 'LTCUSDT',
+
+  # --- HFM Gold (Proxy) ---
+  'PAXGUSDT',
 ]
 
 # Assets requiring special risk handling (Volatility protection)
-HIGH_RISK_SYMBOLS: list[str] = ['PEPEUSDT', 'SHIBUSDT', 'DOGEUSDT', 'BONKUSDT', 'WIFUSDT']
+HIGH_RISK_SYMBOLS: list[str] = ['LTCUSDT', 'XRPUSDT', 'TRXUSDT']
+
+# ---------------------------------------------------------
+# CONTRACT SIZES (CRITICAL FOR ACCURATE RISK)
+# ---------------------------------------------------------
+CONTRACT_SIZES = {
+    # Gold
+    'PAXGUSDT': 100,
+
+    # Crypto
+    'BTCUSDT': 1,
+    'ETHUSDT': 1,
+    'BNBUSDT': 1,
+    'LTCUSDT': 1,
+
+    # "Cheap" coins
+    'XRPUSDT': 1000,
+    'TRXUSDT': 1000,
+
+    'DEFAULT': 1
+}
 
 # ---------------------------------------------------------
 # SIGNAL FREQUENCY (THROTTLING)
 # ---------------------------------------------------------
-TIMEFRAME = '5m' # Trading timeframe
-CANDLE_LIMIT = 200 # Data points needed for EMA200
-SCAN_INTERVAL = 60 # Seconds between scan loops
-
-# Spam Protection
-GLOBAL_SIGNAL_COOLDOWN = 300 # 5 Mins: Wait time between ANY signal
-PAIR_SIGNAL_COOLDOWN = 600 # 10 Mins: Wait time for SAME pair
-MAX_SIGNALS_PER_SCAN = 2 # Max signals to show at once (Prevent overwhelm)
+TIMEFRAME = '15m'
+CANDLE_LIMIT = 200
+SCAN_INTERVAL = 60 # Seconds
+GLOBAL_SIGNAL_COOLDOWN = 60 # 1 Min
+PAIR_SIGNAL_COOLDOWN = 600 # 10 Mins
+LOSS_COOLDOWN_DURATION = 1800 # 30 Mins
+MAX_SIGNALS_PER_SCAN = 2
 
 # ---------------------------------------------------------
 # RISK MANAGEMENT (ZAR CENTRIC)
 # ---------------------------------------------------------
-DEFAULT_BALANCE_ZAR = 200.0 # Base account size for testing
-USD_ZAR_RATE = 18.50 # Exchange rate for internal conversions
-RISK_PER_TRADE = 3.0 # Percentage of account to risk per trade
-LEVERAGE = 500 # Broker leverage (HFM)
+DEFAULT_BALANCE_ZAR = 1000000.0
+USD_ZAR_RATE = 18.20
 
-# Broker Spread Simulation
-# 0.10% spread roughly mimics the gap between Bid/Ask on Standard Accounts
-SPREAD_COST_PCT = 0.10
+RISK_PER_TRADE = 0.5
+LEVERAGE = 1000
 
 # HFM Minimum Lot Sizes
-MIN_LOT_SIZE = 0.01
+LOT_MIN = 0.01
+LOT_MAX = 1.00
+
+# Spread Simulation
+SPREAD_COST_PCT = 0.60
 
 # ---------------------------------------------------------
-# AI & THRESHOLDS
+# AI CONFIG
 # ---------------------------------------------------------
-MIN_CONFIDENCE = 80.0 # Minimum AI Score to trigger trade
-MIN_VOLUME_USDT = 1000000.0 # Minimum 24h Liquidity ($1M USD)
+MIN_CONFIDENCE = 70.0
+ADX_TREND_THRESHOLD = 25
+BB_SQUEEZE_THRESHOLD = 0.10
+VWAP_DEV_THRESHOLD = 2.0
 MODEL_FILE = "nexubot_models.pkl"
