@@ -43,12 +43,11 @@ class DatabaseManager:
     def __init__(self):
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL is missing in .env")
+            self.engine = None
+            return
 
         # Fix protocol for SQLAlchemy + AsyncPG
         connection_string = re.sub(r'^postgresql:', 'postgresql+asyncpg:', DATABASE_URL)
-
-        # lean URL parameters: AsyncPG does not support 'sslmode' in the URL query.
-        # We strip everything after '?' to avoid "unexpected keyword argument 'sslmode'"
         if "?" in connection_string:
             connection_string = connection_string.split("?")[0]
 
@@ -56,14 +55,13 @@ class DatabaseManager:
             connection_string,
             echo=False,
             pool_pre_ping=True,
-            connect_args={
-                "ssl": "require"
-            }
-            )
+            connect_args={"ssl": "require"}
+        )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
     async def init_database(self):
         """Creates tables if they don't exist"""
+        if not self.engine: return
         try:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
@@ -73,6 +71,7 @@ class DatabaseManager:
 
     async def log_trade(self, trade_data: dict) -> None:
         """Logs a trade asynchronously"""
+        if not self.engine: return
         async with self.async_session() as session:
             try:
                 trade = TradeResult(
@@ -95,10 +94,10 @@ class DatabaseManager:
 
     async def log_session(self, session_id: str, start_time: float, stats: dict):
         """Logs session summary on shutdown"""
+        if not self.engine: return
         async with self.async_session() as session:
             try:
                 win_rate = (stats['wins'] / stats['total'] * 100) if stats['total'] > 0 else 0.0
-
                 analytics = SessionAnalytics(
                     session_id=session_id,
                     start_time=start_time,
@@ -118,9 +117,9 @@ class DatabaseManager:
         Returns True if the symbol had a loss recently (Cool-down check).
         Prevents overusage of failing pairs.
         """
+        if not self.engine: return False
         async with self.async_session() as session:
             try:
-                # Look back X seconds
                 cutoff = time.time() - LOSS_COOLDOWN_DURATION
                 stmt = select(TradeResult).where(
                     TradeResult.symbol == symbol,
@@ -129,12 +128,7 @@ class DatabaseManager:
                 ).order_by(desc(TradeResult.timestamp))
 
                 result = await session.execute(stmt)
-                recent_loss = result.scalars().first()
-
-                if recent_loss:
-                    # logger.warning(f"❄️ Cooldown active for {symbol} due to recent loss.")
-                    return True
-                return False
+                return result.scalars().first() is not None
             except Exception:
                 return False
 
@@ -151,5 +145,22 @@ class DatabaseManager:
             except Exception:
                 return 0.5
 
+    async def get_pair_performance(self, symbol: str) -> float:
+        """
+        NEW: Returns win rate for a specific pair.
+        Used to adjust confidence if a pair is historically profitable.
+        """
+        if not self.engine: return 0.5
+        async with self.async_session() as session:
+            try:
+                stmt = select(TradeResult.result).where(TradeResult.symbol == symbol)
+                result = await session.execute(stmt)
+                results = result.scalars().all()
+                if not results: return 0.5
+                return sum(results) / len(results)
+            except Exception:
+                return 0.5
+
     async def close(self):
-        await self.engine.dispose()
+        if self.engine:
+            await self.engine.dispose()

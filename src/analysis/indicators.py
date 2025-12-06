@@ -49,25 +49,25 @@ class TechnicalAnalyzer:
         df['bb_lower'] = df['sma20'] - (df['std20'] * 2)
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['sma20']
 
-        # --- Institutional: VWAP (Rolling 24h approximation for intraday) ---
-        # Note: True VWAP resets daily, here we use rolling window to approximate intraday value
+        # --- Volume Analysis ---
+        # Volume SMA
+        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+
+        # Delta
+        df['delta'] = np.where(df['close'] > df['open'], df['volume'], -df['volume'])
+        df['cum_delta'] = df['delta'].rolling(window=20).sum()
+
+        # --- Institutional: VWAP ---
         v = df['volume']
         tp = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (tp * v).rolling(window=96).sum() / v.rolling(window=96).sum() # ~24h on 15m candles
 
-        # VWAP Bands (Standard Deviation)
+        # VWAP Bands
         vwap_std = df['close'].rolling(window=96).std()
         df['vwap_upper'] = df['vwap'] + (vwap_std * 2)
         df['vwap_lower'] = df['vwap'] - (vwap_std * 2)
 
-        # --- Volume Analysis ---
-        # Delta: Approx buying vs selling volume based on candle color
-        df['delta'] = np.where(df['close'] > df['open'], df['volume'], -df['volume'])
-        df['cum_delta'] = df['delta'].rolling(window=20).sum()
-
-        # Volume Profile: Value Area High (VAH) Approximation
-        # We take the 70% percentile of the 'Typical Price' over last 50 candles weighted by volume
-        # Simplified: Moving Average of Highs adjusted by Volume strength
+        # Volume Profile VAH
         df['vol_profile_vah'] = df['high'].rolling(window=50).max() # Simplified resistance zone
 
         # --- Risk: ATR ---
