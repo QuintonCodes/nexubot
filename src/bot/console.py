@@ -1,20 +1,25 @@
 import asyncio
-import aiohttp
-import time
 import logging
 import sys
-import socket
+import time
 from datetime import datetime
 
+from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
-from src.data.provider import DataProvider
 from src.config import (
-    ALL_SYMBOLS, CRYPTO_SYMBOLS, FOREX_SYMBOLS,
-    SCAN_INTERVAL_CRYPTO, SCAN_INTERVAL_FOREX,
-    GLOBAL_SIGNAL_COOLDOWN, MAX_SIGNALS_PER_SCAN,
-    DEFAULT_BALANCE_ZAR, SMALL_ACCOUNT_THRESHOLD_ZAR,
-    APP_NAME, VERSION, TIMEFRAME, CANDLE_LIMIT,
+    ALL_SYMBOLS,
+    APP_NAME,
+    CANDLE_LIMIT,
+    CRYPTO_SYMBOLS,
+    DEFAULT_BALANCE_ZAR,
+    FOREX_SYMBOLS,
+    GLOBAL_SIGNAL_COOLDOWN,
+    MAX_SIGNALS_PER_SCAN,
+    SCAN_INTERVAL_CRYPTO,
+    SCAN_INTERVAL_FOREX,
+    TIMEFRAME,
+    VERSION,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,67 +34,87 @@ YELLOW = "\033[93m"
 WHITE = "\033[97m"
 MAGENTA = "\033[95m"
 
+
 class NexubotConsole:
     """
     Terminal Interface for Nexubot.
     """
+
     def __init__(self):
         self.db = DatabaseManager()
         self.ai_engine = AITradingEngine()
-        self.provider = None
-        self.session = None
+        self.provider = DataProvider()
         self.running = False
-        self.last_scan = {'crypto': 0, 'forex': 0}
         self.last_global_signal_time = 0
         self.session_id = f"SESSION_{int(time.time())}"
+        self.tasks = set()  # Track running tasks
         self.stats = {
-            'wins': 0, 'loss': 0, 'total': 0,
-            'pnl_zar': 0.0, 'start': datetime.now()
+            "wins": 0,
+            "loss": 0,
+            "total": 0,
+            "pnl_zar": 0.0,
+            "start": datetime.now(),
         }
+        self.symbol_digits = {}
 
-    async def start(self):
-        """Initializes the bot and starts the scan loop."""
-        self.running = True
-        print(f"\n{BOLD}{CYAN}🚀 {APP_NAME} {VERSION}{RESET}")
+    async def _cache_digits(self):
+        """Caches the decimal digits for all symbols."""
+        for sym in ALL_SYMBOLS:
+            info = await self.provider.get_symbol_info(sym)
+            if info:
+                self.symbol_digits[sym] = info.get("digits", 5)
 
-        await self.db.init_database()
-        self.ai_engine.set_context(0, 18.00, self.db)
+    def display_signal(self, symbol: str, signal: dict):
+        """Displays a formatted trading signal in the console."""
+        sys.stdout.write(f"\r{' ' *50}\r")
 
-        try:
-            print(f"{WHITE}Enter Account Balance (ZAR) [Default: R{DEFAULT_BALANCE_ZAR}]: {RESET}", end="")
-            user_input = input()
-            zar_balance = float(user_input) if user_input.strip() else DEFAULT_BALANCE_ZAR
-        except ValueError:
-            zar_balance = DEFAULT_BALANCE_ZAR
+        direction = signal["direction"]
+        color = GREEN if direction == "LONG" else RED
+        icon = "📈" if direction == "LONG" else "📉"
+        risk_badge = f"{MAGENTA}[HIGH VOLATILITY]{RESET}" if signal.get("is_high_risk") else ""
 
-        self.ai_engine.user_balance_zar = zar_balance
-        print(f"✅ Account Set: {GREEN}R{zar_balance:.2f}{RESET}")
+        entry_str = self.smart_round(symbol, signal["price"])
+        sl_str = self.smart_round(symbol, signal["sl"])
+        tp_str = self.smart_round(symbol, signal["tp"])
 
-        if zar_balance < SMALL_ACCOUNT_THRESHOLD_ZAR:
-            print(f"{YELLOW}⚠️ Small Account Logic Enabled (Survival Mode){RESET}")
+        # Formatted Output
+        print(f"{WHITE}" + "=" * 60)
+        print(f"{BOLD}{color}🚨 {signal['signal']} {icon} SIGNAL DETECTED {risk_badge}{RESET}")
+        print(f"{WHITE}" + "=" * 60)
 
-        nameservers = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]
+        # Section: Asset Info
+        print(f"{BOLD}Asset:{RESET}        {symbol}")
+        print(f"{BOLD}Strategy:{RESET}     {signal['strategy']}")
+        print(f"{BOLD}Confidence:{RESET}   {signal['confidence']:.1f}%")
+        print(f"{WHITE}" + "-" * 60)
 
-        # --- Network Setup (Google DNS) ---
-        resolver = aiohttp.AsyncResolver(nameservers=nameservers)
-        connector = aiohttp.TCPConnector(
-            family=socket.AF_INET,
-            ssl=False,
-            limit=100,
-            resolver=resolver,
-            keepalive_timeout=30,
-        )
-        self.session = aiohttp.ClientSession(connector=connector)
-        self.provider = DataProvider(self.session)
+        # Section: Execution
+        print(f"{BOLD}ENTRY:{RESET}        {entry_str}")
+        print(f"{RED}STOP LOSS:{RESET}    {sl_str}")
+        print(f"{GREEN}TAKE PROFIT:{RESET}  {tp_str}")
+        print(f"{WHITE}" + "-" * 60)
 
-        await self.scan_loop()
+        # Section: Sizing
+        print(f"{BOLD}LOT SIZE:{RESET}     {YELLOW}{signal['lot_size']:.2f} Lots{RESET}")
+        print(f"{WHITE}" + "-" * 60)
+
+        print(f"{BOLD}MAX RISK:{RESET}     {RED}-R{signal['risk_zar']:.2f}  (If SL Hit){RESET}")
+        print(f"{BOLD}EST PROFIT:{RESET}   {GREEN}+R{signal['profit_zar']:.2f}  (If TP Hit){RESET}")
+        print(f"{WHITE}" + "-" * 60)
+
+        print(f"{BOLD}ACTION:{RESET} Open {signal['lot_size']:.2f} Lots {signal['signal']} on {symbol}{RESET}")
+        print(f"{WHITE}" + "=" * 60 + "\n")
+
+    def smart_round(self, symbol: str, value: float) -> str:
+        """Rounds value based on symbol's decimal digits."""
+        digits = self.symbol_digits.get(symbol, 5)
+        return f"{value:.{digits}f}"
 
     def print_dashboard(self):
         """Displays session statistics."""
-        elapsed = datetime.now() - self.stats['start']
-        win_rate = (self.stats['wins']/self.stats['total']*100) if self.stats['total'] > 0 else 0
-
-        current_pnl = self.stats['pnl_zar']
+        elapsed = datetime.now() - self.stats["start"]
+        win_rate = (self.stats["wins"] / self.stats["total"] * 100) if self.stats["total"] > 0 else 0
+        current_pnl = self.stats["pnl_zar"]
         pnl_color = GREEN if current_pnl >= 0 else RED
 
         dash = f"""
@@ -102,139 +127,289 @@ class NexubotConsole:
         sys.stdout.write(f"\r{' ' *80}\r")
         print(dash)
 
+    async def start(self):
+        """Initializes the bot and starts the scan loop."""
+        self.running = True
+        print(f"\n{BOLD}{CYAN}🚀 {APP_NAME} {VERSION}{RESET}")
+
+        # Init DB
+        await self.db.init_database()
+
+        # Init MT5 via Provider
+        print(f"✅ {WHITE}Account Set: {GREEN}R{DEFAULT_BALANCE_ZAR:.2f}{RESET}")
+        self.ai_engine.set_context(DEFAULT_BALANCE_ZAR, self.db)
+
+        # Init MT5 via Provider
+        print(f"{YELLOW}⏳ Initializing MT5 (Timeout 60s)... Please wait.{RESET}")
+        if not await self.provider.initialize():
+            print(f"{RED}Failed to initialize MT5 Provider. Check logs.{RESET}")
+            return
+
+        await self._cache_digits()
+
+        # Restore active trades
+        print(f"{YELLOW}🔄 Checking for interrupted trades...{RESET}")
+        active_trades = await self.db.get_active_trades()
+        if active_trades:
+            print(f"{CYAN}Found {len(active_trades)} active trades. Resuming monitoring...{RESET}")
+            for symbol, signal, start_time in active_trades:
+                # IMPORTANT: Register trade in AI Engine to prevent duplicate signals
+                self.ai_engine.register_active_trade(symbol)
+
+                elapsed = time.time() - start_time
+                remaining = 3600 - elapsed
+                if remaining > 0:
+                    task = asyncio.create_task(self.verify_trade_realtime(symbol, signal, resume_start_time=start_time))
+                    self.tasks.add(task)
+                else:
+                    # Expired while offline
+                    await self.db.delete_active_trade(symbol)
+
+        usdzar = await self.provider.get_latest_price("USDZAR")
+        if usdzar:
+            self.ai_engine.update_usdzar_rate(usdzar)
+            print(f"💱 Current USD/ZAR Rate: {YELLOW}{usdzar:.2f}{RESET}")
+
+        print(f"{YELLOW}📊 Ranking pairs by volatility...{RESET}")
+        await self.scan_loop()
+
     async def scan_loop(self):
         """Main infinite loop."""
-        print(f"{GREEN}✅ Scanner Started. Monitoring {len(ALL_SYMBOLS)} pairs...{RESET}\n")
+        print(f"{GREEN}✅ Scanner Active. Monitoring {len(ALL_SYMBOLS)} pairs...{RESET}\n")
 
-        while self.running:
-            now = time.time()
-            rate = await self.provider.get_usd_zar()
-            self.ai_engine.usd_zar_rate = rate
+        last_crypto = 0
+        last_forex = 0
+        active_crypto = list(CRYPTO_SYMBOLS)
+        active_forex = list(FOREX_SYMBOLS)
+        last_sort_time = 0
 
-            tasks = []
+        try:
+            while self.running:
+                now = time.time()
 
-            # 1. Crypto Scan
-            if now - self.last_scan['crypto'] > SCAN_INTERVAL_CRYPTO:
-                tasks.append(self.process_batch(CRYPTO_SYMBOLS, "Crypto"))
-                self.last_scan['crypto'] = now
+                # Update USDZAR occasionally (every 5 mins)
+                if now % 300 < 2:
+                    rate = await self.provider.get_latest_price("USDZAR")
+                    if rate:
+                        self.ai_engine.update_usdzar_rate(rate)
 
-            # 2. Forex Scan
-            if now - self.last_scan['forex'] > SCAN_INTERVAL_FOREX:
-                tasks.append(self.process_batch(FOREX_SYMBOLS, "Forex"))
-                self.last_scan['forex'] = now
+                if now - last_sort_time > 900:
+                    active_crypto = await self.sort_pairs(active_crypto)
+                    active_forex = await self.sort_pairs(active_forex)
+                    last_sort_time = now
 
-            if tasks:
-                await asyncio.gather(*tasks)
+                tasks = []
+                # Crypto Scan
+                if now - last_crypto > SCAN_INTERVAL_CRYPTO:
+                    tasks.append(self.process_batch(active_crypto))
+                    last_crypto = now
 
-            # Dashboard Update
-            if int(time.time()) % 300 == 0: self.print_dashboard()
-            await asyncio.sleep(1)
+                # Forex Scan
+                if now - last_forex > SCAN_INTERVAL_FOREX:
+                    tasks.append(self.process_batch(active_forex))
+                    last_forex = now
 
-    async def process_batch(self, symbols, label):
-        sys.stdout.write(f"\r{CYAN}⚡ Scanning {label}... {datetime.now().strftime('%H:%M:%S')}{RESET}\n")
-        sys.stdout.flush()
+                if tasks:
+                    await asyncio.gather(*tasks)
 
+                # Cleanup
+                self.tasks = {t for t in self.tasks if not t.done()}
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
+    async def sort_pairs(self, symbols: list[str]) -> list[str]:
+        """Fetches 100 candles for all pairs to rank them."""
+        data_map = {}
+        for sym in symbols:
+            # Quick fetch
+            k = await self.provider.fetch_klines(sym, TIMEFRAME, 100)
+            if k:
+                df = self.ai_engine._prepare_data(k)
+                if df is not None:
+                    data_map[sym] = df
+
+        ranked = self.ai_engine.rank_symbols_by_volatility(symbols, data_map)
+        # If fetch failed for some, keep them at the end
+        result = ranked + [s for s in symbols if s not in ranked]
+        return result
+
+    async def process_batch(self, symbols: list[str]):
+        """Processes a batch of symbols for signals."""
         signals_found = 0
         for sym in symbols:
             # Check Rate Limits
-            if time.time() - self.last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN: break
-            if signals_found >= MAX_SIGNALS_PER_SCAN: break
+            if time.time() - self.last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN:
+                break
+            if signals_found >= MAX_SIGNALS_PER_SCAN:
+                break
 
             # Fetch
             klines = await self.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
-            if not klines: continue
+            if not klines:
+                continue
 
             # Analyze
-            signal = await self.ai_engine.analyze_market(sym, klines)
+            signal = await self.ai_engine.analyze_market(sym, klines, self.provider)
             if signal:
                 self.display_signal(sym, signal)
                 signals_found += 1
                 self.last_global_signal_time = time.time()
+                task = asyncio.create_task(self.verify_trade_realtime(sym, signal))
+                self.tasks.add(task)
 
-            await asyncio.sleep(0.5)
+    async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
+        """
+        Monitors price and Logs Data for ML.
+        Uses True Tick Value for accurate PnL calculation.
+        """
+        print(f"{CYAN}👀 Monitoring trade {symbol} for outcome...{RESET}")
 
-    def display_signal(self, symbol: str, signal: dict):
-        sys.stdout.write(f"\r{' ' *50}\r")
+        # PERSISTENCE: Save active trade immediately
+        await self.db.save_active_trade(symbol, signal)
 
-        direction = signal['direction']
-        color = GREEN if direction == 'LONG' else RED
-        icon = "📈" if direction == 'LONG' else "📉"
-        risk_badge = f"{MAGENTA}[HIGH VOLATILITY]{RESET}" if signal.get('is_high_risk') else ""
+        entry = signal["price"]
+        sl = signal["sl"]
+        tp = signal["tp"]
+        is_long = signal["direction"] == "LONG"
+        atr = signal.get("atr", 1.0)
+        lot_size = signal["lot_size"]
+        tick_value = signal.get("tick_value", 0.0)
+        point = signal.get("point", 0.00001)
 
-        # Formatted Output
-        print(f"{WHITE}" + "="*60)
-        print(f"{BOLD}{color}🚨 {signal['signal']} {icon} SIGNAL DETECTED {risk_badge}{RESET}")
-        print(f"{WHITE}" + "="*60)
+        duration = 3600  # 1 Hour Max Duration (Safety)
+        interval = 1  # Check every second
+        start_time = resume_start_time if resume_start_time else time.time()
 
-        # Section: Asset Info
-        print(f"{BOLD}Asset:{RESET}        {symbol}")
-        print(f"{BOLD}Strategy:{RESET}     {signal['strategy']}")
-        print(f"{BOLD}Confidence:{RESET}   {signal['confidence']:.1f}%")
-        print(f"{WHITE}" + "-"*60)
+        outcome = "TIMEOUT"
+        final_pnl = 0.0
 
-        # Section: Execution
-        print(f"{BOLD}ENTRY:{RESET}        {signal['price']}")
-        print(f"{RED}STOP LOSS:{RESET}    {signal['sl']}")
-        print(f"{GREEN}TAKE PROFIT:{RESET}  {signal['tp']}")
-        print(f"{WHITE}" + "-"*60)
+        # Max ATR multiple reached during trade
+        max_favorable_dist = 0.0
 
-        # Section: Sizing
-        print(f"{BOLD}LOT SIZE:{RESET}     {YELLOW}{signal['lot_size']:.2f} Lots{RESET}")
-        print(f"{WHITE}" + "-"*60)
+        try:
+            while (time.time() - start_time) < duration:
+                # Check if shutting down
+                if not self.running:
+                    return
 
-        print(f"{BOLD}SPREAD COST:{RESET}  {RED}-R{signal['spread_cost_zar']:.2f}  (Immediate Drawdown){RESET}")
-        print(f"{BOLD}MAX RISK:{RESET}     {RED}-R{signal['risk_zar']:.2f}  (If SL Hit){RESET}")
-        print(f"{BOLD}EST PROFIT:{RESET}   {GREEN}+R{signal['profit_zar']:.2f}  (If TP Hit){RESET}")
-        print(f"{WHITE}" + "-"*60)
+                # Get Tick for Spread Logic
+                tick = await self.provider.get_current_tick(symbol)
+                if not tick:
+                    await asyncio.sleep(interval)
+                    continue
 
-        print(f"{BOLD}ACTION:{RESET} Open {signal['lot_size']:.2f} Lots {signal['signal']} on {symbol}{RESET}")
-        print(f"{WHITE}" + "="*60 + "\n")
+                current_bid = tick.bid
+                current_ask = tick.ask
 
-        # Launch verification task
-        asyncio.create_task(self.verify_trade(symbol, signal))
+                # Track Max Excursion
+                if is_long:
+                    # Favorable direction is Up (Bid)
+                    dist = current_bid - entry
+                    if dist > max_favorable_dist:
+                        max_favorable_dist = dist
 
-    async def verify_trade(self, symbol: str, signal: dict):
-        """Monitors price to see if trade would have won/lost."""
-        await asyncio.sleep(300) # Wait 5 mins
+                    # Stop Loss
+                    if current_bid <= sl:
+                        outcome = "LOSS (SL Hit)"
+                        points_lost = (entry - sl) / point
+                        # Loss is negative
+                        final_pnl = -(points_lost * tick_value * lot_size)
+                        break
+                    # Take Profit
+                    elif current_bid >= tp:
+                        outcome = "WIN (TP Hit)"
+                        points_won = (tp - entry) / point
+                        final_pnl = points_won * tick_value * lot_size
+                        break
+                else:  # Short
+                    # Favorable direction is Down (Ask)
+                    dist = entry - current_ask
+                    if dist > max_favorable_dist:
+                        max_favorable_dist = dist
+                    # Stop Loss
+                    if current_ask >= sl:
+                        outcome = "LOSS (SL Hit)"
+                        points_lost = (sl - entry) / point
+                        # Loss is negative
+                        final_pnl = -(points_lost * tick_value * lot_size)
+                        break
+                    # Take Profit
+                    elif current_ask <= tp:
+                        outcome = "WIN (TP Hit)"
+                        points_won = (entry - tp) / point
+                        final_pnl = points_won * tick_value * lot_size
+                        break
 
-        exit_price = await self.provider.get_latest_price(symbol)
-        if not exit_price: return
+                await asyncio.sleep(interval)
 
-        is_buy = signal['direction'] == 'LONG'
-        won = (exit_price > signal['price']) if is_buy else (exit_price < signal['price'])
+            # Cleanup Persistence
+            await self.db.delete_active_trade(symbol)
 
-        # PnL logic
-        pnl = signal['profit_zar'] if won else -signal['risk_zar']
+            # If timeout, calculate floating PnL
+            if outcome == "TIMEOUT":
+                tick = await self.provider.get_current_tick(symbol)
+                if tick:
+                    if is_long:
+                        points_diff = (tick.bid - entry) / point
+                        final_pnl = points_diff * tick_value * lot_size
+                    else:
+                        points_diff = (entry - tick.ask) / point
+                        final_pnl = points_diff * tick_value * lot_size
 
-        # Update Stats
-        self.stats['total'] += 1
-        if won: self.stats['wins'] += 1
-        else: self.stats['loss'] += 1
-        self.stats['pnl_zar'] += pnl
+                outcome = "WIN (Floating)" if final_pnl > 0 else "LOSS (Floating)"
 
-        await self.db.log_trade({
-            'id': f"{symbol}_{int(time.time())}",
-            'symbol': symbol,
-            'signal': signal['signal'],
-            'confidence': signal['confidence'],
-            'entry': signal['price'],
-            'exit': exit_price,
-            'won': won,
-            'pnl': pnl,
-            'strategy': signal['strategy']
-        })
-        self.ai_engine.learn(symbol, signal['strategy'], won, pnl)
+            # Log Result
+            won = final_pnl > 0
+            self.stats["pnl_zar"] += final_pnl
 
-        res = f"{GREEN}WIN ✅{RESET}" if won else f"{RED}LOSS ❌{RESET}"
-        print(f"\n{BOLD}📢 Trade Result ({symbol}):{RESET} {res} (R{pnl:.2f})\n")
+            if won:
+                self.stats["wins"] += 1
+            else:
+                self.stats["loss"] += 1
+            self.stats["total"] += 1
+
+            # Calculate Excursion in ATR multiples
+            excursion_atr = max_favorable_dist / atr if atr > 0 else 0.0
+
+            color = GREEN if won else RED
+            print(f"\n{BOLD}🔔 Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{final_pnl:.2f}{RESET}\n")
+            self.print_dashboard()
+
+            await self.db.log_trade(
+                {
+                    "id": f"{symbol}_{int(time.time())}",
+                    "symbol": symbol,
+                    "signal": signal["signal"],
+                    "confidence": signal["confidence"],
+                    "entry": entry,
+                    "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
+                    "won": won,
+                    "pnl": final_pnl,
+                    "strategy": signal["strategy"],
+                }
+            )
+
+            # Call AI Engine to record data for CSV
+            self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"Error verifying {symbol}: {e}")
 
     async def stop(self):
+        """Gracefully stops the bot and cleans up."""
         self.running = False
-        await self.db.log_session(
-            self.session_id,
-            self.stats['start'].timestamp(),
-            self.stats
-        )
-        if self.session: await self.session.close()
+        print(f"\n{YELLOW}🛑 Stopping Nexubot...{RESET}")
+
+        # Cancel all pending monitoring tasks
+        for task in self.tasks:
+            task.cancel()
+
+        # Wait briefly for tasks to clean up
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        await self.db.log_session(self.session_id, self.stats["start"].timestamp(), self.stats)
         await self.db.close()
-        self.ai_engine.save_models()
+        await self.provider.shutdown()

@@ -1,121 +1,209 @@
-import aiohttp
-import logging
 import asyncio
+import logging
+import MetaTrader5 as mt5
+import os
 import time
-from datetime import datetime
 from typing import List, Dict, Optional
-from src.config import (
-  TWELVEDATA_API_KEY, TWELVEDATA_BASE_URL,
-  BINANCE_API_URL, FALLBACK_USD_ZAR, FOREX_SYMBOLS
-)
+
+from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 logger = logging.getLogger(__name__)
 
+
 class DataProvider:
-  """
-  Hybrid Provider: Routes requests to Binance (Crypto) or TwelveData (Forex).
-  """
-  def __init__(self, session: aiohttp.ClientSession):
-    self.session = session
-    self.api_key = TWELVEDATA_API_KEY
-    self.forex_lock = asyncio.Lock()
-    self._cached_usd_zar = FALLBACK_USD_ZAR
-    self._last_zar_update = 0
+    """
+    MT5 Direct Provider - HFM Optimized.
+    Wraps standard MT5 functions with error handling and retries.
+    """
 
-  async def get_usd_zar(self) -> float:
-    """Updates ZAR rate hourly."""
-    if time.time() - self._last_zar_update > 3600:
-      rate = await self._fetch_twelve_price("USD/ZAR")
-      if rate:
-          self._cached_usd_zar = rate
-          self._last_zar_update = time.time()
-    return self._cached_usd_zar
+    def __init__(self):
+        self.connected = False
+        self._login = MT5_LOGIN
+        self._password = MT5_PASSWORD
+        self._server = MT5_SERVER
+        self._path = MT5_PATH
+        self.spread_cache = {}
+        self.last_cache_clear = time.time()
 
-  async def fetch_klines(self, symbol: str, interval: str, limit: int) -> List[Dict]:
-    """Router for Klines."""
-    if symbol in FOREX_SYMBOLS:
-      return await self._fetch_forex_klines(symbol, interval, limit)
-    return await self._fetch_crypto_klines(symbol, interval, limit)
+    def _sync_connect(self) -> bool:
+        """Synchronous MT5 Connection with Retries."""
+        try:
+            # 1. Validate Path
+            if not os.path.exists(self._path):
+                logger.error(f"❌ MT5 Path not found: {self._path}")
+                return False
 
-  async def get_latest_price(self, symbol: str) -> Optional[float]:
-    """Unified price fetcher for trade verification."""
-    if symbol in FOREX_SYMBOLS:
-      return await self._fetch_twelve_price(symbol)
-    return await self._fetch_binance_price(symbol)
+            # 2. Initialize with Timeout (Fix for IPC Timeout)
+            # We give it 60 seconds to launch and connect.
+            if not mt5.initialize(path=self._path, timeout=60000):
+                if not mt5.initialize(timeout=60000):
+                    return False
 
-    # --- BINANCE (CRYPTO) ---
-  async def _fetch_crypto_klines(self, symbol: str, interval: str, limit: int) -> List[Dict]:
-    url = f"{BINANCE_API_URL}/klines"
-    params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+            # 3. Login
+            if self._login and self._password:
+                authorized = mt5.login(int(self._login), password=self._password, server=self._server)
+                if authorized:
+                    account_info = mt5.account_info()
+                    if account_info:
+                        logger.info(f"✅ Connected to HFM Account: {self._login}")
+                        self.connected = True
+                        return True
 
-    try:
-      async with self.session.get(url, params=params) as resp:
-        if resp.status != 200:
-          logger.warning(f"Binance error {resp.status} for {symbol}")
-          return []
-        data = await resp.json()
+            self.connected = True
+            return True
+        except Exception as e:
+            logger.exception(f"Critical MT5 Connection Error: {e}")
+            return False
 
-        # Binance returns Oldest -> Newest
-        return [{
-            'time': float(k[0]) / 1000,
-            'open': float(k[1]), 'high': float(k[2]),
-            'low': float(k[3]), 'close': float(k[4]),
-            'volume': float(k[5])
-        } for k in data]
-    except Exception:
-      return []
-
-  async def _fetch_binance_price(self, symbol: str) -> Optional[float]:
-    url = f"{BINANCE_API_URL}/ticker/price"
-    try:
-      async with self.session.get(url, params={'symbol': symbol}) as resp:
-        if resp.status == 200:
-          data = await resp.json()
-          return float(data['price'])
-    except Exception:
-      return None
-
-    # --- TWELVEDATA (FOREX) ---
-  async def _fetch_forex_klines(self, symbol: str, interval: str, limit: int) -> List[Dict]:
-    if not self.api_key: return []
-
-    async with self.forex_lock:
-      await asyncio.sleep(1.5) # Rate limit protection
-      params = {
-        'symbol': symbol, 'interval': interval,
-        'outputsize': limit, 'apikey': self.api_key,
-        'order': 'ASC'
-      }
-      try:
-        async with self.session.get(f"{TWELVEDATA_BASE_URL}/time_series", params=params) as resp:
-          if resp.status != 200:
-            logger.warning(f"TwelveData error {resp.status} for {symbol}")
+    def _sync_get_rates(self, symbol: str, timeframe: int, limit: int) -> List[Dict]:
+        """Fetches candles with Synchronization Check."""
+        # 1. Select symbol in Market Watch to trigger sync
+        selected = mt5.symbol_select(symbol, True)
+        if not selected:
+            logger.warning(f"Symbol {symbol} not found or not selectable.")
             return []
-          data = await resp.json()
-          if 'values' not in data: return []
 
-          normalized = []
-          for k in data['values']:
-            try:
-              dt = datetime.strptime(k['datetime'], "%Y-%m-%d %H:%M:%S")
-              ts = dt.timestamp()
-              normalized.append({
-                'time': ts,
-                'open': float(k['open']), 'high': float(k['high']),
-                'low': float(k['low']), 'close': float(k['close']),
-                'volume': float(k.get('volume', 0))
-              })
-            except ValueError:
-                 continue
-          return normalized
-      except Exception:
-        return []
+        # 2. Attempt to fetch data with retries
+        rates = None
+        for attempt in range(3):
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, limit)
+            if rates is not None and len(rates) > 0:
+                break
+            # Wait briefly for MT5 to catch up
+            time.sleep(0.2)
 
-  async def _fetch_twelve_price(self, symbol: str) -> Optional[float]:
-    try:
-      async with self.session.get(f"{TWELVEDATA_BASE_URL}/price", params={'symbol': symbol, 'apikey': self.api_key}) as resp:
-        if resp.status == 200:
-          data = await resp.json()
-          return float(data['price'])
-    except Exception:
-      return None
+        if rates is None or len(rates) == 0:
+            return []
+
+        # 3. Freshness Check: Is the last candle stale?
+        # Note: Market might be closed, so we allow some lag..
+        last_time = rates[-1]["time"]
+        if (time.time() - last_time) > 86400 * 3:  # If data is older than 3 days
+            pass
+
+        # Convert to standard list of dicts
+        data = []
+        for r in rates:
+            data.append(
+                {
+                    "time": float(r["time"]),
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                    "volume": float(r["tick_volume"]),
+                    "spread": int(r["spread"]),
+                }
+            )
+        return data
+
+    def _sync_get_tick(self, symbol: str) -> Optional[float]:
+        """Gets current Bid/Ask average."""
+        if not mt5.symbol_select(symbol, True):
+            return None
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            return (tick.bid + tick.ask) / 2.0
+        return None
+
+    def _sync_get_tick_struct(self, symbol: str) -> Optional[mt5.Tick]:
+        """Returns full tick object (Bid/Ask)."""
+        if not mt5.symbol_select(symbol, True):
+            return None
+        return mt5.symbol_info_tick(symbol)
+
+    def _sync_symbol_info(self, symbol: str) -> Dict:
+        """
+        Fetches detailed symbol specification for risk calculations."""
+        info = mt5.symbol_info(symbol)
+        if not info:
+            return {}
+
+        return {
+            "digits": info.digits,
+            "min_vol": info.volume_min,
+            "max_vol": info.volume_max,
+            "vol_step": info.volume_step,
+            "point": info.point,
+            "trade_tick_value": info.trade_tick_value,
+        }
+
+    async def initialize(self) -> bool:
+        """
+        Initializes connection to MT5 Terminal.
+        Retries logic implemented for stability.
+        """
+        return await asyncio.to_thread(self._sync_connect)
+
+    async def fetch_klines(self, symbol: str, timeframe_str: str, limit: int) -> List[Dict]:
+        """
+        Fetches candles with Synchronization Check.
+        """
+        if not self.connected:
+            return []
+
+        tf_map = {
+            "1m": mt5.TIMEFRAME_M1,
+            "5m": mt5.TIMEFRAME_M5,
+            "15m": mt5.TIMEFRAME_M15,
+            "30m": mt5.TIMEFRAME_M30,
+            "1h": mt5.TIMEFRAME_H1,
+            "4h": mt5.TIMEFRAME_H4,
+            "1d": mt5.TIMEFRAME_D1,
+        }
+        mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M15)
+
+        return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
+
+    async def get_latest_price(self, symbol: str) -> Optional[float]:
+        """Gets current Bid/Ask average."""
+        return await asyncio.to_thread(self._sync_get_tick, symbol)
+
+    async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
+        """Returns full tick object (Bid/Ask)."""
+        return await asyncio.to_thread(self._sync_get_tick_struct, symbol)
+
+    async def get_symbol_info(self, symbol: str) -> Dict:
+        """
+        Fetches detailed symbol specification for risk calculations.
+        Crucial for ZAR account conversion.
+        """
+        return await asyncio.to_thread(self._sync_symbol_info, symbol)
+
+    async def get_spread(self, symbol: str) -> Dict:
+        """
+        Smart Spread Check using caching + Hourly Clear.
+        """
+        # 1. Clear cache if older than 1 hour
+        if time.time() - self.last_cache_clear > 3600:
+            self.spread_cache = {}
+            self.last_cache_clear = time.time()
+
+        tick = await self.get_current_tick(symbol)
+        if not tick:
+            return {"spread": 0, "spread_high": True}  # Block if no data
+
+        spread_points = tick.ask - tick.bid
+        info = await self.get_symbol_info(symbol)
+        point = info.get("point", 0.00001)
+        spread_raw = spread_points / point
+
+        # Cache Update
+        if symbol not in self.spread_cache:
+            self.spread_cache[symbol] = []
+        self.spread_cache[symbol].append(spread_raw)
+        if len(self.spread_cache[symbol]) > 50:
+            self.spread_cache[symbol].pop(0)
+
+        # Dynamic Check
+        avg_spread = sum(self.spread_cache[symbol]) / len(self.spread_cache[symbol])
+
+        # Block if spread is 1.5x the session average
+        is_high = spread_raw > (avg_spread * 1.5) and spread_raw > 10  # Min threshold
+
+        return {"spread": spread_raw, "spread_high": is_high}
+
+    async def shutdown(self):
+        """Safely shuts down the connection."""
+        await asyncio.to_thread(mt5.shutdown)
+        self.connected = False

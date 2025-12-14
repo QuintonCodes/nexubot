@@ -1,8 +1,17 @@
-aiohttp
+# aiohttp
 python-dotenv
 pandas
 numpy
-aiodns
+# aiodns
 sqlalchemy
 asyncpg
 greenlet
+MetaTrader5
+scipy
+scikit-learn      # For data splitting, scaling (MinMaxScaler), and metrics
+tensorflow        # (Or 'torch') The core Deep Learning library
+keras             # High-level API for building the NN layers easily
+joblib            # To save/load your trained scalers (vital for live trading)
+pandas-ta         # (Optional) Superior to manual calculations for creating feature datasets
+matplotlib        # For visualizing training loss/accuracy curves
+seaborn           # For correlation heatmaps (feature selection)

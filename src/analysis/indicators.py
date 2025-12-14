@@ -1,76 +1,92 @@
 import pandas as pd
-import numpy as np
+
 
 class TechnicalAnalyzer:
     """
     Advanced technical analysis engine.
-    Now includes VWAP, ADX, and Volume Profile approximations.
+    Optimized for performance with optional heavy indicator calculation.
     """
 
     @staticmethod
-    def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    def calculate_indicators(df: pd.DataFrame, heavy: bool = True) -> pd.DataFrame:
         """
         Applies technical indicators to the provided DataFrame.
+        :param heavy: If False, skips expensive calculations (Ichimoku, BB, VWAP)
         """
-        # --- Trend: EMAs ---
-        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+        # --- Trend: EMAs (Essential) ---
+        df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
+        df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
+        df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
 
-        # --- Momentum: RSI ---
-        delta = df['close'].diff()
+        # --- Momentum: RSI (Essential) ---
+        delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
-        df['rsi'] = 100 - (100 / (1 + rs))
+        df["rsi"] = 100 - (100 / (1 + rs))
 
-        # --- Trend Strength: ADX (Average Directional Index) ---
-        plus_dm = df['high'].diff()
-        minus_dm = df['low'].diff()
+        # --- Volatility: ATR (Essential) ---
+        high_low = df["high"] - df["low"]
+        high_close = (df["high"] - df["close"].shift()).abs()
+        low_close = (df["low"] - df["close"].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df["atr"] = tr.rolling(window=14).mean()
+
+        # --- Volume (Essential) ---
+        df["vol_sma"] = df["volume"].rolling(window=20).mean()
+
+        if not heavy:
+            return df.fillna(0)
+
+        # --- EXPENSIVE INDICATORS (Optional) ---
+
+        # --- MACD ---
+        ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+        ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+        df["macd"] = ema_12 - ema_26
+        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+        df["macd_hist"] = df["macd"] - df["macd_signal"]
+
+        # --- ADX (Average Directional Index) ---
+        plus_dm = df["high"].diff()
+        minus_dm = df["low"].diff()
         plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
 
-        tr = pd.concat([
-            df['high'] - df['low'],
-            abs(df['high'] - df['close'].shift(1)),
-            abs(df['low'] - df['close'].shift(1))
-        ], axis=1).max(axis=1)
-
-        atr_14 = tr.rolling(window=14).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr_14)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr_14)
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / 14).mean() / df["atr"])
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / 14).mean() / df["atr"])
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-        df['adx'] = dx.rolling(window=14).mean()
+        df["adx"] = dx.rolling(window=14).mean()
 
-        # --- Volatility: Bollinger Bands ---
-        df['sma20'] = df['close'].rolling(window=20).mean()
-        df['std20'] = df['close'].rolling(window=20).std()
-        df['bb_upper'] = df['sma20'] + (df['std20'] * 2)
-        df['bb_lower'] = df['sma20'] - (df['std20'] * 2)
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['sma20']
+        # --- Ichimoku Cloud ---
+        high_9 = df["high"].rolling(window=9).max()
+        low_9 = df["low"].rolling(window=9).min()
+        df["tenkan_sen"] = (high_9 + low_9) / 2
 
-        # --- Volume Analysis ---
-        # Volume SMA
-        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+        high_26 = df["high"].rolling(window=26).max()
+        low_26 = df["low"].rolling(window=26).min()
+        df["kijun_sen"] = (high_26 + low_26) / 2
 
-        # Delta
-        df['delta'] = np.where(df['close'] > df['open'], df['volume'], -df['volume'])
-        df['cum_delta'] = df['delta'].rolling(window=20).sum()
+        df["senkou_span_a"] = ((df["tenkan_sen"] + df["kijun_sen"]) / 2).shift(26)
+        high_52 = df["high"].rolling(window=52).max()
+        low_52 = df["low"].rolling(window=52).min()
+        df["senkou_span_b"] = ((high_52 + low_52) / 2).shift(26)
 
-        # --- Institutional: VWAP ---
-        v = df['volume']
-        tp = (df['high'] + df['low'] + df['close']) / 3
-        df['vwap'] = (tp * v).rolling(window=96).sum() / v.rolling(window=96).sum() # ~24h on 15m candles
+        # --- Bollinger Bands ---
+        df["sma20"] = df["close"].rolling(window=20).mean()
+        df["std20"] = df["close"].rolling(window=20).std()
+        df["bb_upper"] = df["sma20"] + (df["std20"] * 2)
+        df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
+        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["sma20"]
 
-        # VWAP Bands
-        vwap_std = df['close'].rolling(window=96).std()
-        df['vwap_upper'] = df['vwap'] + (vwap_std * 2)
-        df['vwap_lower'] = df['vwap'] - (vwap_std * 2)
+        # --- VWAP & Volume Profile Approximation ---
+        if "datetime" not in df.columns:
+            df["datetime"] = pd.to_datetime(df["time"], unit="s")
 
-        # Volume Profile VAH
-        df['vol_profile_vah'] = df['high'].rolling(window=50).max() # Simplified resistance zone
-
-        # --- Risk: ATR ---
-        df['atr'] = atr_14
+        df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
+        df["date_group"] = df["datetime"].dt.date
+        df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
+        df["cum_vol"] = df.groupby("date_group")["volume"].cumsum()
+        df["vwap"] = df["cum_pv"] / df["cum_vol"]
 
         return df.fillna(0)

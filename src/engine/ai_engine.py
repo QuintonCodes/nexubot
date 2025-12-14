@@ -1,376 +1,411 @@
-import os
-import pickle
 import logging
-import time
 import pandas as pd
-from typing import Dict, List, Optional
+import time
+import asyncio
+import time
+from datetime import datetime
+from typing import Dict, List, Literal, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
-from src.analysis.patterns import FakeBreakoutDetector
+from src.analysis.patterns import FakeBreakoutDetector, PatternRecognizer
+from src.data.collector import DataCollector
+from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
+from src.engine.ml_engine import NeuralPredictor
+from src.engine.strategies import StrategyAnalyzer
 from src.config import (
-    MODEL_FILE, MIN_CONFIDENCE, RISK_PER_TRADE_PCT,
-    SMALL_ACCOUNT_THRESHOLD_ZAR, MAX_SURVIVAL_CAP_PCT,
-    BROKER_SPECS, SPREAD_POINTS, HIGH_RISK_SYMBOLS,
-    PAIR_SIGNAL_COOLDOWN
+    FOREX_SYMBOLS,
+    HIGH_RISK_SYMBOLS,
+    MAX_LOT_SIZE,
+    MIN_CONFIDENCE,
+    PAIR_SIGNAL_COOLDOWN,
+    RISK_PER_TRADE_PCT,
+    SESSION_CONFIG,
 )
 
 logger = logging.getLogger(__name__)
 
+
 class AITradingEngine:
     """
-    The core brain of Nexubot.
+    Advanced Intelligence Engine.
+    Integrates Multi-Timeframe Analysis, Regime Filtering, Pattern Recognition, and Neural Networks.
     """
+
     def __init__(self):
-        self.learned_patterns = {}
+        self.strategy_analyzer = StrategyAnalyzer()
         self.fake_detector = FakeBreakoutDetector()
+        self.pattern_recognizer = PatternRecognizer()
+        self.nn_brain = NeuralPredictor()
+        self.data_collector = DataCollector()
         self.user_balance_zar = 0.0
-        self.usd_zar_rate = 18.00
         self.db_manager = None
         self.signal_history = {}
-        self.load_models()
+        self.active_features = {}
+        self.htf_cache = {}
+        self.cached_usdzar_rate = 18.00
 
-    def load_models(self) -> None:
-        if os.path.exists(MODEL_FILE):
-            try:
-                with open(MODEL_FILE, 'rb') as f:
-                    self.learned_patterns = pickle.load(f)
-                logger.info("📚 AI models loaded")
-            except Exception:
-                self.learned_patterns = {}
+        self.nn_brain.train_network()
 
-    def save_models(self) -> None:
-        try:
-            with open(MODEL_FILE, 'wb') as f:
-                pickle.dump(self.learned_patterns, f)
-            logger.info("💾 AI models saved successfully")
-        except Exception as e:
-            logger.error(f"Model save error: {e}")
+    async def _adjust_confidence(
+        self, symbol: str, signal: dict, nn_prob: float, htf_trend: Literal["BULL", "BEAR", "FLAT"]
+    ) -> Dict:
+        """Dynamic Confidence Calculation.
+        Factors:
+        1. Base Strategy Confidence (Static)
+        2. Neural Network Probability (AI)
+        3. Trend Alignment (Context)
+        4. Historical Pair Performance (Memory)"""
+        strat_conf = signal["confidence"]
 
-    def set_context(self, balance: float, rate: float, db: DatabaseManager):
-        self.user_balance_zar = balance
-        self.usd_zar_rate = rate if rate > 0 else 18.00
-        self.db_manager = db
+        # 1. Trend Alignment Bonus (Binary)
+        # If trading with the H4 trend, +10% confidence. Against it, -10%.
+        trend_bonus = 0
+        if htf_trend == "BULL":
+            trend_bonus = 10 if signal["direction"] == "LONG" else -10
+        elif htf_trend == "BEAR":
+            trend_bonus = 10 if signal["direction"] == "SHORT" else -10
 
-    async def analyze_market(self, symbol: str, klines: List) -> Optional[Dict]:
+        # 2. Historical Performance (Memory)
+        # Fetch win rate for this specific pair from DB
+        hist_win_rate = 0.5  # Default neutral
+        strat_win_rate = 0.5
+        if self.db_manager:
+            hist_win_rate = await self.db_manager.get_pair_performance(symbol)
+            strat_win_rate = await self.db_manager.get_strategy_performance(signal["strategy"])
+
+        # If strategy sucks (WR < 40%), massive penalty (-20)
+        # If strategy rules (WR > 60%), bonus (+10)
+        strat_perf_factor = 0
+        if strat_win_rate < 0.4:
+            strat_perf_factor = -20
+        elif strat_win_rate > 0.6:
+            strat_perf_factor = 10
+
+        # Scale historical factor: 0.5 (50%) -> 0 adjustment.
+        # 0.8 (80%) -> +15 adjustment. 0.2 (20%) -> -15 adjustment.
+        history_factor = (hist_win_rate - 0.5) * 50
+
+        # 3. Neural Network Weighting
+        # Map 0.0-1.0 prob to a -20 to +20 score
+        nn_factor = (nn_prob - 0.5) * 40
+
+        # --- FINAL CALCULATION ---
+        # Base (Strategy) + Trend + History + AI
+        final_conf = strat_conf + trend_bonus + history_factor + nn_factor + strat_perf_factor
+        # Clamp between 0 and 99
+        final_conf = max(0.0, min(99.9, final_conf))
+
+        signal["confidence"] = final_conf
+        return signal
+
+    def _calculate_risk_metrics(
+        self, symbol: str, signal: dict, curr: pd.Series, tick, info: dict, nn_result: dict
+    ) -> Optional[Dict]:
         """
-        Main Analysis Pipeline
+        Calculates Lot Size and Risk using Tick Value
         """
-        if self.is_on_cooldown(symbol): return None
-        if self.db_manager and await self.db_manager.check_recent_loss(symbol):
+        if self.user_balance_zar <= 0:
             return None
 
-        df = self._prepare_data(klines)
-        if df is None: return None
+        ask = tick.ask
+        bid = tick.bid
+        point = info["point"]
+        tick_value = info.get("trade_tick_value", 0)
+        min_vol = info.get("min_vol", 0.01)
+        max_vol = info.get("max_vol", 100.0)
+        atr = float(curr["atr"])
 
-        # Fakeout Detection
-        fake_analysis = self.fake_detector.analyze(df)
-        if fake_analysis['is_fake']: return None
+        tp_dist = atr * nn_result["pred_exit_atr"]
+        sl_dist = atr * 1.5
+        min_dist = point * 20
+        if sl_dist < min_dist:
+            sl_dist = min_dist
 
-        # Strategy Routing
+        if signal["signal"] == "BUY":
+            entry_price = ask
+            sl_price = ask - sl_dist
+            tp_price = ask + tp_dist
+        else:
+            entry_price = bid
+            sl_price = bid + sl_dist
+            tp_price = bid - tp_dist
+
+        # 2. Calculate Risk Amount per 1.0 Lot
+        if tick_value == 0:
+            return None
+
+        # Risk Amount per 1 Lot = (Points Diff) * Tick Value
+        # Points Diff = Distance / Point
+        points_risk = sl_dist / point
+        risk_per_lot = points_risk * tick_value
+        if risk_per_lot == 0:
+            return None
+
+        # Target Risk
+        risk_mult = nn_result["risk_mult"]
+        target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
+
+        # 3. Lot Sizing
+        lots = target_risk_zar / risk_per_lot
+
+        # Rounding
+        step = info.get("vol_step", 0.01)
+        lots = round(lots / step) * step
+        lots = max(min_vol, min(lots, max_vol, MAX_LOT_SIZE))
+
+        actual_risk_zar = risk_per_lot * lots
+
+        if actual_risk_zar > (self.user_balance_zar * 0.20):
+            logger.info(f"Filtering {symbol}: Risk R{actual_risk_zar:.2f} > 20% of Balance")
+            return None
+
+        # Profit Calculation
+        points_profit = tp_dist / point
+        profit_zar = points_profit * tick_value * lots
+
+        signal.update(
+            {
+                "price": entry_price,
+                "sl": round(sl_price, info["digits"]),
+                "tp": round(tp_price, info["digits"]),
+                "lot_size": round(lots, 2),
+                "risk_zar": round(actual_risk_zar, 2),
+                "profit_zar": round(profit_zar, 2),
+                "tick_value": tick_value,
+                "point": point,
+                "atr": atr,
+                "is_high_risk": symbol in HIGH_RISK_SYMBOLS,
+            }
+        )
+        return signal
+
+    async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> Literal["BULL", "BEAR", "FLAT"]:
+        """Fetches H4 EMA trend. Returns 'BULL', 'BEAR', or 'FLAT'."""
+
+        # Cache Check (Valid for 1 Hour)
+        now = time.time()
+        if symbol in self.htf_cache:
+            if now - self.htf_cache[symbol]["time"] < 3600:
+                return self.htf_cache[symbol]["trend"]
+
+        # Fetch New
+        klines = await provider.fetch_klines(symbol, "4h", 200)
+        trend = "FLAT"
+        if klines:
+            df = pd.DataFrame(klines)
+            ema_200 = df["close"].ewm(span=200).mean().iloc[-1]
+            if df["close"].iloc[-1] > ema_200:
+                trend = "BULL"
+            elif df["close"].iloc[-1] < ema_200:
+                trend = "BEAR"
+
+        # Save to Cache
+        self.htf_cache[symbol] = {"trend": trend, "time": now}
+        return trend
+
+    def _is_market_session_open(self, symbol: str) -> bool:
+        """
+        Checks South African Time (SAST).
+        Handles Weekends for Forex/Gold.
+        """
+        now = datetime.now()
+        day = now.weekday()  # 0=Mon, 6=Sun
+        hour = now.hour
+
+        if symbol in FOREX_SYMBOLS:
+            # Saturday (5) and Sunday (6) are closed
+            if day >= 5:
+                return False
+
+            # Optional: Friday close logic (e.g., stop after 22:00)
+            if day == 4 and hour >= 22:
+                return False
+
+            # Session Hours (e.g. 09:00 - 22:00) logic
+            start = SESSION_CONFIG["FOREX_START"]
+            end = SESSION_CONFIG["FOREX_END"]
+            return start <= hour < end
+
+        return True  # Crypto is 24/7
+
+    def _prepare_data(self, klines: List[Dict]) -> Optional[pd.DataFrame]:
+        """Prepares DataFrame with Indicators for Analysis."""
+        try:
+            df = pd.DataFrame(klines)
+            if df.empty:
+                return None
+            df = df.sort_values("time").reset_index(drop=True)
+            return TechnicalAnalyzer.calculate_indicators(df)
+        except Exception as e:
+            logger.error(f"Data prep error: {e}")
+            return None
+
+    async def analyze_market(self, symbol: str, klines: List[Dict], provider: DataProvider) -> Optional[Dict]:
+        """
+        Main Analysis Pipeline with Spread, Volatility, and Context filters.
+        """
+        # 1. Session & Cooldown
+        if not self._is_market_session_open(symbol):
+            return None
+
+        # Check cooldown OR if currently in a trade (Active Features)
+        if self.is_on_cooldown(symbol) or symbol in self.active_features:
+            return None
+
+        # Safe DB Check (Handles cancellation during shutdown)
+        try:
+            if self.db_manager and await self.db_manager.check_recent_loss(symbol):
+                return None
+        except Exception:
+            pass
+
+        # 2. Spread Check (New)
+        spread_info = await provider.get_spread(symbol)
+        if spread_info["spread_high"]:
+            logger.info(f"High Spread {symbol}: {spread_info['spread']:.1f}")
+            return None
+
+        # Data Prep
+        df = await asyncio.to_thread(self._prepare_data, klines)
+        if df is None:
+            return None
         curr = df.iloc[-1]
-        is_forex ='/' in symbol
-        potential_signal = self._evaluate_strategies(curr, df, is_forex)
 
-        if not potential_signal: return None
+        # Stale Check
+        if (time.time() - curr["time"]) > 1800:
+            return None
 
-        # Confidence & Risk
-        final_signal = await self._adjust_confidence(symbol, potential_signal)
+        # Volatility Filter (News Filter)
+        avg_atr = df["atr"].rolling(24).mean().iloc[-1]
+        if curr["atr"] > (avg_atr * 3):
+            logger.info(f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
+            self.signal_history[symbol] = time.time() + 1800  # 30 min ban
+            return None
 
-        if final_signal['confidence'] >= MIN_CONFIDENCE:
-            result = self._calculate_risk_metrics(symbol, final_signal, curr, is_forex)
-            if result:
-                self.signal_history[symbol] = time.time()
-                return result
+        # Context & Patterns
+        volatility_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
+        htf_trend = await self._get_htf_trend(symbol, provider)
+        patterns = self.pattern_recognizer.analyze_patterns(df)
+
+        # Fakeout Check
+        fake_analysis = self.fake_detector.analyze(df)
+        fake_risk_penalty = 1.0
+        if fake_analysis["risk_score"] >= 50:
+            logger.info(f"Skipping {symbol}: Fakeout ({fake_analysis['reasons']})")
+            return None
+        elif fake_analysis["risk_score"] >= 30:
+            fake_risk_penalty = 0.5  # Halve the risk for "sus" setups
+
+        # Stratey Routing
+        potential_signal = None
+        if patterns:
+            potential_signal = patterns[0]
+            potential_signal["strategy"] = f"Chart Pattern ({potential_signal['pattern']})"
+        elif symbol in FOREX_SYMBOLS:
+            potential_signal = self.strategy_analyzer.analyze_forex(curr, df, htf_trend, patterns)
+        else:
+            potential_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
+
+        if not potential_signal:
+            return None
+
+        # ML Features
+        now = datetime.now()
+        pivots = df[df["high"] == df["high"].rolling(10, center=True).max()]["high"]
+        last_pivot = pivots.iloc[-1] if not pivots.empty else curr["high"]
+        dist_to_pivot = abs(curr["close"] - last_pivot) / curr["close"]
+
+        features = {
+            "rsi": curr["rsi"],
+            "adx": curr["adx"],
+            "atr": curr["atr"],
+            "ema_dist": (curr["close"] - curr["ema_50"]) / curr["close"],
+            "bb_width": curr["bb_width"],
+            "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
+            "htf_trend": 1 if htf_trend == "BULL" else (-1 if htf_trend == "BEAR" else 0),
+            "dist_to_pivot": dist_to_pivot,
+            "hour_norm": now.hour / 24.0,
+            "day_norm": now.weekday() / 6.0,
+            "wick_ratio": (curr["high"] - curr["close"]) / (curr["high"] - curr["low"]),
+            "dist_ema200": (curr["close"] - curr["ema_200"]) / curr["close"],
+            "volatility_ratio": volatility_ratio,
+        }
+
+        # Predict
+        nn_result = self.nn_brain.predict(features)
+        if nn_result["prob"] < 0.3:
+            # Log as a "Loss" (0) so bot learns this was bad
+            self.data_collector.log_training_data(symbol, features, 0, 0.0, 0.0)
+            return None
+
+        # Confidence Adjustment
+        final_signal = await self._adjust_confidence(symbol, potential_signal, nn_result["prob"], htf_trend)
+        if final_signal["confidence"] < MIN_CONFIDENCE:
+            return None
+
+        # Apply Fakeout Penalty to Risk Multiplier
+        nn_result["risk_mult"] *= fake_risk_penalty
+
+        # Risk & Targets
+        symbol_info = await provider.get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+
+        # Get live Tick data for true Bid/Ask
+        tick = await provider.get_current_tick(symbol)
+        if not tick:
+            return None
+
+        result = self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result)
+        if result:
+            self.signal_history[symbol] = time.time()
+            self.active_features[symbol] = features
+            return result
 
         return None
-
-    def _evaluate_strategies(self, curr, df, is_forex: bool) -> Optional[Dict]:
-        """
-        Central Router: Directs data to the correct market strategy set.
-        """
-        if is_forex:
-            return self._evaluate_forex_strategies(curr, df)
-        else:
-            return self._evaluate_crypto_strategies(curr, df)
-
-    def _evaluate_crypto_strategies(self, curr, df) -> Optional[Dict]:
-        """Specific strategies for Crypto (Volatility/Volume focus)"""
-        prev = df.iloc[-2]
-        trend_direction = "LONG" if curr['close'] > curr['vwap'] else "SHORT"
-
-        # --- STRATEGY 1: Smart Trend ---
-        vwap_band_width = (curr['vwap_upper'] - curr['vwap'])
-
-        if abs(curr['close'] - curr['vwap']) > (vwap_band_width * 0.5):
-            if trend_direction == "LONG" and curr['close'] > curr['ema_200']:
-                if curr['low'] <= curr['ema_50'] and curr['close'] > curr['ema_50']:
-                    return {
-                        'strategy': 'Smart Trend',
-                        'signal': 'BUY',
-                        'direction': 'LONG',
-                        'confidence': 80.0
-                    }
-
-            elif trend_direction == "SHORT" and curr['close'] < curr['ema_200']:
-                if curr['high'] >= curr['ema_50'] and curr['close'] < curr['ema_50']:
-                    return {
-                        'strategy': 'Smart Trend',
-                        'signal': 'SELL',
-                        'direction': 'SHORT',
-                        'confidence': 80.0
-                    }
-
-        # --- Strategy 2: Vol-Squeeze (Bollinger + Volume Profile) ---
-        if curr['bb_width'] < 0.10:
-            if curr['close'] > curr['bb_upper'] and curr['cum_delta'] > 0:
-                return {
-                    'strategy': 'Vol-Squeeze',
-                    'signal': 'BUY',
-                    'direction': 'LONG',
-                    'confidence': 85.0
-                }
-
-            # Short Breakout
-            elif curr['close'] < curr['bb_lower'] and curr['cum_delta'] < 0:
-                return {
-                    'strategy': 'Vol-Squeeze',
-                    'signal': 'SELL',
-                    'direction': 'SHORT',
-                    'confidence': 85.0
-                }
-
-        # --- Strategy 3: Fair Value Return (VWAP Reversion) --
-        if curr['close'] > curr['vwap'] and curr['rsi'] > 55 and curr['adx'] > 20:
-            return {
-                'strategy': 'Crypto Momentum',
-                'signal': 'BUY',
-                'direction': 'LONG',
-                'confidence': 75.0
-            }
-
-        # Long Reversion (Price was below Bottom Band, now closing above)
-        if curr['close'] < curr['vwap'] and curr['rsi'] < 45 and curr['adx'] > 20:
-            return {
-                'strategy': 'Crypto Momentum',
-                'signal': 'SELL',
-                'direction': 'SHORT',
-                'confidence': 75.0
-            }
-
-        return None
-
-    def _evaluate_forex_strategies(self, curr, df) -> Optional[Dict]:
-        """Specific strategies for Forex (Trend/Reversion focus)"""
-        prev = df.iloc[-2]
-
-        # --- STRATEGY 1: Fair Value Reversion (Mean Reversion) ---
-        # Good for ranging forex pairs or overextended moves
-        vwap_dist = abs(curr['close'] - curr['vwap'])
-        std_dev = (curr['vwap_upper'] - curr['vwap']) / 2
-
-        if vwap_dist > (std_dev * 2.0):
-            # Price is overextended
-            # Check for reversion (closing back inside bands)
-            if prev['close'] > prev['vwap_upper'] and curr['close'] < curr['vwap_upper']:
-                return {
-                    'strategy': 'Fair Value Reversion',
-                    'signal': 'SELL',
-                    'direction': 'SHORT',
-                    'confidence': 82.0
-                }
-            if prev['close'] < prev['vwap_lower'] and curr['close'] > curr['vwap_lower']:
-                return {
-                    'strategy': 'Fair Value Reversion',
-                    'signal': 'BUY',
-                    'direction': 'LONG',
-                    'confidence': 82.0
-                }
-
-        # --- STRATEGY 2: FX Trend Flow (EMA Stack) ---
-        # Buy: Price > EMA50 > EMA200
-        if curr['close'] > curr['ema_50'] > curr['ema_200']:
-            if 50 < curr['rsi'] < 70:
-                if curr['low'] <= curr['ema_9']:
-                    return {
-                        'strategy': 'FX Trend Flow',
-                        'signal': 'BUY',
-                        'direction': 'LONG',
-                        'confidence': 80.0
-                    }
-
-        # Sell: Price < EMA50 < EMA200:
-        if curr['close'] < curr['ema_50'] < curr['ema_200']:
-             if 30 < curr['rsi'] < 50:
-                 if curr['high'] >= curr['ema_9']:
-                    return {
-                        'strategy': 'FX Trend Flow',
-                        'signal': 'SELL',
-                        'direction': 'SHORT',
-                        'confidence': 80.0
-                    }
-
-        return None
-
-    async def _adjust_confidence(self, symbol: str, signal: Dict) -> Dict:
-        """
-        Adjust confidence based on DB history and Volatility.
-        """
-        # DB History Check
-        if self.db_manager:
-            hist_win_rate = await self.db_manager.get_strategy_performance(signal['strategy'])
-            if hist_win_rate > 0.6: signal['confidence'] += 5.0
-            elif hist_win_rate < 0.4: signal['confidence'] -= 10.0
-
-        # Local Learning
-        key = f"{symbol}|{signal['strategy']}"
-        if key in self.learned_patterns:
-            data = self.learned_patterns[key]
-            if data['trades'] > 5 and (data['wins']/data['trades']) < 0.35:
-                signal['confidence'] -= 20.0
-            # Cap at 99%
-            signal['confidence'] = min(99.0, signal['confidence'])
-
-        return signal
-
-    def _calculate_risk_metrics(self, symbol: str, signal: Dict, curr, is_forex: bool) -> Optional[Dict]:
-        """
-        Calculates Lot Size, SL/TP Prices, and Risk/Reward in ZAR.
-        """
-        # 1. Asset Specs & Spreads
-        default_spec = {'contract_size': 1, 'digits': 2, 'min_vol': 0.01, 'max_vol': 100.0, 'stop_level': 0, 'commission_per_lot': 0}
-        spec = BROKER_SPECS.get(symbol, default_spec)
-
-        contract_size = spec['contract_size']
-        decimals = spec['digits']
-        min_vol = spec['min_vol']
-        max_vol = spec['max_vol']
-        stop_level_points = spec['stop_level']
-        comm_per_lot = spec['commission_per_lot']
-
-        point = 1 / (10 ** decimals)
-
-        # 2. Get Spread (In Points)
-        spread_points = SPREAD_POINTS.get(symbol, 20)
-        spread_val_usd = spread_points * point # Price difference
-
-        close_price = float(curr['close'])
-
-        # 3. Entry Price (Simulating Bid/Ask with Spread)
-        if signal['signal'] == 'BUY':
-            entry_price = close_price + spread_val_usd # Ask
-        else:
-            entry_price = close_price # Bid
-
-        # 4. Stop Loss Calculation (ATR Based)
-        atr = float(curr['atr'])
-        if atr == 0: return None
-
-        sl_mult = 1.5 if is_forex else 2.0
-        raw_sl_dist = atr * sl_mult
-
-        # Enforce Minimum Stop Level
-        min_sl_dist = stop_level_points * point
-        sl_dist = max(raw_sl_dist, min_sl_dist * 1.1) # 10% buffer above stop level
-
-        if signal['signal'] == 'BUY':
-            sl_price = entry_price - sl_dist
-            tp_price = entry_price + (sl_dist * 1.5)
-        else:
-            sl_price = entry_price + sl_dist
-            tp_price = entry_price - (sl_dist * 1.5)
-
-        # 5. Lot Sizing (Risk Based)
-        risk_per_trade_zar = self.user_balance_zar * (RISK_PER_TRADE_PCT / 100)
-        risk_per_trade_usd = risk_per_trade_zar / self.usd_zar_rate
-
-        dist_to_sl = abs(entry_price - sl_price)
-        if dist_to_sl == 0: return None
-
-        # Formula: Risk = (Dist * Contract * Lots)
-        raw_lots = risk_per_trade_usd / (contract_size * dist_to_sl)
-
-        # 6. Apply Volume Limits
-        lots = max(min_vol, min(raw_lots, max_vol))
-
-        # Rounding (Forex 2 decimals, Crypto might differ but HFM standardizes volume step usually)
-        # HFM Vol Step is usually 0.01 or 1.0 depending on Min Vol.
-        if min_vol >= 1.0:
-            lots = round(lots, 0) # Integer lots (e.g., 1, 2, 3)
-        else:
-            lots = round(lots, 2) # Fractional lots (e.g., 0.01)
-
-        # 7. Recalculate Actual Risk
-        actual_risk_usd = lots * contract_size * dist_to_sl
-        actual_risk_zar = actual_risk_usd * self.usd_zar_rate
-
-        # 8. Cost Calculation (Spread + Commission)
-        # Spread Cost = (SpreadPriceDiff * Contract * Lots)
-        spread_cost_usd = spread_val_usd * contract_size * lots
-        # Comm Cost = CommPerLot * Lots
-        comm_cost_usd = comm_per_lot * lots
-
-        total_cost_usd = spread_cost_usd + comm_cost_usd
-        total_cost_zar = total_cost_usd * self.usd_zar_rate
-
-        # 9. Small Account / Survival Logic
-        survival_cap_zar = self.user_balance_zar * (MAX_SURVIVAL_CAP_PCT / 100)
-        is_forced_trade = False
-
-        # Small Account Logic
-        if actual_risk_zar > risk_per_trade_zar:
-            if self.user_balance_zar < SMALL_ACCOUNT_THRESHOLD_ZAR:
-                if actual_risk_zar <= survival_cap_zar:
-                    is_forced_trade = True
-                else:
-                    return None # Risk > 15% of account
-            else:
-                if lots == min_vol:
-                    return None
-                else:
-                    pass
-
-        # 10. Profit Est
-        profit_usd = (sl_dist * 1.5) * lots * contract_size
-        profit_zar = profit_usd * self.usd_zar_rate
-
-        signal.update({
-            'price': round(entry_price, decimals),
-            'sl': round(sl_price, decimals),
-            'tp': round(tp_price, decimals),
-            'lot_size': lots,
-            'risk_zar': round(actual_risk_zar, 2),
-            'profit_zar': round(profit_zar, 2),
-            'spread_cost_zar': round(total_cost_zar, 2),
-            'is_high_risk': symbol in HIGH_RISK_SYMBOLS,
-            'is_small_account_boost': is_forced_trade
-        })
-        return signal
 
     def is_on_cooldown(self, symbol: str) -> bool:
+        """Checks if a symbol is on cooldown from last signal."""
         last_time = self.signal_history.get(symbol, 0)
         return (time.time() - last_time) < PAIR_SIGNAL_COOLDOWN
 
-    def _prepare_data(self, klines: List) -> Optional[pd.DataFrame]:
-        try:
-            df = pd.DataFrame(klines)
-            if df.empty: return None
-            df = df.sort_values('time').reset_index(drop=True)
-            return TechnicalAnalyzer.calculate_indicators(df)
-        except Exception:
-            return None
-
-    def learn(self, symbol: str, strategy_name: str, won: bool, pnl_amount: float) -> None:
+    def rank_symbols_by_volatility(self, symbols: List[str], data_map: Dict[str, pd.DataFrame]) -> List[str]:
         """
-        Records trade outcome.
+        Sorts symbols by ATR (Volatility).
         """
-        key = f"{symbol}|{strategy_name}"
-        if key not in self.learned_patterns:
-            self.learned_patterns[key] = {
-                'wins': 0, 'trades': 0, 'pnl_accumulated': 0.0
-            }
+        scored = []
+        for sym in symbols:
+            if sym in data_map:
+                df = data_map[sym]
+                if not df.empty and "atr" in df.columns:
+                    atr_pct = (df.iloc[-1]["atr"] / df.iloc[-1]["close"]) * 100
+                    scored.append((sym, atr_pct))
 
-        self.learned_patterns[key]['trades'] += 1
-        self.learned_patterns[key]['pnl_accumulated'] += pnl_amount
-        if won: self.learned_patterns[key]['wins'] += 1
-        self.save_models()
+        # Sort descending (Highest Volatility first)
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [s[0] for s in scored]
+
+    def record_trade_outcome(self, symbol: str, won: bool, pnl: float, excursion: float = 0.0):
+        """Called by Console after trade finishes."""
+        # 1. Update Learning
+        # 2. Log Data for ML
+        if symbol in self.active_features:
+            self.data_collector.log_training_data(symbol, self.active_features[symbol], 1 if won else 0, pnl, excursion)
+            del self.active_features[symbol]
+
+    def register_active_trade(self, symbol: str):
+        """Manually marks a symbol as active (used during recovery)."""
+        # We place a placeholder dict so analyze_market skips this symbol
+        if symbol not in self.active_features:
+            self.active_features[symbol] = {}
+
+    def set_context(self, balance: float, db: DatabaseManager):
+        """Sets user balance and database manager."""
+        self.user_balance_zar = balance
+        self.db_manager = db
+
+    def update_usdzar_rate(self, rate: float):
+        """Updates cached USDZAR rate for Forex calculations."""
+        if rate and rate > 10:
+            self.cached_usdzar_rate = rate
