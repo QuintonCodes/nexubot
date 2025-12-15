@@ -23,10 +23,8 @@ env/
 *.pkl
 
 # Neural network models
-models/
 *.h5
 *.keras
 
 # Data files
-data/
 *.csv

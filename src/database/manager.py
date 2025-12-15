@@ -211,13 +211,17 @@ class DatabaseManager:
         """
         if not self.engine:
             return 0.5
-        async with self.async_session() as session:
-            stmt = select(TradeResult.result).where(TradeResult.symbol == symbol)
-            result = await session.execute(stmt)
-            results = result.scalars().all()
-            if len(results) < 10:  # Insufficient data
-                return 0.5
-            return sum(results) / len(results)
+        try:
+            async with self.async_session() as session:
+                stmt = select(TradeResult.result).where(TradeResult.symbol == symbol)
+                result = await session.execute(stmt)
+                results = result.scalars().all()
+                if len(results) < 10:  # Insufficient data
+                    return 0.5
+                return sum(results) / len(results)
+        except Exception as e:
+            logger.warning(f"DB Error getting performance for {symbol}: {e}")
+            return 0.5
 
     async def cleanup_db(self):
         """Removes logs older than 30 days."""

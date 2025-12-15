@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.5 (HFM ZAR Optimized)"
+VERSION = "v1.2.1"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -27,15 +27,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # MARKET SELECTION
 # ---------------------------------------------------------
 CRYPTO_SYMBOLS: list[str] = [
-    "BTCUSD",
-    "ETHUSD",
-    "BNBUSD",
-    "XRPUSD",
-    "TRXUSD",
+    "#BTCUSD",
+    "#ETHUSD",
+    "#BNBUSD",
+    "#XRPUSD",
+    "#TRXUSD",
 ]
 
 # slow scan (credit conservation)
-FOREX_SYMBOLS: list[str] = ["GBPJPY", "USDJPY", "EURUSD", "AUDUSD", "XAUUSD", "USDZAR"]
+FOREX_SYMBOLS: list[str] = ["GBPJPY", "USDJPY", "EURUSD", "AUDUSD", "XAUUSD"]
 
 # Combined for internal use
 ALL_SYMBOLS = CRYPTO_SYMBOLS + FOREX_SYMBOLS

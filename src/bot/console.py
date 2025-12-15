@@ -64,6 +64,80 @@ class NexubotConsole:
             if info:
                 self.symbol_digits[sym] = info.get("digits", 5)
 
+    async def _verify_offline_outcome(self, symbol: str, signal: dict, start_time: float):
+        """
+        Checks if a trade that expired while offline actually hit TP/SL.
+        """
+        print(f"{MAGENTA}Checking offline outcome for {symbol}...{RESET}")
+
+        # Fetch candles covering the downtime
+        duration_candles = 20  # Approx 5 hours of M15 data
+        klines = await self.provider.fetch_klines(symbol, TIMEFRAME, duration_candles)
+
+        if not klines:
+            await self.db.delete_active_trade(symbol)
+            return
+
+        sl = signal["sl"]
+        tp = signal["tp"]
+        is_long = signal["direction"] == "LONG"
+        outcome = "TIMEOUT (Offline)"
+        pnl = 0.0
+
+        for k in klines:
+            if k["time"] < start_time:
+                continue  # Skip old candles
+
+            # Check Low for SL (Long) / High for SL (Short)
+            if is_long:
+                if k["low"] <= sl:
+                    outcome = "LOSS (SL Offline)"
+                    pnl = -signal["risk_zar"]
+                    break
+                if k["high"] >= tp:
+                    outcome = "WIN (TP Offline)"
+                    pnl = signal["profit_zar"]
+                    break
+            else:
+                if k["high"] >= sl:
+                    outcome = "LOSS (SL Offline)"
+                    pnl = -signal["risk_zar"]
+                    break
+                if k["low"] <= tp:
+                    outcome = "WIN (TP Offline)"
+                    pnl = signal["profit_zar"]
+                    break
+
+        # Log to Console
+        color = GREEN if pnl > 0 else RED
+        print(f"{BOLD}🔔 Offline Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{pnl:.2f}{RESET}")
+
+        # Log to DB
+        won = pnl > 0
+        await self.db.log_trade(
+            {
+                "id": f"{symbol}_OFFLINE_{int(time.time())}",
+                "symbol": symbol,
+                "signal": signal["signal"],
+                "confidence": signal["confidence"],
+                "entry": signal["price"],
+                "exit": tp if won else sl,
+                "won": won,
+                "pnl": pnl,
+                "strategy": signal["strategy"] + " (Offline)",
+            }
+        )
+
+        # Update Stats
+        if won:
+            self.stats["wins"] += 1
+        else:
+            self.stats["loss"] += 1
+        self.stats["total"] += 1
+        self.stats["pnl_zar"] += pnl
+
+        await self.db.delete_active_trade(symbol)
+
     def display_signal(self, symbol: str, signal: dict):
         """Displays a formatted trading signal in the console."""
         sys.stdout.write(f"\r{' ' *50}\r")
@@ -150,6 +224,7 @@ class NexubotConsole:
         # Restore active trades
         print(f"{YELLOW}🔄 Checking for interrupted trades...{RESET}")
         active_trades = await self.db.get_active_trades()
+
         if active_trades:
             print(f"{CYAN}Found {len(active_trades)} active trades. Resuming monitoring...{RESET}")
             for symbol, signal, start_time in active_trades:
@@ -157,18 +232,14 @@ class NexubotConsole:
                 self.ai_engine.register_active_trade(symbol)
 
                 elapsed = time.time() - start_time
-                remaining = 3600 - elapsed
+                remaining = 14400 - elapsed  # 4 Hours
                 if remaining > 0:
+                    print(f"Resuming {symbol} (Time remaining: {remaining/60:.0f}m)")
                     task = asyncio.create_task(self.verify_trade_realtime(symbol, signal, resume_start_time=start_time))
                     self.tasks.add(task)
                 else:
                     # Expired while offline
                     await self.db.delete_active_trade(symbol)
-
-        usdzar = await self.provider.get_latest_price("USDZAR")
-        if usdzar:
-            self.ai_engine.update_usdzar_rate(usdzar)
-            print(f"💱 Current USD/ZAR Rate: {YELLOW}{usdzar:.2f}{RESET}")
 
         print(f"{YELLOW}📊 Ranking pairs by volatility...{RESET}")
         await self.scan_loop()
@@ -186,12 +257,6 @@ class NexubotConsole:
         try:
             while self.running:
                 now = time.time()
-
-                # Update USDZAR occasionally (every 5 mins)
-                if now % 300 < 2:
-                    rate = await self.provider.get_latest_price("USDZAR")
-                    if rate:
-                        self.ai_engine.update_usdzar_rate(rate)
 
                 if now - last_sort_time > 900:
                     active_crypto = await self.sort_pairs(active_crypto)
@@ -225,7 +290,7 @@ class NexubotConsole:
             # Quick fetch
             k = await self.provider.fetch_klines(sym, TIMEFRAME, 100)
             if k:
-                df = self.ai_engine._prepare_data(k)
+                df = self.ai_engine._prepare_data(k, heavy=False)
                 if df is not None:
                     data_map[sym] = df
 
@@ -277,7 +342,7 @@ class NexubotConsole:
         tick_value = signal.get("tick_value", 0.0)
         point = signal.get("point", 0.00001)
 
-        duration = 3600  # 1 Hour Max Duration (Safety)
+        duration = 14400  # 4 hours
         interval = 1  # Check every second
         start_time = resume_start_time if resume_start_time else time.time()
 

@@ -9,7 +9,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 from src.data.provider import DataProvider
 from src.analysis.indicators import TechnicalAnalyzer
 from src.engine.strategies import StrategyAnalyzer
-from src.config import ALL_SYMBOLS, DATA_FILE
+from src.config import ALL_SYMBOLS, DATA_FILE, FOREX_SYMBOLS
 
 
 def log_backfill_data(features: dict, won: bool, pnl: float, excursion: float):
@@ -22,27 +22,54 @@ def log_backfill_data(features: dict, won: bool, pnl: float, excursion: float):
 
 
 async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnalyzer) -> int:
-    """Processes a single symbol for backfilling data."""
+    """Processes a single symbol for backfilling data with MTF logic."""
     print(f"📥 Processing {symbol}...")
-    klines = await provider.fetch_klines(symbol, "15m", 5000)
 
-    if not klines:
+    # 1. Fetch Lower Timeframe Data (15m) (Execution)
+    klines_m15 = await provider.fetch_klines(symbol, "15m", 5000)
+    if not klines_m15:
         return 0
 
-    df = pd.DataFrame(klines)
-    df = TechnicalAnalyzer.calculate_indicators(df, heavy=True)
+    df_m15 = pd.DataFrame(klines_m15)
+    df_m15 = TechnicalAnalyzer.calculate_indicators(df_m15, heavy=True)
+
+    # 2. Fetch Higher Timeframe (Trend)
+    # Use H4 for Forex, H1 for Crypto
+    htf_tf = "4h" if symbol in FOREX_SYMBOLS else "1h"
+    klines_htf = await provider.fetch_klines(symbol, htf_tf, 1000)  # Less candles needed for HTF
+
+    if not klines_htf:
+        print(f"⚠️ Missing HTF data for {symbol}")
+        return 0
+
+    df_htf = pd.DataFrame(klines_htf)
+    # Calculate simple EMA trend for HTF
+    df_htf["htf_ema_200"] = df_htf["close"].ewm(span=200).mean()
+    df_htf["htf_trend_val"] = df_htf.apply(
+        lambda x: 1 if x["close"] > x["htf_ema_200"] else (-1 if x["close"] < x["htf_ema_200"] else 0), axis=1
+    )
+
+    # Keep only time and trend columns to merge
+    df_htf = df_htf[["time", "htf_trend_val"]].sort_values("time")
+
+    # 3. Merge HTF Data into M15 Data
+    # 'merge_asof' finds the last known H4 candle for each M15 candle
+    df_m15 = df_m15.sort_values("time")
+    df_merged = pd.merge_asof(df_m15, df_htf, on="time", direction="backward")  # Look for the closest PAST H4 candle
 
     processed = 0
-    # Calculate Avg ATR for Volatility Ratio
-    df["avg_atr"] = df["atr"].rolling(24).mean()
+    df_merged["avg_atr"] = df_merged["atr"].rolling(24).mean()
 
-    for i in range(200, len(df) - 20):
-        curr = df.iloc[i]
+    # Skip first 200 candles (warmup)
+    for i in range(200, len(df_merged) - 20):
+        curr = df_merged.iloc[i]
 
-        # 1. Feature Extraction (Replicating ai_engine)
-        # Pivot Calc
-        window_slice = df.iloc[i - 20 : i]
-        pivot_high = window_slice["high"].max()
+        # Determine HTF Trend string for Strategy Analyzer
+        trend_val = curr["htf_trend_val"]
+        htf_trend_str = "BULL" if trend_val == 1 else ("BEAR" if trend_val == -1 else "FLAT")
+
+        # 1. Feature Extraction
+        pivot_high = df_merged.iloc[i - 20 : i]["high"].max()
         dist_to_pivot = abs(curr["close"] - pivot_high) / curr["close"]
         range_len = curr["high"] - curr["low"]
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0
@@ -55,7 +82,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             "ema_dist": (curr["close"] - curr["ema_50"]) / curr["close"],
             "bb_width": curr["bb_width"],
             "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
-            "htf_trend": 0,
+            "htf_trend": trend_val,
             "dist_to_pivot": dist_to_pivot,
             "hour_norm": 0.5,
             "day_norm": 0.5,
@@ -65,14 +92,12 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         }
 
         # 2. Check Strategy
-        # We assume FLAT htf_trend for backfill simplicity, or calculate it
         signal = None
 
-        # Quick check to speed up (Strategies require pattern lists, passing empty)
-        if "USD" in symbol or "JPY" in symbol:
-            signal = analyzer.analyze_forex(curr, df.iloc[: i + 1], "FLAT", [])
+        if symbol in FOREX_SYMBOLS:
+            signal = analyzer.analyze_forex(curr, df_merged.iloc[: i + 1], htf_trend_str, [])
         else:
-            signal = analyzer.analyze_crypto(curr, df.iloc[: i + 1], [])
+            signal = analyzer.analyze_crypto(curr, df_merged.iloc[: i + 1], [])
 
         if signal:
             # 3. Simulate Outcome (Max Excursion)
@@ -81,8 +106,10 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             atr = curr["atr"]
             sl_dist = atr * 1.5
 
-            # Look forward 40 candles
-            future = df.iloc[i + 1 : i + 41]
+            # Ensure this matches your Live Bot duration (e.g., 4 hours = 16 candles)
+            lookahead_candles = 16
+            future = df_merged.iloc[i + 1 : i + 1 + lookahead_candles]
+
             won = False
             max_atr_gain = 0.0
 

@@ -28,6 +28,13 @@ class DataProvider:
     def _sync_connect(self) -> bool:
         """Synchronous MT5 Connection with Retries."""
         try:
+            if mt5.terminal_info() is not None:
+                if self.connected:
+                    return True
+                else:
+                    # It's open but we need to verify login
+                    self.connected = True
+
             # 1. Validate Path
             if not os.path.exists(self._path):
                 logger.error(f"❌ MT5 Path not found: {self._path}")

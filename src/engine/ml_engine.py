@@ -163,9 +163,6 @@ class NeuralPredictor:
     def predict(self, features: dict) -> Dict[str, float]:
         """
         Predicts entry probability, risk multiplier, and exit ATR multiple.
-        1. Entry Probability: 0.0 to 1.0
-        2. Risk Multiplier: 0.5 (Low), 1.0 (Standard), 2.0 (High)
-        3. Predicted Exit ATR Multiple: 1.0 to 6.0
         """
         if not self.is_ready or self.entry_model is None:
             return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}
@@ -176,19 +173,19 @@ class NeuralPredictor:
             df_input = pd.DataFrame(data)
             X_new = self.scaler.transform(df_input)
 
-            prob = float(self.model.predict(X_new, verbose=0)[0][0])
+            prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
 
             # Exit Prediction (Default to 2.0 ATR if model is missing or error)
             pred_exit_atr = 2.0
             if self.exit_model:
                 raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
-                pred_exit_atr = max(1.0, min(raw_exit, 6.0))  # Clamp between 1x and 6x ATR
+                pred_exit_atr = max(1.5, min(raw_exit, 4.0))
 
             # Dynamic Risk Sizing
             risk_mult = 0.5  # Base Low
-            if prob > 0.8:
+            if prob > 0.85:
                 risk_mult = 2.0  # High Conviction
-            elif prob > 0.6:
+            elif prob > 0.65:
                 risk_mult = 1.0  # Standard
 
             return {"prob": prob, "risk_mult": risk_mult, "pred_exit_atr": pred_exit_atr}
