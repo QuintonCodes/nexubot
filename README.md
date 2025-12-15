@@ -1,6 +1,6 @@
 # 🚀 Nexubot: Institutional-Grade AI Trading System
 
-![Version](https://img.shields.io/badge/version-v1.5.0-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
+![Version](https://img.shields.io/badge/version-v1.2.1-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
 
 **Nexubot** is an advanced algorithmic trading engine designed for the **HFMarkets (HFM)** ecosystem. Unlike standard bots that rely solely on indicators, Nexubot utilizes a **Confluence Engine** that fuses Technical Strategies, Chart Pattern Recognition, and Neural Network (ML) validation to generate high-probability trade signals on the M15 timeframe.
 
