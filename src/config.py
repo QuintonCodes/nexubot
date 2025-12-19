@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.2.1"
+VERSION = "v1.3.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -39,15 +39,21 @@ FOREX_SYMBOLS: list[str] = ["GBPJPY", "USDJPY", "EURUSD", "AUDUSD", "XAUUSD"]
 
 # Combined for internal use
 ALL_SYMBOLS = CRYPTO_SYMBOLS + FOREX_SYMBOLS
-HIGH_RISK_SYMBOLS: list[str] = ["XRPUSD", "TRXUSD", "XAU/USD", "GBPJPY"]
+HIGH_RISK_SYMBOLS: list[str] = ["#XRPUSD", "#TRXUSD", "XAUUSD", "GBPJPY"]
 
 # ---------------------------------------------------------
-# TRADING SESSIONS (South Africa / GMT +2)
+# SESSION & TIME FILTERS (SAST)
 # ---------------------------------------------------------
 SESSION_CONFIG = {
-    "FOREX_START": 9,  # 09:00 SAST (London Open is 10:00 SAST in winter, 09:00 summer)
-    "FOREX_END": 22,  # 22:00 SAST (NY Close area)
-    "CRYPTO": "24/7",
+    "ASIAN_START": 0,  # 00:00
+    "ASIAN_END": 7,  # 07:00 (Mean Reversion Only)
+    "PRE_LONDON_START": 7,
+    "PRE_LONDON_END": 9,  # 07:00-09:00 (No Trading / Trap Zone)
+    "LONDON_START": 9,  # 09:00 (Trend Start)
+    "LONDON_END": 12,  # 12:00
+    "NY_START": 15,  # 15:00
+    "NY_END": 19,  # 19:00
+    "NO_VOLATILITY_HOUR": 13,  # 13:00 SAST (Block Volatility Breakouts)
 }
 
 # ---------------------------------------------------------
@@ -56,6 +62,8 @@ SESSION_CONFIG = {
 TIMEFRAME = "M15"
 CANDLE_LIMIT = 500
 MIN_CONFIDENCE = 70.0
+CHOP_THRESHOLD_TREND = 38.2
+CHOP_THRESHOLD_RANGE = 61.8
 
 # ---------------------------------------------------------
 # RISK MANAGEMENT (ZAR ACCOUNT)

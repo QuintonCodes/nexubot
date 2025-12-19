@@ -119,8 +119,8 @@ class StrategyAnalyzer:
         Strategy 2: Bollinger Mean Reversion
         Logic: Fade moves at the edges of a RANGING market.
         """
-        # Essential: ADX must be LOW (< 20) to confirm a Range
-        if curr["adx"] > 20:
+        # Essential: ADX must be LOW (< 25) to confirm a Range
+        if curr["adx"] > 25:
             return None
 
         # Buy: Price touches Lower BB + RSI Oversold (< 30)

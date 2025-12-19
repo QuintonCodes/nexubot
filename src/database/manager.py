@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 import re
@@ -72,12 +73,24 @@ class DatabaseManager:
         """Creates tables if they don't exist"""
         if not self.engine:
             return
-        try:
-            async with self.engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("✅ DB Connected")
-        except Exception as e:
-            logger.error(f"DB Init Failed: {e}")
+
+        retries = 5
+        delay = 5
+
+        for attempt in range(retries):
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                logger.info("✅ DB Connected")
+                return
+            except Exception as e:
+                logger.warning(f"⚠️ DB Connection failed (Attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "❌ DB Connection failed after max retries. Continuing without DB persistence (Session only)."
+                    )
 
     async def save_active_trade(self, symbol: str, signal: dict):
         """Saves an active trade to DB"""
@@ -85,9 +98,7 @@ class DatabaseManager:
             return
         async with self.async_session() as session:
             try:
-                # Upsert logic
                 await session.execute(delete(ActiveTrade).where(ActiveTrade.symbol == symbol))
-
                 trade = ActiveTrade(symbol=symbol, signal_json=json.dumps(signal), start_time=time.time())
                 session.add(trade)
                 await session.commit()
@@ -187,22 +198,6 @@ class DatabaseManager:
                 return result.scalars().first() is not None
             except Exception:
                 return False
-
-    async def get_strategy_performance(self, strategy_name: str) -> float:
-        """Returns the win rate (0.0 to 1.0) of a specific strategy from DB."""
-        if not self.engine:
-            return 0.5
-        async with self.async_session() as session:
-            try:
-                stmt = select(TradeResult.result).where(TradeResult.strategy == strategy_name)
-                result = await session.execute(stmt)
-                results = result.scalars().all()
-
-                if not results or len(results) < 5:
-                    return 0.5  # Neutral if no data
-                return sum(results) / len(results)
-            except Exception:
-                return 0.5
 
     async def get_pair_performance(self, symbol: str) -> float:
         """

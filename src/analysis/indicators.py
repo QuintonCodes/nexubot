@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 
@@ -11,12 +12,15 @@ class TechnicalAnalyzer:
     def calculate_indicators(df: pd.DataFrame, heavy: bool = True) -> pd.DataFrame:
         """
         Applies technical indicators to the provided DataFrame.
-        :param heavy: If False, skips expensive calculations (Ichimoku, BB, VWAP)
         """
         # --- Trend: EMAs (Essential) ---
         df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
         df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
         df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
+
+        # --- Trend Slope (EMA 200) ---
+        # Calculate angle/slope over last 5 periods
+        df["ema_200_slope"] = df["ema_200"].diff(5)
 
         # --- Momentum: RSI (Essential) ---
         delta = df["close"].diff()
@@ -40,6 +44,21 @@ class TechnicalAnalyzer:
 
         # --- EXPENSIVE INDICATORS (Optional) ---
 
+        # --- CHOPPINESS INDEX (CI) ---
+        # CI = 100 * LOG10( SUM(ATR(1), n) / ( MaxHi(n) - MinLo(n) ) ) / LOG10(n)
+        ci_period = 14
+        df["atr_sum"] = df["atr"].rolling(window=ci_period).sum()  # Approximation using ATR
+        # Better formula using True Range Sum:
+        df["tr_sum"] = tr.rolling(window=ci_period).sum()
+        df["hh_n"] = df["high"].rolling(window=ci_period).max()
+        df["ll_n"] = df["low"].rolling(window=ci_period).min()
+
+        # Avoid division by zero
+        range_n = df["hh_n"] - df["ll_n"]
+        range_n = range_n.replace(0, 0.00001)
+
+        df["chop_idx"] = 100 * np.log10(df["tr_sum"] / range_n) / np.log10(ci_period)
+
         # --- MACD ---
         ema_12 = df["close"].ewm(span=12, adjust=False).mean()
         ema_26 = df["close"].ewm(span=26, adjust=False).mean()
@@ -52,7 +71,6 @@ class TechnicalAnalyzer:
         minus_dm = df["low"].diff()
         plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-
         plus_di = 100 * (plus_dm.ewm(alpha=1 / 14).mean() / df["atr"])
         minus_di = 100 * (minus_dm.ewm(alpha=1 / 14).mean() / df["atr"])
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
@@ -62,11 +80,9 @@ class TechnicalAnalyzer:
         high_9 = df["high"].rolling(window=9).max()
         low_9 = df["low"].rolling(window=9).min()
         df["tenkan_sen"] = (high_9 + low_9) / 2
-
         high_26 = df["high"].rolling(window=26).max()
         low_26 = df["low"].rolling(window=26).min()
         df["kijun_sen"] = (high_26 + low_26) / 2
-
         df["senkou_span_a"] = ((df["tenkan_sen"] + df["kijun_sen"]) / 2).shift(26)
         high_52 = df["high"].rolling(window=52).max()
         low_52 = df["low"].rolling(window=52).min()
@@ -79,14 +95,19 @@ class TechnicalAnalyzer:
         df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
         df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["sma20"]
 
+        # Check if BB is flat (using derivative of SMA20)
+        df["bb_slope"] = df["sma20"].diff(3).abs()
+
         # --- VWAP & Volume Profile Approximation ---
         if "datetime" not in df.columns:
-            df["datetime"] = pd.to_datetime(df["time"], unit="s")
+            if "time" in df.columns:
+                df["datetime"] = pd.to_datetime(df["time"], unit="s")
 
-        df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
-        df["date_group"] = df["datetime"].dt.date
-        df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
-        df["cum_vol"] = df.groupby("date_group")["volume"].cumsum()
-        df["vwap"] = df["cum_pv"] / df["cum_vol"]
+        if "datetime" in df.columns:
+            df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
+            df["date_group"] = df["datetime"].dt.date
+            df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
+            df["cum_vol"] = df.groupby("date_group")["volume"].cumsum()
+            df["vwap"] = df["cum_pv"] / df["cum_vol"]
 
         return df.fillna(0)

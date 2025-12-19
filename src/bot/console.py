@@ -47,7 +47,7 @@ class NexubotConsole:
         self.running = False
         self.last_global_signal_time = 0
         self.session_id = f"SESSION_{int(time.time())}"
-        self.tasks = set()  # Track running tasks
+        self.tasks = set()
         self.stats = {
             "wins": 0,
             "loss": 0,
@@ -209,6 +209,10 @@ class NexubotConsole:
         # Init DB
         await self.db.init_database()
 
+        # CLEANUP OLD LOGS
+        print(f"{YELLOW}🧹 Cleaning old database records...{RESET}")
+        await self.db.cleanup_db()
+
         # Init MT5 via Provider
         print(f"✅ {WHITE}Account Set: {GREEN}R{DEFAULT_BALANCE_ZAR:.2f}{RESET}")
         self.ai_engine.set_context(DEFAULT_BALANCE_ZAR, self.db)
@@ -342,14 +346,17 @@ class NexubotConsole:
         tick_value = signal.get("tick_value", 0.0)
         point = signal.get("point", 0.00001)
 
+        # Order Management
+        order_type = signal.get("order_type", "MARKET")
+        is_filled = order_type == "MARKET"
+        sl_moved_to_be = False
+
         duration = 14400  # 4 hours
-        interval = 1  # Check every second
         start_time = resume_start_time if resume_start_time else time.time()
+        interval = 1  # Check every second
 
         outcome = "TIMEOUT"
         final_pnl = 0.0
-
-        # Max ATR multiple reached during trade
         max_favorable_dist = 0.0
 
         try:
@@ -367,51 +374,80 @@ class NexubotConsole:
                 current_bid = tick.bid
                 current_ask = tick.ask
 
-                # Track Max Excursion
+                # --- 1. GHOST ORDER LOGIC (WAIT FOR FILL) ---
+                if not is_filled:
+                    if is_long:
+                        if current_ask <= entry:  # Ask price hits entry
+                            is_filled = True
+                            print(f"{YELLOW}⚡ {symbol} Ghost Limit BUY Filled at {entry}{RESET}")
+                    else:
+                        if current_bid >= entry:  # Bid price hits entry
+                            is_filled = True
+                            print(f"{YELLOW}⚡ {symbol} Ghost Limit SELL Filled at {entry}{RESET}")
+
+                    # If price moves away by 2 ATR without filling, cancel
+                    dist_away = (current_ask - entry) if is_long else (entry - current_bid)
+                    if dist_away > (atr * 2):
+                        outcome = "CANCELLED (Runaway)"
+                        break
+
+                    await asyncio.sleep(interval)
+                    continue
+
+                # --- 2. TRADE MONITORING (FILLED) ---
                 if is_long:
                     # Favorable direction is Up (Bid)
                     dist = current_bid - entry
                     if dist > max_favorable_dist:
                         max_favorable_dist = dist
 
-                    # Stop Loss
+                    # SL Logic (Sell at Bid)
                     if current_bid <= sl:
                         outcome = "LOSS (SL Hit)"
-                        points_lost = (entry - sl) / point
-                        # Loss is negative
-                        final_pnl = -(points_lost * tick_value * lot_size)
+                        points_lost = (sl - entry) / point
+                        final_pnl = points_lost * tick_value * lot_size
                         break
-                    # Take Profit
+                    # TP Logic (Sell at Bid)
                     elif current_bid >= tp:
                         outcome = "WIN (TP Hit)"
                         points_won = (tp - entry) / point
                         final_pnl = points_won * tick_value * lot_size
                         break
+                    # Breakeven Logic (Move SL to Entry + 2 pips if > 1 ATR profit)
+                    if not sl_moved_to_be and max_favorable_dist > atr:
+                        sl = entry + (20 * point)  # Secure spread costs
+                        sl_moved_to_be = True
+                        print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
                 else:  # Short
                     # Favorable direction is Down (Ask)
                     dist = entry - current_ask
                     if dist > max_favorable_dist:
                         max_favorable_dist = dist
-                    # Stop Loss
+
+                    # SL Logic (Buy at Ask)
                     if current_ask >= sl:
                         outcome = "LOSS (SL Hit)"
-                        points_lost = (sl - entry) / point
-                        # Loss is negative
-                        final_pnl = -(points_lost * tick_value * lot_size)
+                        points_lost = (entry - sl) / point
+                        final_pnl = points_lost * tick_value * lot_size
                         break
-                    # Take Profit
+                    # TP Logic (Buy at Ask)
                     elif current_ask <= tp:
                         outcome = "WIN (TP Hit)"
                         points_won = (entry - tp) / point
                         final_pnl = points_won * tick_value * lot_size
                         break
 
+                    if not sl_moved_to_be and max_favorable_dist > atr:
+                        sl = entry - (20 * point)
+                        sl_moved_to_be = True
+                        print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
+
                 await asyncio.sleep(interval)
 
             # Cleanup Persistence
             await self.db.delete_active_trade(symbol)
 
-            # If timeout, calculate floating PnL
+            # Outcome calculation
             if outcome == "TIMEOUT":
                 tick = await self.provider.get_current_tick(symbol)
                 if tick:
@@ -423,16 +459,18 @@ class NexubotConsole:
                         final_pnl = points_diff * tick_value * lot_size
 
                 outcome = "WIN (Floating)" if final_pnl > 0 else "LOSS (Floating)"
+            elif outcome == "CANCELLED (Runaway)":
+                final_pnl = 0.0
 
             # Log Result
             won = final_pnl > 0
             self.stats["pnl_zar"] += final_pnl
-
-            if won:
-                self.stats["wins"] += 1
-            else:
-                self.stats["loss"] += 1
-            self.stats["total"] += 1
+            if is_filled:
+                if won:
+                    self.stats["wins"] += 1
+                else:
+                    self.stats["loss"] += 1
+                self.stats["total"] += 1
 
             # Calculate Excursion in ATR multiples
             excursion_atr = max_favorable_dist / atr if atr > 0 else 0.0
@@ -441,22 +479,22 @@ class NexubotConsole:
             print(f"\n{BOLD}🔔 Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{final_pnl:.2f}{RESET}\n")
             self.print_dashboard()
 
-            await self.db.log_trade(
-                {
-                    "id": f"{symbol}_{int(time.time())}",
-                    "symbol": symbol,
-                    "signal": signal["signal"],
-                    "confidence": signal["confidence"],
-                    "entry": entry,
-                    "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
-                    "won": won,
-                    "pnl": final_pnl,
-                    "strategy": signal["strategy"],
-                }
-            )
+            if is_filled:
+                await self.db.log_trade(
+                    {
+                        "id": f"{symbol}_{int(time.time())}",
+                        "symbol": symbol,
+                        "signal": signal["signal"],
+                        "confidence": signal["confidence"],
+                        "entry": entry,
+                        "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
+                        "won": won,
+                        "pnl": final_pnl,
+                        "strategy": signal["strategy"],
+                    }
+                )
+                self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr)
 
-            # Call AI Engine to record data for CSV
-            self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr)
         except asyncio.CancelledError:
             return
         except Exception as e:

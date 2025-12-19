@@ -2,7 +2,6 @@ import logging
 import pandas as pd
 import time
 import asyncio
-import time
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
@@ -14,9 +13,10 @@ from src.database.manager import DatabaseManager
 from src.engine.ml_engine import NeuralPredictor
 from src.engine.strategies import StrategyAnalyzer
 from src.config import (
+    CHOP_THRESHOLD_TREND,
+    CHOP_THRESHOLD_RANGE,
     FOREX_SYMBOLS,
     HIGH_RISK_SYMBOLS,
-    LOSS_COOLDOWN_DURATION,
     MAX_LOT_SIZE,
     MIN_CONFIDENCE,
     PAIR_SIGNAL_COOLDOWN,
@@ -45,7 +45,6 @@ class AITradingEngine:
         self.active_features = {}
         self.htf_cache = {}
         self._log_throttle = {}
-
         self.nn_brain.train_network()
 
     def _log_once(self, key: str, message: str, level=logging.INFO):
@@ -70,40 +69,31 @@ class AITradingEngine:
         Calculates realistic confidence score.
         Base strategies are capped so they must 'earn' 90%+ via confluence.
         """
-        base_conf = min(signal["confidence"], 70.0)
+        base_conf = min(signal["confidence"], MIN_CONFIDENCE)
 
         # 1. Trend Alignment
         trend_bonus = 0
-        if htf_trend == "BULL":
-            trend_bonus = 5 if signal["direction"] == "LONG" else -20
-        elif htf_trend == "BEAR":
-            trend_bonus = 5 if signal["direction"] == "SHORT" else -20
+        if htf_trend == "BULL" and signal["direction"] == "LONG":
+            trend_bonus = 5
+        elif htf_trend == "BEAR" and signal["direction"] == "SHORT":
+            trend_bonus = 5
+        elif htf_trend != "FLAT":
+            trend_bonus = -20  # Counter trend trade
 
         # 2. Historical Performance
         hist_win_rate = 0.5
         if self.db_manager:
-            try:
-                hist_win_rate = await self.db_manager.get_pair_performance(symbol)
-            except Exception:
-                hist_win_rate = 0.5
+            hist_win_rate = await self.db_manager.get_pair_performance(symbol)
 
         # Heavy Penalty for losers (< 40% win rate), Small Bonus for winners
-        history_factor = 0
-        if hist_win_rate < 0.4:
-            history_factor = -20  # punish hard
-        elif hist_win_rate > 0.6:
-            history_factor = 10  # reward
+        history_factor = -20 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
 
         # 3. Neural Network Weighting
         # Map 0.5-1.0 prob to 0 to +15 score
         nn_factor = (nn_prob - 0.5) * 40
 
         # 5. Volatility Penalty
-        vol_penalty = 0
-        if volatility_ratio > 1.5:
-            vol_penalty = -10
-        elif volatility_ratio > 2.0:
-            vol_penalty = -20
+        vol_penalty = -10 if volatility_ratio > 1.5 else (-20 if volatility_ratio > 2.0 else 0)
 
         # --- FINAL CALCULATION ---
         # Base (Strategy) + Trend + History + AI
@@ -132,51 +122,62 @@ class AITradingEngine:
         max_vol = info.get("max_vol", 100.0)
         atr = float(curr["atr"])
 
-        tp_dist = atr * nn_result["pred_exit_atr"]
+        # --- GHOST ORDER LOGIC ---
+        # If high confidence but poor entry, place "Ghost Limit" 2 pips better
+        entry_price = ask if signal["direction"] == "LONG" else bid
+        is_ghost = False
+
+        if signal["confidence"] > 80.0:
+            ghost_pips = 20 * point  # 2 pips
+            if signal["direction"] == "LONG":
+                entry_price -= ghost_pips
+            else:
+                entry_price += ghost_pips
+            is_ghost = True
+
+        # --- TP / SL CALCULATION ---
+        # Base SL is 1.5 ATR
         sl_dist = atr * 1.5
-
-        # Min distance check (prevents SL being too tight on low volatility)
         min_dist = point * 50
-        if sl_dist < min_dist:
-            sl_dist = min_dist
+        sl_dist = max(sl_dist, min_dist)
 
+        tp_dist = atr * nn_result["pred_exit_atr"]
+
+        # --- R:R ENFORCEMENT ---
+        # Enforce Minimum 1:1.5 Risk:Reward
+        rr_ratio = tp_dist / sl_dist
+        if rr_ratio < 1.5:
+            tp_dist = sl_dist * 1.5  # Force extension
+
+        # Calculate Absolute Prices
         if signal["signal"] == "BUY":
-            entry_price = ask
             sl_price = ask - sl_dist
             tp_price = ask + tp_dist
         else:
-            entry_price = bid
             sl_price = bid + sl_dist
             tp_price = bid - tp_dist
 
-        # 2. Calculate Risk Amount per 1.0 Lot
-        if tick_value == 0:
-            return None
+        # --- RISK SIZING ---
+        risk_mult = nn_result["risk_mult"]
+        target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
 
         # Risk Amount per 1 Lot = (Points Diff) * Tick Value
         # Points Diff = Distance / Point
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
+
         if risk_per_lot == 0:
             return None
 
-        # Target Risk
-        risk_mult = nn_result["risk_mult"]
-        pct_limit = 5.0 if self.user_balance_zar < 1000 else RISK_PER_TRADE_PCT
-        target_risk_zar = self.user_balance_zar * ((pct_limit * risk_mult) / 100)
-
-        # 3. Lot Sizing
+        # Lot Sizing
         lots = target_risk_zar / risk_per_lot
-
-        # Rounding
         step = info.get("vol_step", 0.01)
         lots = round(lots / step) * step
         lots = max(min_vol, min(lots, max_vol, MAX_LOT_SIZE))
 
         actual_risk_zar = risk_per_lot * lots
 
-        if actual_risk_zar > (self.user_balance_zar * 0.20):
-            self._log_once(f"risk_{symbol}", f"Filtering {symbol}: Risk R{actual_risk_zar:.2f} > 20% of Balance")
+        if actual_risk_zar > (self.user_balance_zar * 0.025):
             return None
 
         # Profit Calculation
@@ -195,6 +196,7 @@ class AITradingEngine:
                 "point": point,
                 "atr": atr,
                 "is_high_risk": symbol in HIGH_RISK_SYMBOLS,
+                "order_type": "LIMIT" if is_ghost else "MARKET",
             }
         )
         return signal
@@ -216,42 +218,51 @@ class AITradingEngine:
         trend = "FLAT"
         if klines:
             df = pd.DataFrame(klines)
-            ema_200 = df["close"].ewm(span=200).mean().iloc[-1]
-            price = df["close"].iloc[-1]
+            # Add simple slope logic: is EMA 200 rising?
+            df["ema_200"] = df["close"].ewm(span=200).mean()
+            df["slope"] = df["ema_200"].diff(3)
 
-            if price > ema_200:
+            slope = df["slope"].iloc[-1]
+            price = df["close"].iloc[-1]
+            ema = df["ema_200"].iloc[-1]
+
+            if price > ema and slope > 0:
                 trend = "BULL"
-            elif price < ema_200:
+            elif price < ema and slope < 0:
                 trend = "BEAR"
 
         # Save to Cache
         self.htf_cache[symbol] = {"trend": trend, "time": now}
         return trend
 
-    def _is_market_session_open(self, symbol: str) -> bool:
-        """
-        Checks South African Time (SAST).
-        Handles Weekends for Forex/Gold.
-        """
+    def _get_session_status(self) -> Dict:
+        """Returns allowed strategy types based on SAST time."""
         now = datetime.now()
-        day = now.weekday()  # 0=Mon, 6=Sun
         hour = now.hour
+        weekday = now.weekday()  # 0=Mon, 6=Sun
 
-        if symbol in FOREX_SYMBOLS:
-            # Saturday (5) and Sunday (6) are closed
-            if day >= 5:
-                return False
+        # Monday Morning Block (First 2 hours)
+        if weekday == 0 and hour < 2:
+            return {"allow_trade": False, "reason": "Monday Open"}
 
-            # Optional: Friday close logic (e.g., stop after 22:00)
-            if day == 4 and hour >= 22:
-                return False
+        # Pre-London Trap Zone
+        if SESSION_CONFIG["PRE_LONDON_START"] <= hour < SESSION_CONFIG["PRE_LONDON_END"]:
+            return {"allow_trade": False, "reason": "Pre-London Trap"}
 
-            # Session Hours (e.g. 09:00 - 22:00) logic
-            start = SESSION_CONFIG["FOREX_START"]
-            end = SESSION_CONFIG["FOREX_END"]
-            return start <= hour < end
+        allowed_types = []
 
-        return True  # Crypto is 24/7
+        # Asian Session (Mean Reversion Only)
+        if SESSION_CONFIG["ASIAN_START"] <= hour < SESSION_CONFIG["ASIAN_END"]:
+            allowed_types.append("REVERSION")
+        else:
+            # London/NY (Trend + Breakout)
+            allowed_types.append("TREND")
+
+            # Block Volatility Breakouts at 13:00 SAST
+            if hour != SESSION_CONFIG["NO_VOLATILITY_HOUR"]:
+                allowed_types.append("BREAKOUT")
+
+        return {"allow_trade": True, "types": allowed_types}
 
     def _prepare_data(self, klines: List[Dict], heavy: bool = True) -> Optional[pd.DataFrame]:
         """Prepares DataFrame with Indicators for Analysis."""
@@ -270,7 +281,8 @@ class AITradingEngine:
         Main Analysis Pipeline with Spread, Volatility, and Context filters.
         """
         # 1. Session & Cooldown
-        if not self._is_market_session_open(symbol):
+        session_info = self._get_session_status()
+        if not session_info["allow_trade"]:
             return None
         if self.is_on_cooldown(symbol) or symbol in self.active_features:
             return None
@@ -281,7 +293,21 @@ class AITradingEngine:
             return None
         curr = df.iloc[-1]
 
-        # 3. Volatility Checks
+        # 3. Choppiness & Regime Logic
+        chop_idx = curr["chop_idx"]
+        market_regime = "NEUTRAL"
+        if chop_idx > CHOP_THRESHOLD_RANGE:
+            market_regime = "RANGE"
+        elif chop_idx < CHOP_THRESHOLD_TREND:
+            market_regime = "TREND"
+
+        # Filter Strategies based on Regime AND Session
+        # If Asian Session -> Force Range Regime strategies only
+        if "REVERSION" in session_info["types"] and "TREND" not in session_info["types"]:
+            if market_regime == "TREND":
+                return None  # Don't trade trend in Asia
+
+        # 4. Volatility Checks
         volatility_ratio = 1.0
         avg_atr = df["atr"].rolling(24).mean().iloc[-1]
 
@@ -302,7 +328,7 @@ class AITradingEngine:
         if (time.time() - last_time) < current_cooldown_req:
             return None
 
-        # 4. Check DB and Spread
+        # 5. Check DB and Spread
         spread_info = await provider.get_spread(symbol)
         if spread_info["spread_high"]:
             return None
@@ -311,15 +337,23 @@ class AITradingEngine:
         if (time.time() - curr["time"]) > 1800:
             return None
 
+        # FIX: Check Loss Cooldown (Visibly)
         try:
             if self.db_manager:
                 is_loss = await self.db_manager.check_recent_loss(symbol)
                 if is_loss:
+                    self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
                     return None
         except Exception:
             pass
 
-        # 5. Strategy & Pattern Matching
+        symbol_info = await provider.get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+
+        point = symbol_info.get("point", 0.00001)
+
+        # 6. Strategy & Pattern Matching
         htf_trend = await self._get_htf_trend(symbol, provider)
         patterns = self.pattern_recognizer.analyze_patterns(df)
 
@@ -335,7 +369,19 @@ class AITradingEngine:
         # Stratey Routing
         strat_signal = None
         if symbol in FOREX_SYMBOLS:
-            strat_signal = self.strategy_analyzer.analyze_forex(curr, df, htf_trend, patterns)
+            # BB Reversion Check (Must be Flat)
+            if market_regime == "RANGE" and curr["bb_slope"] < (point * 50):  # Flat bands
+                strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
+
+            # Trend Strategies
+            elif market_regime == "TREND" and "TREND" in session_info["types"]:
+                strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
+                if not strat_signal:
+                    strat_signal = self.strategy_analyzer._fx_macd_divergence(curr, df)
+
+            # Breakout (Only if allowed hour)
+            if not strat_signal and "BREAKOUT" in session_info["types"]:
+                strat_signal = self.strategy_analyzer._fx_volatility_breakout(curr, df)
         else:
             strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
 
@@ -407,11 +453,6 @@ class AITradingEngine:
 
         # Apply Fakeout Penalty to Risk Multiplier
         nn_result["risk_mult"] *= fake_risk_penalty
-
-        # Risk & Targets
-        symbol_info = await provider.get_symbol_info(symbol)
-        if not symbol_info:
-            return None
 
         # Get live Tick data for true Bid/Ask
         tick = await provider.get_current_tick(symbol)
