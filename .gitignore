@@ -1,30 +1,37 @@
-# Python
-pycache/
+# --- Python Standard ---
+__pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# --- Virtual Environments ---
 venv/
 env/
 .env
 .venv/
 
-# IDEs and editors
+# --- IDE Settings ---
 .vscode/
 .idea/
 *.sublime-project
 
-# Logs and databases
+# --- Nexubot Logs & Databases ---
 *.log
+nexubot.log
 *.sqlite3
 *.db
 *.sqlite
 *.bak
-*.pkl
 
-# Neural network models
+# --- Nexubot ML Artifacts (Generated) ---
+# Specific model files defined in config.py
+nexubot_entry.keras
+nexubot_exit.keras
+nexubot_scaler.pkl
 *.h5
 *.keras
+*.pkl
 
-# Data files
+# --- Nexubot Data ---
+# Auto-generated training data
+training_data.csv
 *.csv
