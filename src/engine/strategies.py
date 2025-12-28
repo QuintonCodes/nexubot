@@ -199,11 +199,14 @@ class StrategyAnalyzer:
         tk_bullish = curr["tenkan_sen"] > curr["kijun_sen"]
         tk_bearish = curr["tenkan_sen"] < curr["kijun_sen"]
 
-        if above_cloud and tk_bullish:
+        dist_kijun = abs(curr["close"] - curr["kijun_sen"])
+        is_extended = dist_kijun > (curr["atr"] * 1.5)
+
+        if above_cloud and tk_bullish and not is_extended:
             # Ensure we just broke out or are trending strongly
             return {"strategy": "Crypto Ichimoku", "signal": "BUY", "direction": "LONG", "confidence": 90.0}
 
-        if below_cloud and tk_bearish:
+        if below_cloud and tk_bearish and not is_extended:
             return {"strategy": "Crypto Ichimoku", "signal": "SELL", "direction": "SHORT", "confidence": 90.0}
 
         return None

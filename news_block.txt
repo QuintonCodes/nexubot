@@ -1,0 +1,12 @@
+# Nexubot Economic Calendar Block List
+# The bot automatically adds a +/- 30 minute buffer around these times.
+# Format: YYYY-MM-DD HH:MM -> YYYY-MM-DD HH:MM
+# Usage: Define the start and end of the core news event.
+
+# --- OCTOBER 2025 ---
+2025-10-03 14:30 -> 2025-10-03 14:35  # NFP Release
+2025-10-15 14:30 -> 2025-10-15 14:35  # CPI Release
+2025-10-30 20:00 -> 2025-10-30 20:30  # FOMC Decision & Presser
+
+# --- NOVEMBER 2025 ---
+2025-11-07 14:30 -> 2025-11-07 14:35  # NFP Release

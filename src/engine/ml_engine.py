@@ -28,13 +28,15 @@ class NeuralPredictor:
     Handles both Entry (Classification) and Exit (Regression) Models.
     """
 
-    def __init__(self):
+    def __init__(self, auto_load: bool = True):
         self.entry_model = None
         self.exit_model = None
-        self.scaler = None
         self.is_ready = False
-        self._cleanup_legacy()
-        self._load_artifacts()
+        self.scaler = None
+
+        if auto_load:
+            self._cleanup_legacy()
+            self._load_artifacts()
 
     def _cleanup_legacy(self):
         """Removes old .h5 files to prevent confusion."""
@@ -47,6 +49,19 @@ class NeuralPredictor:
                 logger.info("🗑️ Removed legacy exit model (.h5)")
         except Exception:
             pass
+
+    def _delete_artifacts(self):
+        """Deletes existing model and scaler files."""
+        try:
+            if os.path.exists(ENTRY_MODEL_FILE):
+                os.remove(ENTRY_MODEL_FILE)
+            if os.path.exists(EXIT_MODEL_FILE):
+                os.remove(EXIT_MODEL_FILE)
+            if os.path.exists(SCALER_FILE):
+                os.remove(SCALER_FILE)
+            logger.info("🗑️ Corrupt/Old ML artifacts deleted.")
+        except Exception as e:
+            logger.error(f"Error deleting artifacts: {e}")
 
     def _load_artifacts(self):
         """Loads model and scaler if they exist."""
@@ -72,19 +87,42 @@ class NeuralPredictor:
             except Exception as e:
                 logger.error(f"Failed to load ML artifacts: {e}")
                 self._delete_artifacts()
+        else:
+            logger.info("⚠️ No ML models found. Running in heuristic mode until trained.")
 
-    def _delete_artifacts(self):
-        """Deletes existing model and scaler files."""
+    def predict(self, features: dict) -> Dict[str, float]:
+        """
+        Predicts entry probability, risk multiplier, and exit ATR multiple.
+        """
+        if not self.is_ready or self.entry_model is None:
+            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}
+
         try:
-            if os.path.exists(ENTRY_MODEL_FILE):
-                os.remove(ENTRY_MODEL_FILE)
-            if os.path.exists(EXIT_MODEL_FILE):
-                os.remove(EXIT_MODEL_FILE)
-            if os.path.exists(SCALER_FILE):
-                os.remove(SCALER_FILE)
-            logger.info("🗑️ Corrupt/Old ML artifacts deleted.")
+            # Ensure safe extraction of values (defaults to 0 if missing)
+            data = {k: [features.get(k, 0)] for k in FEATURE_COLS}
+            df_input = pd.DataFrame(data)
+            X_new = self.scaler.transform(df_input)
+
+            prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
+
+            # Exit Prediction (Default to 2.0 ATR if model is missing or error)
+            pred_exit_atr = 2.0
+            if self.exit_model:
+                raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
+                pred_exit_atr = max(1.5, min(raw_exit, 4.0))
+
+            # Dynamic Risk Sizing
+            risk_mult = 0.5  # Base Low
+            if prob > 0.85:
+                risk_mult = 2.0  # High Conviction
+            elif prob > 0.65:
+                risk_mult = 1.0  # Standard
+
+            return {"prob": prob, "risk_mult": risk_mult, "pred_exit_atr": pred_exit_atr}
+
         except Exception as e:
-            logger.error(f"Error deleting artifacts: {e}")
+            logger.error(f"Prediction error: {e}")
+            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}
 
     def train_network(self):
         """
@@ -159,37 +197,3 @@ class NeuralPredictor:
 
         except Exception as e:
             logger.error(f"Training failed: {e}")
-
-    def predict(self, features: dict) -> Dict[str, float]:
-        """
-        Predicts entry probability, risk multiplier, and exit ATR multiple.
-        """
-        if not self.is_ready or self.entry_model is None:
-            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}
-
-        try:
-            # Ensure safe extraction of values (defaults to 0 if missing)
-            data = {k: [features.get(k, 0)] for k in FEATURE_COLS}
-            df_input = pd.DataFrame(data)
-            X_new = self.scaler.transform(df_input)
-
-            prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
-
-            # Exit Prediction (Default to 2.0 ATR if model is missing or error)
-            pred_exit_atr = 2.0
-            if self.exit_model:
-                raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
-                pred_exit_atr = max(1.5, min(raw_exit, 4.0))
-
-            # Dynamic Risk Sizing
-            risk_mult = 0.5  # Base Low
-            if prob > 0.85:
-                risk_mult = 2.0  # High Conviction
-            elif prob > 0.65:
-                risk_mult = 1.0  # Standard
-
-            return {"prob": prob, "risk_mult": risk_mult, "pred_exit_atr": pred_exit_atr}
-
-        except Exception as e:
-            logger.error(f"Prediction error: {e}")
-            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}

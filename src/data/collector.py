@@ -44,7 +44,7 @@ class DataCollector:
             else:
                 df.to_csv(DATA_FILE, index=False, mode="a", header=False)
 
-            logger.info(f"💾 Training data logged for {symbol}")
+            logger.debug(f"💾 Training data logged for {symbol}")
 
         except Exception as e:
             logger.error(f"Failed to log training data: {e}")

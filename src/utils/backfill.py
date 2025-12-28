@@ -2,6 +2,7 @@ import asyncio
 import sys
 import os
 import pandas as pd
+from typing import Dict, List
 
 # Adjust path to root
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
@@ -12,9 +13,86 @@ from src.engine.strategies import StrategyAnalyzer
 from src.config import ALL_SYMBOLS, DATA_FILE, FOREX_SYMBOLS
 
 
+# Memory buffer for efficient writing
+BACKFILL_BUFFER: List[Dict] = []
+
+
+async def backfill_data():
+    """Main backfill routine."""
+    print("🚀 Starting Optimized Backfill...")
+    provider = DataProvider()
+    if not await provider.initialize():
+        return
+    analyzer = StrategyAnalyzer()
+
+    # Clear buffer
+    BACKFILL_BUFFER.clear()
+
+    # Chunking for concurrency (Batch size 5)
+    chunk_size = 5
+    for i in range(0, len(ALL_SYMBOLS), chunk_size):
+        chunk = ALL_SYMBOLS[i : i + chunk_size]
+        await asyncio.gather(*(process_symbol(sym, provider, analyzer) for sym in chunk))
+
+    finalize_dataset()
+
+    await provider.shutdown()
+    print("🏁 Backfill Complete.")
+
+
+def buffer_backfill_data(features: dict, won: bool, pnl: float, excursion: float):
+    """Adds data to memory buffer instead of writing immediately."""
+    BACKFILL_BUFFER.append(
+        {**features, "target_win": 1 if won else 0, "target_pnl": pnl, "target_excursion": excursion}
+    )
+
+
+def finalize_dataset():
+    """
+    Cleans, deduplicates, and caps the dataset at 5,000 rows.
+    """
+    print("🧹 Finalizing and cleaning dataset...")
+
+    # Load existing data if any
+    existing_df = pd.DataFrame()
+    if os.path.exists(DATA_FILE):
+        try:
+            existing_df = pd.read_csv(DATA_FILE, on_bad_lines="skip")
+        except Exception:
+            pass
+
+    # Create DF from new buffer
+    new_df = pd.DataFrame(BACKFILL_BUFFER)
+
+    if new_df.empty:
+        print("⚠️ No new data buffered.")
+        return
+
+    # Merge
+    full_df = pd.concat([existing_df, new_df], ignore_index=True)
+
+    if full_df.empty:
+        return
+
+    # 1. Remove Duplicates
+    # Assuming columns match, we drop exact duplicates
+    full_df.drop_duplicates(inplace=True)
+
+    # 3. Dynamic Capping (Last 5000 rows)
+    if len(full_df) > 5000:
+        print(f"✂️ Capping dataset: Trimming {len(full_df)} rows down to 5000.")
+        full_df = full_df.iloc[-5000:]
+
+    # 4. Overwrite File
+    full_df.to_csv(DATA_FILE, index=False, mode="w")
+    print(f"💾 Saved {len(full_df)} rows to {DATA_FILE}")
+
+
 def log_backfill_data(features: dict, won: bool, pnl: float, excursion: float):
     """Logs the backfill data to CSV."""
-    df = pd.DataFrame([{**features, "target_win": 1 if won else 0, "target_pnl": pnl, "target_excursion": excursion}])
+    new_row = {**features, "target_win": 1 if won else 0, "target_pnl": pnl, "target_excursion": excursion}
+    df = pd.DataFrame([new_row])
+
     if not os.path.exists(DATA_FILE):
         df.to_csv(DATA_FILE, index=False, mode="w")
     else:
@@ -26,7 +104,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     print(f"📥 Processing {symbol}...")
 
     # 1. Fetch Lower Timeframe Data (15m) (Execution)
-    klines_m15 = await provider.fetch_klines(symbol, "15m", 5000)
+    klines_m15 = await provider.fetch_klines(symbol, "15m", 6000)
     if not klines_m15:
         return 0
 
@@ -36,10 +114,9 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     # 2. Fetch Higher Timeframe (Trend)
     # Use H4 for Forex, H1 for Crypto
     htf_tf = "4h" if symbol in FOREX_SYMBOLS else "1h"
-    klines_htf = await provider.fetch_klines(symbol, htf_tf, 1000)  # Less candles needed for HTF
+    klines_htf = await provider.fetch_klines(symbol, htf_tf, 3000)
 
     if not klines_htf:
-        print(f"⚠️ Missing HTF data for {symbol}")
         return 0
 
     df_htf = pd.DataFrame(klines_htf)
@@ -57,11 +134,18 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     df_m15 = df_m15.sort_values("time")
     df_merged = pd.merge_asof(df_m15, df_htf, on="time", direction="backward")  # Look for the closest PAST H4 candle
 
+    if len(df_merged) > 500:
+        df_merged = df_merged.iloc[500:].reset_index(drop=True)
+    else:
+        return 0
+
     processed = 0
     df_merged["avg_atr"] = df_merged["atr"].rolling(24).mean()
 
-    # Skip first 200 candles (warmup)
-    for i in range(200, len(df_merged) - 20):
+    for i in range(50, len(df_merged) - 20):
+        if processed >= 500:  # Limit samples per symbol
+            break
+
         curr = df_merged.iloc[i]
 
         # Determine HTF Trend string for Strategy Analyzer
@@ -129,29 +213,11 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
                     if gain > (atr * 1.5):
                         won = True
 
-            log_backfill_data(features, won, 0.0, max_atr_gain)
+            buffer_backfill_data(features, won, 0.0, max_atr_gain)
             processed += 1
 
     print(f"✅ {symbol}: {processed} signals found.")
     return processed
-
-
-async def backfill_data():
-    """Main backfill routine."""
-    print("🚀 Starting Optimized Backfill...")
-    provider = DataProvider()
-    if not await provider.initialize():
-        return
-    analyzer = StrategyAnalyzer()
-
-    # Chunking for concurrency (Batch size 5)
-    chunk_size = 5
-    for i in range(0, len(ALL_SYMBOLS), chunk_size):
-        chunk = ALL_SYMBOLS[i : i + chunk_size]
-        await asyncio.gather(*(process_symbol(sym, provider, analyzer) for sym in chunk))
-
-    await provider.shutdown()
-    print("🏁 Backfill Complete.")
 
 
 if __name__ == "__main__":

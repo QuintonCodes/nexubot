@@ -35,10 +35,8 @@ async def check_and_run_backfill():
 
     if needs_backfill:
         print("\n⚠️ No training data found (or file is empty).")
-        print("⏳ Starting Automatic Backfill to populate ML Data...")
         try:
             await backfill_data()
-            print("✅ Backfill Complete! Starting Bot...")
         except Exception as e:
             print(f"❌ Backfill Failed: {e}")
             logger.error(f"Backfill failed: {e}")

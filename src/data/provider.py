@@ -3,6 +3,7 @@ import logging
 import MetaTrader5 as mt5
 import os
 import time
+import subprocess
 from typing import List, Dict, Optional
 
 from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
@@ -25,8 +26,20 @@ class DataProvider:
         self.spread_cache = {}
         self.last_cache_clear = time.time()
 
+    def _kill_terminal(self):
+        """Force kills MT5 terminal process."""
+        try:
+            if os.name == "nt":
+                # Windows
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "terminal64.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                logger.info("⚠️ Forced kill of terminal64.exe")
+        except Exception as e:
+            logger.error(f"Failed to kill terminal: {e}")
+
     def _sync_connect(self) -> bool:
-        """Synchronous MT5 Connection with Retries."""
+        """Synchronous MT5 Connection with Retries and Auto-Kill"""
         try:
             if mt5.terminal_info() is not None:
                 if self.connected:
@@ -43,7 +56,13 @@ class DataProvider:
             # 2. Initialize with Timeout (Fix for IPC Timeout)
             # We give it 60 seconds to launch and connect.
             if not mt5.initialize(path=self._path, timeout=60000):
-                if not mt5.initialize(timeout=60000):
+                logger.warning("⚠️ MT5 Init failed. Attempting to restart terminal...")
+                self._kill_terminal()
+                time.sleep(2)
+
+                # Retry
+                if not mt5.initialize(path=self._path, timeout=60000):
+                    logger.error("❌ MT5 Init failed after restart.")
                     return False
 
             # 3. Login
@@ -161,10 +180,6 @@ class DataProvider:
         mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M15)
 
         return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
-
-    async def get_latest_price(self, symbol: str) -> Optional[float]:
-        """Gets current Bid/Ask average."""
-        return await asyncio.to_thread(self._sync_get_tick, symbol)
 
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
         """Returns full tick object (Bid/Ask)."""

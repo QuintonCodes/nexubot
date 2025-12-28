@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import sys
 import time
 from datetime import datetime
@@ -33,6 +34,7 @@ CYAN = "\033[96m"
 YELLOW = "\033[93m"
 WHITE = "\033[97m"
 MAGENTA = "\033[95m"
+GRAY = "\033[90m"
 
 
 class NexubotConsole:
@@ -41,13 +43,12 @@ class NexubotConsole:
     """
 
     def __init__(self):
-        self.db = DatabaseManager()
         self.ai_engine = AITradingEngine()
+        self.db = DatabaseManager()
+        self.last_global_signal_time = 0
         self.provider = DataProvider()
         self.running = False
-        self.last_global_signal_time = 0
         self.session_id = f"SESSION_{int(time.time())}"
-        self.tasks = set()
         self.stats = {
             "wins": 0,
             "loss": 0,
@@ -56,6 +57,7 @@ class NexubotConsole:
             "start": datetime.now(),
         }
         self.symbol_digits = {}
+        self.tasks = set()
 
     async def _cache_digits(self):
         """Caches the decimal digits for all symbols."""
@@ -64,79 +66,179 @@ class NexubotConsole:
             if info:
                 self.symbol_digits[sym] = info.get("digits", 5)
 
-    async def _verify_offline_outcome(self, symbol: str, signal: dict, start_time: float):
+    async def _verify_offline_outcome(self, symbol: str, signal: dict, start_time: float) -> bool:
         """
-        Checks if a trade that expired while offline actually hit TP/SL.
+        Checks if a trade that existed while offline has finished (TP/SL/Timeout).
         """
-        print(f"{MAGENTA}Checking offline outcome for {symbol}...{RESET}")
+        print(f"{MAGENTA}Checking offline history for {symbol}...{RESET}")
 
-        # Fetch candles covering the downtime
-        duration_candles = 20  # Approx 5 hours of M15 data
-        klines = await self.provider.fetch_klines(symbol, TIMEFRAME, duration_candles)
+        now = time.time()
+        elapsed = now - start_time
+        # Calculate how many M15 candles we missed
+        # 900s = 15m. Add buffer of 5 candles.
+        candles_needed = math.ceil(elapsed / 900) + 5
+
+        # Max cap candles to avoid overloading (e.g. if off for a week)
+        candles_needed = min(candles_needed, 1000)
+
+        klines = await self.provider.fetch_klines(symbol, TIMEFRAME, candles_needed)
 
         if not klines:
-            await self.db.delete_active_trade(symbol)
-            return
+            # If we can't get data, we assume we can't verify, so we delete if old
+            if elapsed > 14400:
+                await self.db.delete_active_trade(symbol)
+                return True
+            return False  # Try to resume if data missing but time remains?
 
         sl = signal["sl"]
         tp = signal["tp"]
+        entry = signal["price"]
         is_long = signal["direction"] == "LONG"
-        outcome = "TIMEOUT (Offline)"
+        order_type = signal.get("order_type", "MARKET")
+        trade_duration = 14400  # 4 Hours
+
+        outcome = None  # None means still running
         pnl = 0.0
+        filled_offline = False
+
+        # If it was a MARKET order, it was filled at start_time
+        if order_type == "MARKET":
+            filled_offline = True
 
         for k in klines:
+            # Skip candles that happened before the trade started
             if k["time"] < start_time:
-                continue  # Skip old candles
+                continue
 
-            # Check Low for SL (Long) / High for SL (Short)
-            if is_long:
-                if k["low"] <= sl:
-                    outcome = "LOSS (SL Offline)"
-                    pnl = -signal["risk_zar"]
-                    break
-                if k["high"] >= tp:
-                    outcome = "WIN (TP Offline)"
-                    pnl = signal["profit_zar"]
-                    break
+            # Stop checking if we passed the 4 hour duration mark relative to start
+            if (k["time"] - start_time) > trade_duration:
+                outcome = "TIMEOUT (Offline)"
+                # Calculate PnL at close of this candle (expiry)
+                # Note: This ignores current tick, using candle close for offline calc
+                break
+
+            # Check fill first
+            if not filled_offline:
+                if is_long:
+                    if k["low"] <= entry:
+                        filled_offline = True
+                else:
+                    if k["low"] >= entry:
+                        filled_offline = True
+
+                # If filled in this candle, we generally skip TP/SL check
+                # for this specific candle to be conservative/avoid ambiguity
+                if filled_offline:
+                    continue
+
+            # --- 2. Check Outcome (If Filled) ---
+            if filled_offline:
+                if is_long:
+                    # Check SL (Low)
+                    if k["low"] <= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    # Check TP (High)
+                    if k["high"] >= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+                else:
+                    # Check SL (High)
+                    if k["high"] >= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    # Check TP (Low)
+                    if k["low"] <= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+
+        # --- Post-Loop Decision ---
+
+        # Case 1: Trade finished (TP or SL hit)
+        if outcome and "TIMEOUT" not in outcome:
+            won = pnl > 0
+            color = GREEN if pnl > 0 else RED
+            print(f"{BOLD}🔔 Offline Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{pnl:.2f}{RESET}")
+
+            await self.db.log_trade(
+                {
+                    "id": f"{symbol}_OFFLINE_{int(time.time())}",
+                    "symbol": symbol,
+                    "signal": signal["signal"],
+                    "confidence": signal["confidence"],
+                    "entry": signal["price"],
+                    "exit": tp if won else sl,
+                    "won": won,
+                    "pnl": pnl,
+                    "strategy": signal["strategy"] + " (Offline)",
+                }
+            )
+
+            # Update Stats
+            if won:
+                self.stats["wins"] += 1
             else:
-                if k["high"] >= sl:
-                    outcome = "LOSS (SL Offline)"
-                    pnl = -signal["risk_zar"]
-                    break
-                if k["low"] <= tp:
-                    outcome = "WIN (TP Offline)"
-                    pnl = signal["profit_zar"]
-                    break
+                self.stats["loss"] += 1
+            self.stats["total"] += 1
+            self.stats["pnl_zar"] += pnl
 
-        # Log to Console
-        color = GREEN if pnl > 0 else RED
-        print(f"{BOLD}🔔 Offline Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{pnl:.2f}{RESET}")
+            await self.db.delete_active_trade(symbol)
+            return True
 
-        # Log to DB
-        won = pnl > 0
-        await self.db.log_trade(
-            {
-                "id": f"{symbol}_OFFLINE_{int(time.time())}",
-                "symbol": symbol,
-                "signal": signal["signal"],
-                "confidence": signal["confidence"],
-                "entry": signal["price"],
-                "exit": tp if won else sl,
-                "won": won,
-                "pnl": pnl,
-                "strategy": signal["strategy"] + " (Offline)",
-            }
-        )
+        # Case 2: Trade Timed Out (Duration exceeded)
+        if outcome == "TIMEOUT (Offline)" or elapsed > trade_duration:
+            # If we never filled, it's a Cancel
+            if not filled_offline:
+                print(f"{GRAY}🚫 Offline Result ({symbol}): CANCELLED (Never Filled){RESET}")
+                await self.db.delete_active_trade(symbol)
+                return True
 
-        # Update Stats
-        if won:
-            self.stats["wins"] += 1
-        else:
-            self.stats["loss"] += 1
-        self.stats["total"] += 1
-        self.stats["pnl_zar"] += pnl
+            # If filled, calculate floating PnL based on last known price (latest candle close)
+            last_close = klines[-1]["close"]
+            tick_value = signal.get("tick_value", 0.0)
+            lot_size = signal["lot_size"]
+            point = signal.get("point", 0.00001)
 
-        await self.db.delete_active_trade(symbol)
+            if is_long:
+                points_diff = (last_close - entry) / point
+            else:
+                points_diff = (entry - last_close) / point
+
+            final_pnl = points_diff * tick_value * lot_size
+            outcome_str = "WIN (Timeout)" if final_pnl > 0 else "LOSS (Timeout)"
+            color = GREEN if final_pnl > 0 else RED
+
+            print(
+                f"{BOLD}🔔 Offline Result ({symbol}): {color}{outcome_str}{RESET} | PnL: {color}R{final_pnl:.2f}{RESET}"
+            )
+
+            # Log as a closed trade
+            await self.db.log_trade(
+                {
+                    "id": f"{symbol}_TIMEOUT_{int(time.time())}",
+                    "symbol": symbol,
+                    "signal": signal["signal"],
+                    "confidence": signal["confidence"],
+                    "entry": entry,
+                    "exit": last_close,
+                    "won": final_pnl > 0,
+                    "pnl": final_pnl,
+                    "strategy": signal["strategy"] + " (Timeout)",
+                }
+            )
+
+            self.stats["pnl_zar"] += final_pnl
+            self.stats["total"] += 1
+
+            await self.db.delete_active_trade(symbol)
+            return True
+
+        # Case 3: Trade is still active
+        return False
 
     def display_signal(self, symbol: str, signal: dict):
         """Displays a formatted trading signal in the console."""
@@ -179,11 +281,6 @@ class NexubotConsole:
         print(f"{BOLD}ACTION:{RESET} Open {signal['lot_size']:.2f} Lots {signal['signal']} on {symbol}{RESET}")
         print(f"{WHITE}" + "=" * 60 + "\n")
 
-    def smart_round(self, symbol: str, value: float) -> str:
-        """Rounds value based on symbol's decimal digits."""
-        digits = self.symbol_digits.get(symbol, 5)
-        return f"{value:.{digits}f}"
-
     def print_dashboard(self):
         """Displays session statistics."""
         elapsed = datetime.now() - self.stats["start"]
@@ -200,6 +297,38 @@ class NexubotConsole:
         """
         sys.stdout.write(f"\r{' ' *80}\r")
         print(dash)
+
+    async def process_batch(self, symbols: list[str]):
+        """Processes a batch of symbols for signals."""
+        signals_found = 0
+        for sym in symbols:
+            # Check Rate Limits
+            if time.time() - self.last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN:
+                break
+            if signals_found >= MAX_SIGNALS_PER_SCAN:
+                break
+
+            # Fetch
+            klines = await self.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
+            if not klines:
+                continue
+
+            # Analyze
+            signal = await self.ai_engine.analyze_market(sym, klines, self.provider)
+            if signal:
+                is_shadow = signal.get("is_shadow", False)
+
+                if not is_shadow:
+                    self.display_signal(sym, signal)
+                    signals_found += 1
+                    self.last_global_signal_time = time.time()
+                else:
+                    # Silent log for shadow trades
+                    print(f"{GRAY}👻 Shadow signal tracking started for {sym}...{RESET}")
+
+                # Start verification task for BOTH real and shadow trades
+                task = asyncio.create_task(self.verify_trade_realtime(sym, signal))
+                self.tasks.add(task)
 
     async def start(self):
         """Initializes the bot and starts the scan loop."""
@@ -232,18 +361,24 @@ class NexubotConsole:
         if active_trades:
             print(f"{CYAN}Found {len(active_trades)} active trades. Resuming monitoring...{RESET}")
             for symbol, signal, start_time in active_trades:
-                # IMPORTANT: Register trade in AI Engine to prevent duplicate signals
                 self.ai_engine.register_active_trade(symbol)
 
-                elapsed = time.time() - start_time
-                remaining = 14400 - elapsed  # 4 Hours
-                if remaining > 0:
-                    print(f"Resuming {symbol} (Time remaining: {remaining/60:.0f}m)")
-                    task = asyncio.create_task(self.verify_trade_realtime(symbol, signal, resume_start_time=start_time))
-                    self.tasks.add(task)
-                else:
-                    # Expired while offline
-                    await self.db.delete_active_trade(symbol)
+                # Check if the trade finished while we were offline
+                is_finished = await self._verify_offline_outcome(symbol, signal, start_time)
+
+                if not is_finished:
+                    elapsed = time.time() - start_time
+                    remaining = 14400 - elapsed  # 4 Hours
+
+                    if remaining > 0:
+                        print(f"Resuming {symbol} (Time remaining: {remaining/60:.0f}m)")
+                        task = asyncio.create_task(
+                            self.verify_trade_realtime(symbol, signal, resume_start_time=start_time)
+                        )
+                        self.tasks.add(task)
+                    else:
+                        # Expired while offline
+                        await self.db.delete_active_trade(symbol)
 
         print(f"{YELLOW}📊 Ranking pairs by volatility...{RESET}")
         await self.scan_loop()
@@ -254,12 +389,19 @@ class NexubotConsole:
 
         last_crypto = 0
         last_forex = 0
+        last_sort_time = 0
+
         active_crypto = list(CRYPTO_SYMBOLS)
         active_forex = list(FOREX_SYMBOLS)
-        last_sort_time = 0
 
         try:
             while self.running:
+                # Circuit breaker
+                if self.stats["pnl_zar"] < -(DEFAULT_BALANCE_ZAR * 0.10):
+                    print(f"{RED}🛑 CIRCUIT BREAKER: Session Drawdown > 10%. Stopping Bot.{RESET}")
+                    self.running = False
+                    return
+
                 now = time.time()
 
                 if now - last_sort_time > 900:
@@ -299,43 +441,40 @@ class NexubotConsole:
                     data_map[sym] = df
 
         ranked = self.ai_engine.rank_symbols_by_volatility(symbols, data_map)
-        # If fetch failed for some, keep them at the end
         result = ranked + [s for s in symbols if s not in ranked]
         return result
 
-    async def process_batch(self, symbols: list[str]):
-        """Processes a batch of symbols for signals."""
-        signals_found = 0
-        for sym in symbols:
-            # Check Rate Limits
-            if time.time() - self.last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN:
-                break
-            if signals_found >= MAX_SIGNALS_PER_SCAN:
-                break
+    def smart_round(self, symbol: str, value: float) -> str:
+        """Rounds value based on symbol's decimal digits."""
+        digits = self.symbol_digits.get(symbol, 5)
+        return f"{value:.{digits}f}"
 
-            # Fetch
-            klines = await self.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
-            if not klines:
-                continue
+    async def stop(self):
+        """Gracefully stops the bot and cleans up."""
+        self.running = False
+        print(f"\n{YELLOW}🛑 Stopping Nexubot...{RESET}")
 
-            # Analyze
-            signal = await self.ai_engine.analyze_market(sym, klines, self.provider)
-            if signal:
-                self.display_signal(sym, signal)
-                signals_found += 1
-                self.last_global_signal_time = time.time()
-                task = asyncio.create_task(self.verify_trade_realtime(sym, signal))
-                self.tasks.add(task)
+        # Cancel all pending monitoring tasks
+        for task in self.tasks:
+            task.cancel()
+
+        # Wait briefly for tasks to clean up
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        await self.db.log_session(self.session_id, self.stats["start"].timestamp(), self.stats)
+        await self.db.close()
+        await self.provider.shutdown()
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
         Monitors price and Logs Data for ML.
         Uses True Tick Value for accurate PnL calculation.
         """
-        print(f"{CYAN}👀 Monitoring trade {symbol} for outcome...{RESET}")
-
-        # PERSISTENCE: Save active trade immediately
-        await self.db.save_active_trade(symbol, signal)
+        is_shadow = signal.get("is_shadow", False)
+        if not is_shadow:
+            print(f"{CYAN}👀 Monitoring trade {symbol} for outcome...{RESET}")
+            await self.db.save_active_trade(symbol, signal)
 
         entry = signal["price"]
         sl = signal["sl"]
@@ -349,7 +488,9 @@ class NexubotConsole:
         # Order Management
         order_type = signal.get("order_type", "MARKET")
         is_filled = order_type == "MARKET"
-        sl_moved_to_be = False
+
+        # Trailer State
+        be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
 
         duration = 14400  # 4 hours
         start_time = resume_start_time if resume_start_time else time.time()
@@ -379,11 +520,13 @@ class NexubotConsole:
                     if is_long:
                         if current_ask <= entry:  # Ask price hits entry
                             is_filled = True
-                            print(f"{YELLOW}⚡ {symbol} Ghost Limit BUY Filled at {entry}{RESET}")
+                            if not is_shadow:
+                                print(f"{YELLOW}⚡ {symbol} Ghost Limit BUY Filled at {entry}{RESET}")
                     else:
                         if current_bid >= entry:  # Bid price hits entry
                             is_filled = True
-                            print(f"{YELLOW}⚡ {symbol} Ghost Limit SELL Filled at {entry}{RESET}")
+                            if not is_shadow:
+                                print(f"{YELLOW}⚡ {symbol} Ghost Limit SELL Filled at {entry}{RESET}")
 
                     # If price moves away by 2 ATR without filling, cancel
                     dist_away = (current_ask - entry) if is_long else (entry - current_bid)
@@ -413,11 +556,31 @@ class NexubotConsole:
                         points_won = (tp - entry) / point
                         final_pnl = points_won * tick_value * lot_size
                         break
-                    # Breakeven Logic (Move SL to Entry + 2 pips if > 1 ATR profit)
-                    if not sl_moved_to_be and max_favorable_dist > atr:
-                        sl = entry + (20 * point)  # Secure spread costs
-                        sl_moved_to_be = True
-                        print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
+
+                    # --- MULTI-STAGE TRAILING (Only for real trades) ---
+                    if not is_shadow:
+                        if be_stage < 3 and max_favorable_dist > (atr * 3.0):
+                            new_sl = entry + (atr * 2.0)
+                            if new_sl > sl:
+                                sl = new_sl
+                                be_stage = 3
+                                print(f"{CYAN}🛡️ {symbol} Locked 2R Profit{RESET}")
+
+                        # Stage 2: Lock 1R if > 2R
+                        elif be_stage < 2 and max_favorable_dist > (atr * 2.0):
+                            new_sl = entry + (atr * 1.0)
+                            if new_sl > sl:
+                                sl = new_sl
+                                be_stage = 2
+                                print(f"{CYAN}🛡️ {symbol} Locked 1R Profit{RESET}")
+
+                        # Stage 1: Breakeven if > 1R
+                        elif be_stage < 1 and max_favorable_dist > (atr * 1.0):
+                            new_sl = entry + (20 * point)  # Slight buffer
+                            if new_sl > sl:
+                                sl = new_sl
+                                be_stage = 1
+                                print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
                 else:  # Short
                     # Favorable direction is Down (Ask)
                     dist = entry - current_ask
@@ -437,15 +600,34 @@ class NexubotConsole:
                         final_pnl = points_won * tick_value * lot_size
                         break
 
-                    if not sl_moved_to_be and max_favorable_dist > atr:
-                        sl = entry - (20 * point)
-                        sl_moved_to_be = True
-                        print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
+                    # --- MULTI-STAGE TRAILING ---
+                    if not is_shadow:
+                        if be_stage < 3 and max_favorable_dist > (atr * 3.0):
+                            new_sl = entry - (atr * 2.0)
+                            if new_sl < sl:
+                                sl = new_sl
+                                be_stage = 3
+                                print(f"{CYAN}🛡️ {symbol} Locked 2R Profit{RESET}")
+
+                        elif be_stage < 2 and max_favorable_dist > (atr * 2.0):
+                            new_sl = entry - (atr * 1.0)
+                            if new_sl < sl:
+                                sl = new_sl
+                                be_stage = 2
+                                print(f"{CYAN}🛡️ {symbol} Locked 1R Profit{RESET}")
+
+                        elif be_stage < 1 and max_favorable_dist > (atr * 1.0):
+                            new_sl = entry - (20 * point)
+                            if new_sl < sl:
+                                sl = new_sl
+                                be_stage = 1
+                                print(f"{CYAN}🛡️ {symbol} SL Moved to Breakeven{RESET}")
 
                 await asyncio.sleep(interval)
 
             # Cleanup Persistence
-            await self.db.delete_active_trade(symbol)
+            if not is_shadow:
+                await self.db.delete_active_trade(symbol)
 
             # Outcome calculation
             if outcome == "TIMEOUT":
@@ -464,55 +646,45 @@ class NexubotConsole:
 
             # Log Result
             won = final_pnl > 0
-            self.stats["pnl_zar"] += final_pnl
-            if is_filled:
-                if won:
-                    self.stats["wins"] += 1
-                else:
-                    self.stats["loss"] += 1
-                self.stats["total"] += 1
-
-            # Calculate Excursion in ATR multiples
             excursion_atr = max_favorable_dist / atr if atr > 0 else 0.0
 
-            color = GREEN if won else RED
-            print(f"\n{BOLD}🔔 Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{final_pnl:.2f}{RESET}\n")
-            self.print_dashboard()
+            if not is_shadow:
+                self.stats["pnl_zar"] += final_pnl
+                if is_filled:
+                    if won:
+                        self.stats["wins"] += 1
+                    else:
+                        self.stats["loss"] += 1
+                    self.stats["total"] += 1
 
+                color = GREEN if won else RED
+                print(f"\n{BOLD}🔔 Result ({symbol}): {color}{outcome}{RESET} | PnL: {color}R{final_pnl:.2f}{RESET}\n")
+                self.print_dashboard()
+
+                if is_filled:
+                    await self.db.log_trade(
+                        {
+                            "id": f"{symbol}_{int(time.time())}",
+                            "symbol": symbol,
+                            "signal": signal["signal"],
+                            "confidence": signal["confidence"],
+                            "entry": entry,
+                            "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
+                            "won": won,
+                            "pnl": final_pnl,
+                            "strategy": signal["strategy"],
+                        }
+                    )
+            else:
+                # Shadow Logging (Minimal)
+                color = GREEN if won else RED
+                print(f"{GRAY}👻 Shadow Result ({symbol}): {color}{outcome}{RESET} (Virtual)")
+
+            # Record outcome for ML (Shadow trades are valid for training!)
             if is_filled:
-                await self.db.log_trade(
-                    {
-                        "id": f"{symbol}_{int(time.time())}",
-                        "symbol": symbol,
-                        "signal": signal["signal"],
-                        "confidence": signal["confidence"],
-                        "entry": entry,
-                        "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
-                        "won": won,
-                        "pnl": final_pnl,
-                        "strategy": signal["strategy"],
-                    }
-                )
                 self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr)
 
         except asyncio.CancelledError:
             return
         except Exception as e:
             logger.error(f"Error verifying {symbol}: {e}")
-
-    async def stop(self):
-        """Gracefully stops the bot and cleans up."""
-        self.running = False
-        print(f"\n{YELLOW}🛑 Stopping Nexubot...{RESET}")
-
-        # Cancel all pending monitoring tasks
-        for task in self.tasks:
-            task.cancel()
-
-        # Wait briefly for tasks to clean up
-        if self.tasks:
-            await asyncio.gather(*self.tasks, return_exceptions=True)
-
-        await self.db.log_session(self.session_id, self.stats["start"].timestamp(), self.stats)
-        await self.db.close()
-        await self.provider.shutdown()

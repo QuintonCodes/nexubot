@@ -1,8 +1,9 @@
+import asyncio
 import logging
+import os
 import pandas as pd
 import time
-import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Literal, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
@@ -12,6 +13,7 @@ from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ml_engine import NeuralPredictor
 from src.engine.strategies import StrategyAnalyzer
+from src.utils.trainer import ModelTrainer
 from src.config import (
     CHOP_THRESHOLD_TREND,
     CHOP_THRESHOLD_RANGE,
@@ -22,6 +24,7 @@ from src.config import (
     PAIR_SIGNAL_COOLDOWN,
     RISK_PER_TRADE_PCT,
     SESSION_CONFIG,
+    get_account_risk_caps,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,27 +38,19 @@ class AITradingEngine:
 
     def __init__(self):
         self.strategy_analyzer = StrategyAnalyzer()
-        self.fake_detector = FakeBreakoutDetector()
-        self.pattern_recognizer = PatternRecognizer()
+
+        ModelTrainer.train_if_needed()
         self.nn_brain = NeuralPredictor()
-        self.data_collector = DataCollector()
-        self.user_balance_zar = 0.0
-        self.db_manager = None
-        self.signal_history = {}
-        self.active_features = {}
-        self.htf_cache = {}
+
         self._log_throttle = {}
-        self.nn_brain.train_network()
-
-    def _log_once(self, key: str, message: str, level=logging.INFO):
-        """Prevents log spamming for the same event within 5 minutes."""
-        now = time.time()
-        if key in self._log_throttle:
-            if now - self._log_throttle[key] < 300:  # 5 minutes
-                return
-
-        self._log_throttle[key] = now
-        logger.log(level, message)
+        self.active_features = {}
+        self.db_manager = None
+        self.htf_cache = {}
+        self.last_news_load_time = 0
+        self.low_vol_candidates = {}
+        self.news_blocks = self._load_news_blocks()
+        self.signal_history = {}
+        self.user_balance_zar = 0.0
 
     async def _adjust_confidence(
         self,
@@ -67,7 +62,6 @@ class AITradingEngine:
     ) -> Dict:
         """
         Calculates realistic confidence score.
-        Base strategies are capped so they must 'earn' 90%+ via confluence.
         """
         base_conf = min(signal["confidence"], MIN_CONFIDENCE)
 
@@ -92,7 +86,7 @@ class AITradingEngine:
         # Map 0.5-1.0 prob to 0 to +15 score
         nn_factor = (nn_prob - 0.5) * 40
 
-        # 5. Volatility Penalty
+        # 4. Volatility Penalty
         vol_penalty = -10 if volatility_ratio > 1.5 else (-20 if volatility_ratio > 2.0 else 0)
 
         # --- FINAL CALCULATION ---
@@ -122,32 +116,59 @@ class AITradingEngine:
         max_vol = info.get("max_vol", 100.0)
         atr = float(curr["atr"])
 
-        # --- GHOST ORDER LOGIC ---
-        # If high confidence but poor entry, place "Ghost Limit" 2 pips better
-        entry_price = ask if signal["direction"] == "LONG" else bid
-        is_ghost = False
+        # --- SMART ENTRY LOGIC ---
+        # Don't chase signals that have already moved significantly
+        signal_close_price = curr["close"]
+        current_market_price = ask if signal["direction"] == "LONG" else bid
 
-        if signal["confidence"] > 80.0:
-            ghost_pips = 20 * point  # 2 pips
+        # Calculate Chase Distance (in ATR multiples)
+        chase_dist = abs(current_market_price - signal_close_price)
+        if chase_dist > (atr * 0.5):
+            logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
+            return None
+
+        # Determine Order Type based on Strategy
+        strategy_name = signal.get("strategy", "").lower()
+        is_trend_strat = "ichimoku" in strategy_name or "breakout" in strategy_name or "trend" in strategy_name
+        is_reversal_strat = (
+            "reversion" in strategy_name
+            or "divergence" in strategy_name
+            or "double" in strategy_name
+            or "head" in strategy_name
+        )
+
+        # --- GHOST ORDER LOGIC ---
+        entry_price = current_market_price
+        order_type = "MARKET"
+
+        if signal["confidence"] > 85.0 or is_trend_strat:
+            order_type = "MARKET"
+        elif is_reversal_strat:
+            order_type = "LIMIT"
+            ghost_pips = 15 * point  # 1.5 pips
             if signal["direction"] == "LONG":
                 entry_price -= ghost_pips
             else:
                 entry_price += ghost_pips
-            is_ghost = True
+        else:
+            # Default fallbaack for low confidence
+            order_type = "LIMIT"
+            ghost_pips = 10 * point  # 1 pip
+            if signal["direction"] == "LONG":
+                entry_price -= ghost_pips
+            else:
+                entry_price += ghost_pips
 
         # --- TP / SL CALCULATION ---
         # Base SL is 1.5 ATR
         sl_dist = atr * 1.5
         min_dist = point * 50
         sl_dist = max(sl_dist, min_dist)
-
         tp_dist = atr * nn_result["pred_exit_atr"]
 
-        # --- R:R ENFORCEMENT ---
         # Enforce Minimum 1:1.5 Risk:Reward
-        rr_ratio = tp_dist / sl_dist
-        if rr_ratio < 1.5:
-            tp_dist = sl_dist * 1.5  # Force extension
+        if (tp_dist / sl_dist) < 1.5:
+            tp_dist = sl_dist * 1.5
 
         # Calculate Absolute Prices
         if signal["signal"] == "BUY":
@@ -159,13 +180,15 @@ class AITradingEngine:
 
         # --- RISK SIZING ---
         risk_mult = nn_result["risk_mult"]
+
+        # In Shadow Mode, use minimum risk for calculation, but trade is virtual
+        if signal.get("is_shadow", False):
+            risk_mult = 0.1
+
         target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
 
-        # Risk Amount per 1 Lot = (Points Diff) * Tick Value
-        # Points Diff = Distance / Point
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
-
         if risk_per_lot == 0:
             return None
 
@@ -177,7 +200,21 @@ class AITradingEngine:
 
         actual_risk_zar = risk_per_lot * lots
 
-        if actual_risk_zar > (self.user_balance_zar * 0.025):
+        # --- SAFETY CAP ---
+        max_allowed_pct = get_account_risk_caps(self.user_balance_zar)
+
+        # SCALING: If AI suggests higher risk (multiplier > 1), expand the cap
+        if risk_mult > 1.0:
+            max_allowed_pct *= risk_mult
+
+        max_allowed_zar = self.user_balance_zar * (max_allowed_pct / 100.0)
+
+        # High Confidence Cap
+        if actual_risk_zar > max_allowed_zar and not signal.get("is_shadow", False):
+            self._log_once(
+                f"risk_{symbol}",
+                f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) exceeds safety cap (R{max_allowed_zar:.2f})",
+            )
             return None
 
         # Profit Calculation
@@ -196,29 +233,67 @@ class AITradingEngine:
                 "point": point,
                 "atr": atr,
                 "is_high_risk": symbol in HIGH_RISK_SYMBOLS,
-                "order_type": "LIMIT" if is_ghost else "MARKET",
+                "order_type": order_type,
             }
         )
         return signal
 
-    async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> Literal["BULL", "BEAR", "FLAT"]:
-        """Fetches H4 EMA trend. Returns 'BULL', 'BEAR', or 'FLAT'."""
+    def _check_low_vol_candidates(self, symbol: str, curr: pd.Series) -> Optional[Dict]:
+        """Checks if a previously rejected 'Low Vol' trade is now valid (Late Bloomer)."""
+        if symbol not in self.low_vol_candidates:
+            return None
 
-        # 1. Select correct timeframe based on Asset Class
+        cached = self.low_vol_candidates[symbol]
+        # Expire after 15 mins
+        if (time.time() - cached["time"]) > 900:
+            del self.low_vol_candidates[symbol]
+            return None
+
+        # Logic: If Volume is now strong AND price is still near original entry
+        vol_is_strong = curr["volume"] > curr["vol_sma"]
+        price_near_entry = abs(curr["close"] - cached["entry"]) < (curr["atr"] * 0.5)
+
+        if vol_is_strong and price_near_entry:
+            logger.info(f"🌱 Late Bloomer Activated: {symbol} volume spike detected!")
+            del self.low_vol_candidates[symbol]
+            return cached["signal"]
+
+        return None
+
+    def _check_news_update(self):
+        """Checks for updates to news_block.txt every 5 minutes."""
+        now = time.time()
+        if now - self.last_news_load_time < 300:
+            return
+
+        if os.path.exists("news_block.txt"):
+            mtime = os.path.getmtime("news_block.txt")
+            if mtime > self.last_news_load_time:
+                self.news_blocks = self._load_news_blocks()
+                self.last_news_load_time = mtime
+                logger.info("📅 News blocks updated dynamically.")
+        else:
+            self.last_news_load_time = now
+
+    async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> Literal["BULL", "BEAR", "FLAT"]:
+        """Fetches H4 EMA trend."""
         htf_tf = "4h" if symbol in FOREX_SYMBOLS else "1h"
 
         # Cache Check
         now = time.time()
         if symbol in self.htf_cache:
-            if now - self.htf_cache[symbol]["time"] < 3600:
+            cache_ts = self.htf_cache[symbol]["time"]
+            cache_dt = datetime.fromtimestamp(cache_ts)
+            curr_dt = datetime.fromtimestamp(now)
+
+            # Invalidate if day changed
+            if cache_dt.day != curr_dt.day and (now - cache_ts < 3600):
                 return self.htf_cache[symbol]["trend"]
 
-        # Fetch New
         klines = await provider.fetch_klines(symbol, htf_tf, 200)
         trend = "FLAT"
         if klines:
             df = pd.DataFrame(klines)
-            # Add simple slope logic: is EMA 200 rising?
             df["ema_200"] = df["close"].ewm(span=200).mean()
             df["slope"] = df["ema_200"].diff(3)
 
@@ -231,12 +306,15 @@ class AITradingEngine:
             elif price < ema and slope < 0:
                 trend = "BEAR"
 
-        # Save to Cache
         self.htf_cache[symbol] = {"trend": trend, "time": now}
         return trend
 
     def _get_session_status(self) -> Dict:
         """Returns allowed strategy types based on SAST time."""
+        # 1. News Block Check
+        if self._is_news_blocked():
+            return {"allow_trade": False, "reason": "High Impact News"}
+
         now = datetime.now()
         hour = now.hour
         weekday = now.weekday()  # 0=Mon, 6=Sun
@@ -264,6 +342,54 @@ class AITradingEngine:
 
         return {"allow_trade": True, "types": allowed_types}
 
+    def _load_news_blocks(self) -> List[Dict]:
+        """
+        Parses news_block.txt for blocked time ranges.
+        """
+        blocks = []
+        if not os.path.exists("news_block.txt"):
+            return blocks
+        try:
+            with open("news_block.txt", "r") as f:
+                for line in f:
+                    if "->" in line and not line.strip().startswith("#"):
+                        parts = line.split("#")[0].strip().split("->")
+                        if len(parts) == 2:
+                            try:
+                                start = datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M")
+                                end = datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M")
+
+                                # Add 30-minute safety buffer
+                                start_buffer = start - timedelta(minutes=30)
+                                end_buffer = end + timedelta(minutes=30)
+
+                                blocks.append({"start": start_buffer, "end": end_buffer})
+                            except ValueError:
+                                logger.warning(f"Invalid date format in news_block.txt: {line.strip()}")
+        except Exception as e:
+            logger.error(f"Failed to load news blocks: {e}")
+        return blocks
+
+    def _log_once(self, key: str, message: str, level=logging.INFO):
+        """Prevents log spamming for the same event within 5 minutes."""
+        now = time.time()
+        if key in self._log_throttle:
+            if now - self._log_throttle[key] < 300:  # 5 minutes
+                return
+
+        self._log_throttle[key] = now
+        logger.log(level, message)
+
+    def _is_news_blocked(self) -> bool:
+        """
+        Checks if current time is inside a news block window (including buffers).
+        """
+        now = datetime.now()
+        for block in self.news_blocks:
+            if block["start"] <= now <= block["end"]:
+                return True
+        return False
+
     def _prepare_data(self, klines: List[Dict], heavy: bool = True) -> Optional[pd.DataFrame]:
         """Prepares DataFrame with Indicators for Analysis."""
         try:
@@ -271,7 +397,9 @@ class AITradingEngine:
             if df.empty:
                 return None
             df = df.sort_values("time").reset_index(drop=True)
-            return TechnicalAnalyzer.calculate_indicators(df, heavy=heavy)
+
+            analyzer = TechnicalAnalyzer()
+            return analyzer.calculate_indicators(df, heavy=heavy)
         except Exception as e:
             logger.error(f"Data prep error: {e}")
             return None
@@ -280,146 +408,177 @@ class AITradingEngine:
         """
         Main Analysis Pipeline with Spread, Volatility, and Context filters.
         """
-        # 1. Session & Cooldown
+        self._check_news_update()
+
         session_info = self._get_session_status()
         if not session_info["allow_trade"]:
             return None
-        if self.is_on_cooldown(symbol) or symbol in self.active_features:
-            return None
 
-        # 2. Data Prep
+        # 1. Data Prep
         df = await asyncio.to_thread(self._prepare_data, klines, True)
         if df is None:
             return None
         curr = df.iloc[-1]
 
-        # 3. Choppiness & Regime Logic
-        chop_idx = curr["chop_idx"]
-        market_regime = "NEUTRAL"
-        if chop_idx > CHOP_THRESHOLD_RANGE:
-            market_regime = "RANGE"
-        elif chop_idx < CHOP_THRESHOLD_TREND:
-            market_regime = "TREND"
-
-        # Filter Strategies based on Regime AND Session
-        # If Asian Session -> Force Range Regime strategies only
-        if "REVERSION" in session_info["types"] and "TREND" not in session_info["types"]:
-            if market_regime == "TREND":
-                return None  # Don't trade trend in Asia
-
-        # 4. Volatility Checks
         volatility_ratio = 1.0
-        avg_atr = df["atr"].rolling(24).mean().iloc[-1]
-
-        if avg_atr > 0:
-            volatility_ratio = curr["atr"] / avg_atr
-
-        if curr["atr"] > (avg_atr * 3):
-            self._log_once(f"vol_{symbol}", f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
-            self.signal_history[symbol] = time.time() + 1800  # 30 min ban
-            return None
-
-        # Adaptive Cooldown logic
-        current_cooldown_req = PAIR_SIGNAL_COOLDOWN
-        if volatility_ratio > 1.5:
-            current_cooldown_req *= 2
-
-        last_time = self.signal_history.get(symbol, 0)
-        if (time.time() - last_time) < current_cooldown_req:
-            return None
-
-        # 5. Check DB and Spread
-        spread_info = await provider.get_spread(symbol)
-        if spread_info["spread_high"]:
-            return None
-
-        # Stale Check
-        if (time.time() - curr["time"]) > 1800:
-            return None
-
-        # FIX: Check Loss Cooldown (Visibly)
-        try:
-            if self.db_manager:
-                is_loss = await self.db_manager.check_recent_loss(symbol)
-                if is_loss:
-                    self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
-                    return None
-        except Exception:
-            pass
-
-        symbol_info = await provider.get_symbol_info(symbol)
-        if not symbol_info:
-            return None
-
-        point = symbol_info.get("point", 0.00001)
-
-        # 6. Strategy & Pattern Matching
-        htf_trend = await self._get_htf_trend(symbol, provider)
-        patterns = self.pattern_recognizer.analyze_patterns(df)
-
-        # Fakeout Check
-        fake_analysis = self.fake_detector.analyze(df)
         fake_risk_penalty = 1.0
-        if fake_analysis["risk_score"] >= 50:
-            self._log_once(f"fake_{symbol}", f"Skipping {symbol}: Fakeout ({fake_analysis['reasons']})")
-            return None
-        elif fake_analysis["risk_score"] >= 30:
-            fake_risk_penalty = 0.5
+        htf_trend = None
 
-        # Stratey Routing
-        strat_signal = None
-        if symbol in FOREX_SYMBOLS:
-            # BB Reversion Check (Must be Flat)
-            if market_regime == "RANGE" and curr["bb_slope"] < (point * 50):  # Flat bands
-                strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
-
-            # Trend Strategies
-            elif market_regime == "TREND" and "TREND" in session_info["types"]:
-                strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
-                if not strat_signal:
-                    strat_signal = self.strategy_analyzer._fx_macd_divergence(curr, df)
-
-            # Breakout (Only if allowed hour)
-            if not strat_signal and "BREAKOUT" in session_info["types"]:
-                strat_signal = self.strategy_analyzer._fx_volatility_breakout(curr, df)
-        else:
-            strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
-
-        pattern_signal = patterns[0] if patterns else None
+        # --- 2. Late Bloomer Check (Low Volatility Cache) ---
+        late_signal = self._check_low_vol_candidates(symbol, curr)
         final_signal_candidate = None
 
-        # Case A: Strategy + Pattern (Confluence)
-        if strat_signal and pattern_signal:
-            if strat_signal["direction"] == pattern_signal["direction"]:
-                # Boost confidence significantly
-                strat_signal["confidence"] += 10
-                strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
-                final_signal_candidate = strat_signal
-            else:
-                # Conflict: Strategy says Buy, Pattern says Sell. Invalid.
-                self._log_once(f"conflict_{symbol}", f"Skipping {symbol}: Strategy/Pattern Conflict")
+        if late_signal:
+            final_signal_candidate = late_signal
+        else:
+            if self.is_on_cooldown(symbol) or symbol in self.active_features:
                 return None
 
-        # Case B: Only Strategy
-        elif strat_signal:
-            final_signal_candidate = strat_signal
+            # 3. Choppiness & Regime Logic
+            chop_idx = curr["chop_idx"]
+            market_regime = "NEUTRAL"
+            if chop_idx > CHOP_THRESHOLD_RANGE:
+                market_regime = "RANGE"
+            elif chop_idx < CHOP_THRESHOLD_TREND:
+                market_regime = "TREND"
 
-        # Case C: Only Pattern
-        elif pattern_signal:
-            pattern_signal["strategy"] = pattern_signal["pattern"]
-            final_signal_candidate = pattern_signal
+            # Filter Strategies based on Regime AND Session
+            if "REVERSION" in session_info["types"] and "TREND" not in session_info["types"]:
+                if market_regime == "TREND":
+                    return None  # Don't trade trend in Asia
 
-        if not final_signal_candidate:
-            return None
+            # 4. Volatility Checks
+            avg_atr = df["atr"].tail(24).mean()
+
+            if avg_atr > 0:
+                volatility_ratio = curr["atr"] / avg_atr
+
+            if curr["atr"] > (avg_atr * 3):
+                self._log_once(f"vol_{symbol}", f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
+                self.signal_history[symbol] = time.time() + 1800  # 30 min ban
+                return None
+
+            # Adaptive Cooldown logic
+            current_cooldown_req = PAIR_SIGNAL_COOLDOWN
+            if volatility_ratio > 1.5:
+                current_cooldown_req *= 2
+
+            last_time = self.signal_history.get(symbol, 0)
+            if (time.time() - last_time) < current_cooldown_req:
+                return None
+
+            # 5. Check DB and Spread
+            spread_info = await provider.get_spread(symbol)
+            if spread_info["spread_high"]:
+                return None
+
+            # Stale Check
+            if (time.time() - curr["time"]) > 1800:
+                return None
+
+            # FIX: Check Loss Cooldown (Visibly)
+            try:
+                if self.db_manager:
+                    is_loss = await self.db_manager.check_recent_loss(symbol)
+                    if is_loss:
+                        self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
+                        return None
+            except Exception:
+                pass
+
+            # 6. Strategy & Pattern Matching
+            htf_trend = await self._get_htf_trend(symbol, provider)
+
+            pattern_recognizer = PatternRecognizer()
+            patterns = pattern_recognizer.analyze_patterns(df)
+
+            # Fakeout Check
+            breakout_detector = FakeBreakoutDetector()
+            fake_analysis = breakout_detector.analyze(df)
+
+            if fake_analysis["risk_score"] >= 50:
+                # If reason is Low Vol Breakout, cache it for 15 mins
+                if "Low Vol Breakout" in fake_analysis["reasons"]:
+                    pass
+                else:
+                    self._log_once(f"fake_{symbol}", f"Skipping {symbol}: Fakeout ({fake_analysis['reasons']})")
+                    return None
+            elif fake_analysis["risk_score"] >= 30:
+                fake_risk_penalty = 0.5
+
+            # Stratey Routing
+            strat_signal = None
+            symbol_info = await provider.get_symbol_info(symbol)
+            if not symbol_info:
+                return None
+            point = symbol_info.get("point", 0.00001)
+
+            if symbol in FOREX_SYMBOLS:
+                # BB Reversion Check (Must be Flat)
+                if market_regime == "RANGE" and curr["bb_slope"] < (point * 50):  # Flat bands
+                    strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
+
+                # Trend Strategies
+                elif market_regime == "TREND" and "TREND" in session_info["types"]:
+                    strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
+                    if not strat_signal:
+                        strat_signal = self.strategy_analyzer._fx_macd_divergence(curr, df)
+
+                # Breakout (Only if allowed hour)
+                if not strat_signal and "BREAKOUT" in session_info["types"]:
+                    strat_signal = self.strategy_analyzer._fx_volatility_breakout(curr, df)
+            else:
+                strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
+
+            pattern_signal = patterns[0] if patterns else None
+
+            # Case A: Strategy + Pattern (Confluence)
+            if strat_signal and pattern_signal:
+                if strat_signal["direction"] == pattern_signal["direction"]:
+                    strat_signal["confidence"] += 10
+                    strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
+                    final_signal_candidate = strat_signal
+                else:
+                    self._log_once(f"conflict_{symbol}", f"Skipping {symbol}: Strategy/Pattern Conflict")
+                    return None
+            # Case B: Only Strategy
+            elif strat_signal:
+                final_signal_candidate = strat_signal
+            # Case C: Only Pattern
+            elif pattern_signal:
+                pattern_signal["strategy"] = pattern_signal["pattern"]
+                final_signal_candidate = pattern_signal
+
+            if not final_signal_candidate:
+                return None
+
+            # --- Apply Fakeout Cache Logic Here ---
+            if fake_analysis["risk_score"] >= 50 and "Low Vol Breakout" in fake_analysis["reasons"]:
+                self.low_vol_candidates[symbol] = {
+                    "time": time.time(),
+                    "signal": final_signal_candidate,
+                    "entry": curr["close"],
+                }
+                logger.debug(f"⏳ Cached {symbol} for late bloom (Low Volume)")
+                return None
+            elif fake_analysis["risk_score"] >= 50:
+                return None  # Other fakeouts are hard blocks
 
         # 6. ML Prediction
         now = datetime.now()
-        pivots = df[df["high"] == df["high"].rolling(10, center=True).max()]["high"]
+
+        # Looking at last 60 candles is sufficient for recent pivots
+        recent_df = df.iloc[-60:]
+        pivots = recent_df[recent_df["high"] == recent_df["high"].rolling(10, center=True).max()]["high"]
         last_pivot = pivots.iloc[-1] if not pivots.empty else curr["high"]
         dist_to_pivot = abs(curr["close"] - last_pivot) / curr["close"]
 
         range_len = curr["high"] - curr["low"]
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0.0
+
+        # HTF Trend might be missing if we took the Late Bloomer path
+        if htf_trend is None:
+            htf_trend = await self._get_htf_trend(symbol, provider)
 
         features = {
             "rsi": curr["rsi"],
@@ -440,15 +599,18 @@ class AITradingEngine:
         # Predict
         nn_result = self.nn_brain.predict(features)
 
+        # --- SHADOW TRADING LOGIC ---
+        is_shadow = False
         if nn_result["prob"] < 0.45:
-            self.data_collector.log_training_data(symbol, features, 0, 0.0, 0.0)
-            return None
+            is_shadow = True
+            final_signal_candidate["is_shadow"] = True
+            final_signal_candidate["confidence"] = 40.0  # Force low confidence
 
         # Confidence Adjustment
         final_signal = await self._adjust_confidence(
             symbol, final_signal_candidate, nn_result["prob"], htf_trend, volatility_ratio
         )
-        if final_signal["confidence"] < MIN_CONFIDENCE:
+        if final_signal["confidence"] < MIN_CONFIDENCE and not is_shadow:
             return None
 
         # Apply Fakeout Penalty to Risk Multiplier
@@ -458,6 +620,9 @@ class AITradingEngine:
         tick = await provider.get_current_tick(symbol)
         if not tick:
             return None
+
+        if not "symbol_info" in locals():
+            symbol_info = await provider.get_symbol_info(symbol)
 
         result = self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result)
         if result:
@@ -494,7 +659,8 @@ class AITradingEngine:
         # 1. Update Learning
         # 2. Log Data for ML
         if symbol in self.active_features:
-            self.data_collector.log_training_data(symbol, self.active_features[symbol], 1 if won else 0, pnl, excursion)
+            data_collector = DataCollector()
+            data_collector.log_training_data(symbol, self.active_features[symbol], 1 if won else 0, pnl, excursion)
             del self.active_features[symbol]
 
     def register_active_trade(self, symbol: str):

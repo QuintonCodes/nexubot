@@ -106,3 +106,30 @@ FEATURE_COLS = [
     "dist_ema200",
     "volatility_ratio",
 ]
+
+
+# ---------------------------------------------------------
+# DYNAMIC RISK UTILS
+# ---------------------------------------------------------
+def get_account_risk_caps(balance: float) -> float:
+    """
+    Returns the maximum allowable risk percentage based on account size.
+    Smaller accounts get more breathing room for high-probability setups.
+    Larger accounts get tighter safety caps.
+    """
+    if balance < 2000:
+        # Small Account: Allow up to 5% risk to accommodate
+        # multiplier logic (2% base * 2x multiplier = 4%).
+        return 5.0
+    elif balance < 10000:
+        # Medium-Small: Cap at 4%
+        return 4.0
+    elif balance < 100000:
+        # Medium: Standard conservative cap
+        return 3.0
+    elif balance < 1000000:
+        # Large: Very conservative
+        return 2.0
+    else:
+        # Institutional: Ultra conservative
+        return 1.5
