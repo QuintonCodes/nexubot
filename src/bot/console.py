@@ -66,19 +66,72 @@ class NexubotConsole:
             if info:
                 self.symbol_digits[sym] = info.get("digits", 5)
 
+    def _calculate_offline_result(self, symbol: str, signal: dict, start_time: float, klines):
+        """Synchronous CPU-bound calculation logic for offline verification."""
+        if not klines:
+            return None, 0.0, False
+
+        sl = signal["sl"]
+        tp = signal["tp"]
+        entry = signal["price"]
+        is_long = signal["direction"] == "LONG"
+        order_type = signal.get("order_type", "MARKET")
+        trade_duration = 14400
+
+        outcome = None
+        pnl = 0.0
+        filled_offline = order_type == "MARKET"
+
+        for k in klines:
+            if k["time"] < start_time:
+                continue
+
+            if (k["time"] - start_time) > trade_duration:
+                outcome = "TIMEOUT (Offline)"
+                break
+
+            if not filled_offline:
+                if is_long:
+                    if k["low"] <= entry:
+                        filled_offline = True
+                else:
+                    if k["high"] >= entry:
+                        filled_offline = True
+                if filled_offline:
+                    continue
+
+            if filled_offline:
+                if is_long:
+                    if k["low"] <= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    if k["high"] >= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+                else:
+                    if k["high"] >= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    if k["low"] <= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+
+        return outcome, pnl, filled_offline
+
     async def _verify_offline_outcome(self, symbol: str, signal: dict, start_time: float) -> bool:
         """
-        Checks if a trade that existed while offline has finished (TP/SL/Timeout).
+        Checks if a trade that existed while offline has finished.
+        Uses asyncio.to_thread for the heavy calculation loop.
         """
         print(f"{MAGENTA}Checking offline history for {symbol}...{RESET}")
 
         now = time.time()
         elapsed = now - start_time
-        # Calculate how many M15 candles we missed
-        # 900s = 15m. Add buffer of 5 candles.
         candles_needed = math.ceil(elapsed / 900) + 5
-
-        # Max cap candles to avoid overloading (e.g. if off for a week)
         candles_needed = min(candles_needed, 1000)
 
         klines = await self.provider.fetch_klines(symbol, TIMEFRAME, candles_needed)
@@ -90,73 +143,9 @@ class NexubotConsole:
                 return True
             return False  # Try to resume if data missing but time remains?
 
-        sl = signal["sl"]
-        tp = signal["tp"]
-        entry = signal["price"]
-        is_long = signal["direction"] == "LONG"
-        order_type = signal.get("order_type", "MARKET")
-        trade_duration = 14400  # 4 Hours
-
-        outcome = None  # None means still running
-        pnl = 0.0
-        filled_offline = False
-
-        # If it was a MARKET order, it was filled at start_time
-        if order_type == "MARKET":
-            filled_offline = True
-
-        for k in klines:
-            # Skip candles that happened before the trade started
-            if k["time"] < start_time:
-                continue
-
-            # Stop checking if we passed the 4 hour duration mark relative to start
-            if (k["time"] - start_time) > trade_duration:
-                outcome = "TIMEOUT (Offline)"
-                # Calculate PnL at close of this candle (expiry)
-                # Note: This ignores current tick, using candle close for offline calc
-                break
-
-            # Check fill first
-            if not filled_offline:
-                if is_long:
-                    if k["low"] <= entry:
-                        filled_offline = True
-                else:
-                    if k["low"] >= entry:
-                        filled_offline = True
-
-                # If filled in this candle, we generally skip TP/SL check
-                # for this specific candle to be conservative/avoid ambiguity
-                if filled_offline:
-                    continue
-
-            # --- 2. Check Outcome (If Filled) ---
-            if filled_offline:
-                if is_long:
-                    # Check SL (Low)
-                    if k["low"] <= sl:
-                        outcome = "LOSS (SL Offline)"
-                        pnl = -signal["risk_zar"]
-                        break
-                    # Check TP (High)
-                    if k["high"] >= tp:
-                        outcome = "WIN (TP Offline)"
-                        pnl = signal["profit_zar"]
-                        break
-                else:
-                    # Check SL (High)
-                    if k["high"] >= sl:
-                        outcome = "LOSS (SL Offline)"
-                        pnl = -signal["risk_zar"]
-                        break
-                    # Check TP (Low)
-                    if k["low"] <= tp:
-                        outcome = "WIN (TP Offline)"
-                        pnl = signal["profit_zar"]
-                        break
-
-        # --- Post-Loop Decision ---
+        outcome, pnl, filled_offline = await asyncio.to_thread(
+            self._calculate_offline_result, symbol, signal, start_time, klines
+        )
 
         # Case 1: Trade finished (TP or SL hit)
         if outcome and "TIMEOUT" not in outcome:
@@ -171,7 +160,7 @@ class NexubotConsole:
                     "signal": signal["signal"],
                     "confidence": signal["confidence"],
                     "entry": signal["price"],
-                    "exit": tp if won else sl,
+                    "exit": signal["tp"] if won else signal["sl"],
                     "won": won,
                     "pnl": pnl,
                     "strategy": signal["strategy"] + " (Offline)",
@@ -190,7 +179,7 @@ class NexubotConsole:
             return True
 
         # Case 2: Trade Timed Out (Duration exceeded)
-        if outcome == "TIMEOUT (Offline)" or elapsed > trade_duration:
+        if outcome == "TIMEOUT (Offline)" or elapsed > 14400:
             # If we never filled, it's a Cancel
             if not filled_offline:
                 print(f"{GRAY}🚫 Offline Result ({symbol}): CANCELLED (Never Filled){RESET}")
@@ -203,6 +192,8 @@ class NexubotConsole:
             lot_size = signal["lot_size"]
             point = signal.get("point", 0.00001)
 
+            entry = signal["price"]
+            is_long = signal["direction"] == "LONG"
             if is_long:
                 points_diff = (last_close - entry) / point
             else:
@@ -491,7 +482,6 @@ class NexubotConsole:
 
         # Trailer State
         be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
-
         duration = 14400  # 4 hours
         start_time = resume_start_time if resume_start_time else time.time()
         interval = 1  # Check every second
@@ -514,21 +504,23 @@ class NexubotConsole:
 
                 current_bid = tick.bid
                 current_ask = tick.ask
+                # Spread is crucial for fill simulation
+                spread = current_ask - current_bid
 
                 # --- 1. GHOST ORDER LOGIC (WAIT FOR FILL) ---
                 if not is_filled:
                     if is_long:
-                        if current_ask <= entry:  # Ask price hits entry
+                        if current_ask <= (entry - spread):  # Ask price hits entry
                             is_filled = True
                             if not is_shadow:
                                 print(f"{YELLOW}⚡ {symbol} Ghost Limit BUY Filled at {entry}{RESET}")
                     else:
-                        if current_bid >= entry:  # Bid price hits entry
+                        if current_bid >= (entry + spread):  # Bid price hits entry
                             is_filled = True
                             if not is_shadow:
                                 print(f"{YELLOW}⚡ {symbol} Ghost Limit SELL Filled at {entry}{RESET}")
 
-                    # If price moves away by 2 ATR without filling, cancel
+                    # Runaway cancellation
                     dist_away = (current_ask - entry) if is_long else (entry - current_bid)
                     if dist_away > (atr * 2):
                         outcome = "CANCELLED (Runaway)"
@@ -676,13 +668,12 @@ class NexubotConsole:
                         }
                     )
             else:
-                # Shadow Logging (Minimal)
                 color = GREEN if won else RED
                 print(f"{GRAY}👻 Shadow Result ({symbol}): {color}{outcome}{RESET} (Virtual)")
 
-            # Record outcome for ML (Shadow trades are valid for training!)
             if is_filled:
-                self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr)
+                # Pass is_shadow flag to exclude from training
+                self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr, is_shadow)
 
         except asyncio.CancelledError:
             return

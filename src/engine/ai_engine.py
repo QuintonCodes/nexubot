@@ -17,6 +17,7 @@ from src.utils.trainer import ModelTrainer
 from src.config import (
     CHOP_THRESHOLD_TREND,
     CHOP_THRESHOLD_RANGE,
+    CRYPTO_SYMBOLS,
     FOREX_SYMBOLS,
     HIGH_RISK_SYMBOLS,
     MAX_LOT_SIZE,
@@ -114,10 +115,10 @@ class AITradingEngine:
         tick_value = info.get("trade_tick_value", 0)
         min_vol = info.get("min_vol", 0.01)
         max_vol = info.get("max_vol", 100.0)
+        vol_step = info.get("vol_step", 0.01)
         atr = float(curr["atr"])
 
         # --- SMART ENTRY LOGIC ---
-        # Don't chase signals that have already moved significantly
         signal_close_price = curr["close"]
         current_market_price = ask if signal["direction"] == "LONG" else bid
 
@@ -127,37 +128,23 @@ class AITradingEngine:
             logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
             return None
 
-        # Determine Order Type based on Strategy
-        strategy_name = signal.get("strategy", "").lower()
-        is_trend_strat = "ichimoku" in strategy_name or "breakout" in strategy_name or "trend" in strategy_name
-        is_reversal_strat = (
-            "reversion" in strategy_name
-            or "divergence" in strategy_name
-            or "double" in strategy_name
-            or "head" in strategy_name
-        )
+        # Determine Order Type
+        # Strategy defaults (like FVG using LIMIT) take precedence
+        order_type = signal.get("order_type", "MARKET")
+        entry_price = signal.get("price", current_market_price)
 
         # --- GHOST ORDER LOGIC ---
-        entry_price = current_market_price
-        order_type = "MARKET"
-
-        if signal["confidence"] > 85.0 or is_trend_strat:
-            order_type = "MARKET"
-        elif is_reversal_strat:
-            order_type = "LIMIT"
-            ghost_pips = 15 * point  # 1.5 pips
-            if signal["direction"] == "LONG":
-                entry_price -= ghost_pips
-            else:
-                entry_price += ghost_pips
-        else:
-            # Default fallbaack for low confidence
-            order_type = "LIMIT"
-            ghost_pips = 10 * point  # 1 pip
-            if signal["direction"] == "LONG":
-                entry_price -= ghost_pips
-            else:
-                entry_price += ghost_pips
+        # Only override if strategy didn't specify strict order type
+        strategy_name = signal.get("strategy", "").lower()
+        if "fvg" not in strategy_name and "limit" not in str(order_type).lower():
+            if signal["confidence"] <= 85.0:
+                is_reversal = "reversion" in strategy_name or "divergence" in strategy_name
+                order_type = "LIMIT"
+                ghost_pips = 15 * point if is_reversal else 10 * point
+                if signal["direction"] == "LONG":
+                    entry_price = current_market_price - ghost_pips
+                else:
+                    entry_price = current_market_price + ghost_pips
 
         # --- TP / SL CALCULATION ---
         # Base SL is 1.5 ATR
@@ -172,21 +159,21 @@ class AITradingEngine:
 
         # Calculate Absolute Prices
         if signal["signal"] == "BUY":
+            # For Limit orders, SL/TP relative to Limit Price
+            ref_price = entry_price if order_type == "LIMIT" else ask
             sl_price = ask - sl_dist
             tp_price = ask + tp_dist
         else:
+            ref_price = entry_price if order_type == "LIMIT" else bid
             sl_price = bid + sl_dist
             tp_price = bid - tp_dist
 
         # --- RISK SIZING ---
         risk_mult = nn_result["risk_mult"]
-
-        # In Shadow Mode, use minimum risk for calculation, but trade is virtual
         if signal.get("is_shadow", False):
             risk_mult = 0.1
 
         target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
-
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
         if risk_per_lot == 0:
@@ -194,16 +181,13 @@ class AITradingEngine:
 
         # Lot Sizing
         lots = target_risk_zar / risk_per_lot
-        step = info.get("vol_step", 0.01)
-        lots = round(lots / step) * step
+        lots = round(lots / vol_step) * vol_step
         lots = max(min_vol, min(lots, max_vol, MAX_LOT_SIZE))
 
         actual_risk_zar = risk_per_lot * lots
 
         # --- SAFETY CAP ---
         max_allowed_pct = get_account_risk_caps(self.user_balance_zar)
-
-        # SCALING: If AI suggests higher risk (multiplier > 1), expand the cap
         if risk_mult > 1.0:
             max_allowed_pct *= risk_mult
 
@@ -211,11 +195,18 @@ class AITradingEngine:
 
         # High Confidence Cap
         if actual_risk_zar > max_allowed_zar and not signal.get("is_shadow", False):
-            self._log_once(
-                f"risk_{symbol}",
-                f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) exceeds safety cap (R{max_allowed_zar:.2f})",
-            )
-            return None
+            while actual_risk_zar > max_allowed_zar and lots > min_vol:
+                lots -= vol_step
+                actual_risk_zar = risk_per_lot * lots
+
+            # Final check after reduction
+            lots = round(lots, 2)
+            if lots < min_vol or actual_risk_zar > (max_allowed_zar * 1.1):  # Allow 10% buffer for rounding
+                self._log_once(
+                    f"risk_{symbol}",
+                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) exceeds safety cap (R{max_allowed_zar:.2f})",
+                )
+                return None
 
         # Profit Calculation
         points_profit = tp_dist / point
@@ -449,7 +440,6 @@ class AITradingEngine:
 
             # 4. Volatility Checks
             avg_atr = df["atr"].tail(24).mean()
-
             if avg_atr > 0:
                 volatility_ratio = curr["atr"] / avg_atr
 
@@ -522,7 +512,7 @@ class AITradingEngine:
                 elif market_regime == "TREND" and "TREND" in session_info["types"]:
                     strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
                     if not strat_signal:
-                        strat_signal = self.strategy_analyzer._fx_macd_divergence(curr, df)
+                        strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
 
                 # Breakout (Only if allowed hour)
                 if not strat_signal and "BREAKOUT" in session_info["types"]:
@@ -580,6 +570,12 @@ class AITradingEngine:
         if htf_trend is None:
             htf_trend = await self._get_htf_trend(symbol, provider)
 
+        # Calculate Distance to VWAP
+        dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
+
+        # Handle Day Norm for Crypto (Remove noise)
+        day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else now.weekday() / 6.0
+
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
@@ -590,10 +586,11 @@ class AITradingEngine:
             "htf_trend": 1 if htf_trend == "BULL" else (-1 if htf_trend == "BEAR" else 0),
             "dist_to_pivot": dist_to_pivot,
             "hour_norm": now.hour / 24.0,
-            "day_norm": now.weekday() / 6.0,
+            "day_norm": day_norm_val,
             "wick_ratio": wick_ratio,
             "dist_ema200": (curr["close"] - curr["ema_200"]) / curr["close"],
             "volatility_ratio": volatility_ratio,
+            "dist_to_vwap": dist_to_vwap,
         }
 
         # Predict
@@ -654,10 +651,15 @@ class AITradingEngine:
         scored.sort(key=lambda x: x[1], reverse=True)
         return [s[0] for s in scored]
 
-    def record_trade_outcome(self, symbol: str, won: bool, pnl: float, excursion: float = 0.0):
+    def record_trade_outcome(self, symbol: str, won: bool, pnl: float, excursion: float = 0.0, is_shadow: bool = False):
         """Called by Console after trade finishes."""
-        # 1. Update Learning
-        # 2. Log Data for ML
+        # Update Learning
+        if is_shadow:
+            logger.debug(f"👻 Shadow trade outcome ignored for training: {symbol}")
+            if symbol in self.active_features:
+                del self.active_features[symbol]
+            return
+
         if symbol in self.active_features:
             data_collector = DataCollector()
             data_collector.log_training_data(symbol, self.active_features[symbol], 1 if won else 0, pnl, excursion)

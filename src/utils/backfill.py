@@ -10,7 +10,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 from src.data.provider import DataProvider
 from src.analysis.indicators import TechnicalAnalyzer
 from src.engine.strategies import StrategyAnalyzer
-from src.config import ALL_SYMBOLS, DATA_FILE, FOREX_SYMBOLS
+from src.config import ALL_SYMBOLS, CRYPTO_SYMBOLS, DATA_FILE, FOREX_SYMBOLS
 
 
 # Memory buffer for efficient writing
@@ -78,10 +78,10 @@ def finalize_dataset():
     # Assuming columns match, we drop exact duplicates
     full_df.drop_duplicates(inplace=True)
 
-    # 3. Dynamic Capping (Last 5000 rows)
-    if len(full_df) > 5000:
-        print(f"✂️ Capping dataset: Trimming {len(full_df)} rows down to 5000.")
-        full_df = full_df.iloc[-5000:]
+    # 3. Dynamic Capping (Last 50000 rows)
+    if len(full_df) > 50000:
+        print(f"✂️ Capping dataset: Trimming {len(full_df)} rows down to 50000.")
+        full_df = full_df.iloc[-50000:]
 
     # 4. Overwrite File
     full_df.to_csv(DATA_FILE, index=False, mode="w")
@@ -143,7 +143,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     df_merged["avg_atr"] = df_merged["atr"].rolling(24).mean()
 
     for i in range(50, len(df_merged) - 20):
-        if processed >= 500:  # Limit samples per symbol
+        if processed >= 1000:  # Limit samples per symbol
             break
 
         curr = df_merged.iloc[i]
@@ -159,6 +159,13 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0
         avg_atr = curr["avg_atr"] if curr["avg_atr"] > 0 else curr["atr"]
 
+        dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
+
+        # --- Time Normalization Fix ---
+        curr_time = pd.to_datetime(curr["time"], unit="s")
+        # Crypto runs 24/7 so day of week is noise (set to 0.0), Forex respects weekday
+        day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else curr_time.weekday() / 6.0
+
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
@@ -168,11 +175,12 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
             "htf_trend": trend_val,
             "dist_to_pivot": dist_to_pivot,
-            "hour_norm": 0.5,
-            "day_norm": 0.5,
+            "hour_norm": curr_time.hour / 24.0,
+            "day_norm": day_norm_val,
             "wick_ratio": wick_ratio,
             "dist_ema200": (curr["close"] - curr["ema_200"]) / curr["close"],
             "volatility_ratio": curr["atr"] / avg_atr,
+            "dist_to_vwap": dist_to_vwap,
         }
 
         # 2. Check Strategy

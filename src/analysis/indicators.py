@@ -13,6 +13,14 @@ class TechnicalAnalyzer:
         """
         Applies technical indicators to the provided DataFrame.
         """
+        # Ensure DateTime column exists for Time-based indicators
+        if "datetime" not in df.columns:
+            if "time" in df.columns:
+                df["datetime"] = pd.to_datetime(df["time"], unit="s")
+            else:
+                # Fallback if no time column, though unusual
+                df["datetime"] = pd.Timestamp.now()
+
         # --- Trend: EMAs (Essential) ---
         df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
         df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
@@ -39,16 +47,21 @@ class TechnicalAnalyzer:
         # --- Volume (Essential) ---
         df["vol_sma"] = df["volume"].rolling(window=20).mean()
 
+        # --- VWAP (Session/Daily Reset) ---
+        # Explicitly grouping by Date to reset calculation at 00:00
+        df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
+        df["date_group"] = df["datetime"].dt.date
+        df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
+        df["cum_vol"] = df.groupby("date_group")["volume"].cumsum()
+        df["vwap"] = df["cum_pv"] / df["cum_vol"]
+
         if not heavy:
             return df.fillna(0)
 
         # --- EXPENSIVE INDICATORS (Optional) ---
 
         # --- CHOPPINESS INDEX (CI) ---
-        # CI = 100 * LOG10( SUM(ATR(1), n) / ( MaxHi(n) - MinLo(n) ) ) / LOG10(n)
         ci_period = 14
-        df["atr_sum"] = df["atr"].rolling(window=ci_period).sum()  # Approximation using ATR
-        # Better formula using True Range Sum:
         df["tr_sum"] = tr.rolling(window=ci_period).sum()
         df["hh_n"] = df["high"].rolling(window=ci_period).max()
         df["ll_n"] = df["low"].rolling(window=ci_period).min()
@@ -94,20 +107,6 @@ class TechnicalAnalyzer:
         df["bb_upper"] = df["sma20"] + (df["std20"] * 2)
         df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
         df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["sma20"]
-
-        # Check if BB is flat (using derivative of SMA20)
         df["bb_slope"] = df["sma20"].diff(3).abs()
-
-        # --- VWAP & Volume Profile Approximation ---
-        if "datetime" not in df.columns:
-            if "time" in df.columns:
-                df["datetime"] = pd.to_datetime(df["time"], unit="s")
-
-        if "datetime" in df.columns:
-            df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
-            df["date_group"] = df["datetime"].dt.date
-            df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
-            df["cum_vol"] = df.groupby("date_group")["volume"].cumsum()
-            df["vwap"] = df["cum_pv"] / df["cum_vol"]
 
         return df.fillna(0)

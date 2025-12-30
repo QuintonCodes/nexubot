@@ -34,8 +34,8 @@ class StrategyAnalyzer:
         if res:
             return res
 
-        # 4. Strategy: MACD Divergence (Reversals)
-        res = self._fx_macd_divergence(curr, df)
+        # 4. Strategy: Fair Value Gap (3-Candle + Limit)
+        res = self._fx_fvg_entry(curr, df)
         if res:
             return res
 
@@ -67,8 +67,8 @@ class StrategyAnalyzer:
         if res:
             return res
 
-        # 4. Strategy: Volume Squeeze (Explosive Moves)
-        res = self._crypto_vol_squeeze(curr)
+        # 4. Strategy: VWAP Rejection (Session Reset)
+        res = self._crypto_vwap_rejection(curr)
         if res:
             return res
 
@@ -94,18 +94,17 @@ class StrategyAnalyzer:
 
         # Long: HTF Bullish + Price > EMA200 + Pullback to EMA50
         if htf_trend == "BULL" and curr["close"] > curr["ema_200"]:
-            # Price is near EMA50 (within 0.5 ATR)
             dist_ema50 = abs(curr["low"] - curr["ema_50"])
             if dist_ema50 <= (curr["atr"] * 0.5):
-                # Trigger: RSI is not overbought (room to grow)
-                if curr["rsi"] < 60:
+                # Volume Confirmation
+                if curr["rsi"] < 60 and curr["volume"] > curr["vol_sma"]:
                     return {"strategy": "FX Golden Pullback", "signal": "BUY", "direction": "LONG", "confidence": 85.0}
 
         # Short: HTF Bearish + Price < EMA200 + Pullback to EMA50
         if htf_trend == "BEAR" and curr["close"] < curr["ema_200"]:
             dist_ema50 = abs(curr["high"] - curr["ema_50"])
             if dist_ema50 <= (curr["atr"] * 0.5):
-                if curr["rsi"] > 40:
+                if curr["rsi"] > 40 and curr["volume"] > curr["vol_sma"]:
                     return {
                         "strategy": "FX Golden Pullback",
                         "signal": "SELL",
@@ -133,26 +132,50 @@ class StrategyAnalyzer:
 
         return None
 
-    def _fx_macd_divergence(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
+    def _fx_fvg_entry(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
         """
-        Strategy 3: MACD Divergence
-        Logic: Price makes New Low, MACD makes Higher Low (Reversal).
+        Strategy 3: Fair Value Gap (FVG)
+        Detects 3-candle imbalance and places LIMIT order at gap start.
         """
-        prev = df.iloc[-2]
+        if len(df) < 3:
+            return None
 
-        # Bullish Divergence
-        # Price: Lower Low, MACD: Higher Low
-        if curr["low"] < prev["low"] and curr["macd"] > prev["macd"]:
-            # Confirm with Histogram ticking up
-            if curr["macd_hist"] > prev["macd_hist"] and curr["macd_hist"] > 0:
-                return {"strategy": "FX MACD Div", "signal": "BUY", "direction": "LONG", "confidence": 88.0}
+        c1 = df.iloc[-3]  # The candle before the move
+        c2 = df.iloc[-2]  # Displacement
+        c3 = df.iloc[-1]  # Current
 
-        # Bearish Divergence
-        # Price: Higher High, MACD: Lower High
-        if curr["high"] > prev["high"] and curr["macd"] < prev["macd"]:
-            if curr["macd_hist"] < prev["macd_hist"] and curr["macd_hist"] < 0:
-                return {"strategy": "FX MACD Div", "signal": "SELL", "direction": "SHORT", "confidence": 88.0}
+        # Displacement Check: Middle candle body > ATR
+        c2_body = abs(c2["close"] - c2["open"])
+        if c2_body < curr["atr"]:
+            return None
 
+        # Bullish FVG (Gap between C1 High and C3 Low)
+        if c2["close"] > c2["open"]:  # Green displacement
+            if c1["high"] < c3["low"]:
+                gap_size = c3["low"] - c1["high"]
+                if gap_size > (curr["atr"] * 0.1):  # Minimum gap size
+                    return {
+                        "strategy": "SMC FVG",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 85.0,
+                        "order_type": "LIMIT",  # SMC uses limits
+                        "price": c1["high"],  # Entry at top of C1
+                    }
+
+        # Bearish FVG (Gap between C1 Low and C3 High)
+        if c2["close"] < c2["open"]:  # Red displacement
+            if c1["low"] > c3["high"]:
+                gap_size = c1["low"] - c3["high"]
+                if gap_size > (curr["atr"] * 0.1):
+                    return {
+                        "strategy": "SMC FVG",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 85.0,
+                        "order_type": "LIMIT",
+                        "price": c1["low"],
+                    }
         return None
 
     def _fx_volatility_breakout(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
@@ -162,14 +185,13 @@ class StrategyAnalyzer:
         """
         prev = df.iloc[-2]
 
-        # 1. Compression: Previous candle range was very small (< 0.5 ATR)
         prev_range = prev["high"] - prev["low"]
         is_compressed = prev_range < (prev["atr"] * 0.6)
 
         if not is_compressed:
             return None
 
-        # 2. Expansion: Current candle breaks prev High/Low
+        # Expansion: Current candle breaks prev High/Low
         # Long Breakout
         if curr["close"] > prev["high"]:
             if curr["volume"] > curr["vol_sma"]:  # Volume Confirmation
@@ -229,26 +251,40 @@ class StrategyAnalyzer:
 
         return None
 
-    def _crypto_vol_squeeze(self, curr: pd.Series) -> Optional[Dict]:
+    def _crypto_vwap_rejection(self, curr: pd.Series) -> Optional[Dict]:
         """
-        Strategy 3: Bollinger Squeeze
-        Logic: Periods of low volatility (squeeze) lead to explosive moves.
+        Strategy 3: Session VWAP Rejection.
+        Triggers ONLY when price touches the VWAP and rejects with a large wick.
         """
-        # 1. Identify Squeeze (Band width is tight)
-        # Note: 0.10 is a generic threshold, relative checking is better but this is solid for code simplicity
-        if curr["bb_width"] > 0.12:
-            return None
+        # Trend Check
+        if curr["close"] > curr["vwap"]:
+            # Bullish: Price dipped below VWAP but closed above (Wick Rejection)
+            if curr["low"] < curr["vwap"] and curr["close"] > curr["vwap"]:
+                # Validation: Long lower wick
+                body = abs(curr["close"] - curr["open"])
+                lower_wick = min(curr["close"], curr["open"]) - curr["low"]
+                if lower_wick > body:  # Wick larger than body
+                    return {
+                        "strategy": "VWAP Rejection",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 88.0,
+                        "order_type": "MARKET",
+                    }
 
-        # 2. Breakout Logic
-        if curr["close"] > curr["bb_upper"]:
-            # Volume must support the breakout
-            if curr["volume"] > curr["vol_sma"]:
-                return {"strategy": "Crypto Squeeze", "signal": "BUY", "direction": "LONG", "confidence": 88.0}
-
-        if curr["close"] < curr["bb_lower"]:
-            if curr["volume"] > curr["vol_sma"]:
-                return {"strategy": "Crypto Squeeze", "signal": "SELL", "direction": "SHORT", "confidence": 88.0}
-
+        elif curr["close"] < curr["vwap"]:
+            # Bearish
+            if curr["high"] > curr["vwap"] and curr["close"] < curr["vwap"]:
+                body = abs(curr["close"] - curr["open"])
+                upper_wick = curr["high"] - max(curr["close"], curr["open"])
+                if upper_wick > body:
+                    return {
+                        "strategy": "VWAP Rejection",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 88.0,
+                        "order_type": "MARKET",
+                    }
         return None
 
     def _crypto_liquidity_grab(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
