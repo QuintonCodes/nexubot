@@ -19,9 +19,19 @@ class PatternRecognizer:
             return patterns
 
         # 1. Swing Detection (Pivots)
-        window = 5
-        df["is_pivot_high"] = df["high"] == df["high"].rolling(window=window * 2 + 1, center=True).max()
-        df["is_pivot_low"] = df["low"] == df["low"].rolling(window=window * 2 + 1, center=True).min()
+        window = 2
+        df["is_pivot_high"] = (
+            (df["high"] > df["high"].shift(1))
+            & (df["high"] > df["high"].shift(2))
+            & (df["high"] > df["high"].shift(-1))
+            & (df["high"] > df["high"].shift(-2))
+        )
+        df["is_pivot_low"] = (
+            (df["low"] < df["low"].shift(1))
+            & (df["low"] < df["low"].shift(2))
+            & (df["low"] < df["low"].shift(-1))
+            & (df["low"] < df["low"].shift(-2))
+        )
         df["max_id"] = df.iloc[argrelextrema(df["close"].values, np.greater_equal, order=5)[0]]["close"]
 
         highs = df[df["is_pivot_high"]].copy()
@@ -33,33 +43,54 @@ class PatternRecognizer:
             h1 = highs.iloc[-2]
             h2 = highs.iloc[-1]
 
-            # Strictness: Peaks must be very close (0.1% tolerance)
-            price_diff = abs(h1["high"] - h2["high"])
-            if price_diff / h1["high"] < 0.001:
-                # Find neckline (lowest point between peaks)
-                mask = (df.index > h1.name) & (df.index < h2.name)
-                if mask.any():
-                    neckline = df.loc[mask, "low"].min()
-                    # Trigger: Breakdown below neckline
-                    if curr_price < neckline:
-                        patterns.append(
-                            {"pattern": "Double Top", "signal": "SELL", "direction": "SHORT", "confidence": 88.0}
-                        )
+            # Check recency: The second peak must be recent (within last 10 candles)
+            if (df.index.get_loc(df.index[-1]) - df.index.get_loc(h2.name)) < 15:
+                # Tolerance 0.15% (Slightly looser for faster detection)
+                if abs(h1["high"] - h2["high"]) / h1["high"] < 0.0015:
+                    mask = (df.index > h1.name) & (df.index < h2.name)
+                    if mask.any():
+                        neckline = df.loc[mask, "low"].min()
+                        # Aggressive Entry: Signal slightly BEFORE neckline break if volume matches
+                        dist_to_break = (curr_price - neckline) / curr_price
+
+                        if curr_price < neckline or (
+                            dist_to_break < 0.001 and df.iloc[-1]["volume"] > df.iloc[-1]["vol_sma"]
+                        ):
+                            patterns.append(
+                                {
+                                    "pattern": "Double Top",
+                                    "signal": "SELL",
+                                    "direction": "SHORT",
+                                    "confidence": 88.0,
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
 
         if len(lows) >= 2:
             l1 = lows.iloc[-2]
             l2 = lows.iloc[-1]
 
-            price_diff = abs(l1["low"] - l2["low"])
-            if price_diff / l1["low"] < 0.001:
-                mask = (df.index > l1.name) & (df.index < l2.name)
-                if mask.any():
-                    neckline = df.loc[mask, "high"].max()
-                    # Trigger: Breakout above neckline
-                    if curr_price > neckline:
-                        patterns.append(
-                            {"pattern": "Double Bottom", "signal": "BUY", "direction": "LONG", "confidence": 88.0}
-                        )
+            if (df.index.get_loc(df.index[-1]) - df.index.get_loc(l2.name)) < 15:
+                if abs(l1["low"] - l2["low"]) / l1["low"] < 0.0015:
+                    mask = (df.index > l1.name) & (df.index < l2.name)
+                    if mask.any():
+                        neckline = df.loc[mask, "high"].max()
+                        dist_to_break = (neckline - curr_price) / neckline
+
+                        if curr_price > neckline or (
+                            dist_to_break < 0.001 and df.iloc[-1]["volume"] > df.iloc[-1]["vol_sma"]
+                        ):
+                            patterns.append(
+                                {
+                                    "pattern": "Double Bottom",
+                                    "signal": "BUY",
+                                    "direction": "LONG",
+                                    "confidence": 88.0,
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
 
         # --- HEAD AND SHOULDERS (Bearish) ---
         # Left Shoulder, Head (Higher), Right Shoulder (Lower than head, ~Left)
@@ -87,6 +118,34 @@ class PatternRecognizer:
             patterns.extend(flags)
 
         return patterns
+
+    def check_market_structure(self, df: pd.DataFrame) -> str:
+        """
+        Returns 'BULL', 'BEAR', or 'UNCLEAR' based on recent swing points.
+        Prevents buying into a Lower Low structure.
+        """
+        # Get last 20 candles
+        recent = df.iloc[-20:].copy()
+
+        # Find simple local max/min
+        recent["is_high"] = recent["high"] == recent["high"].rolling(5, center=True).max()
+        recent["is_low"] = recent["low"] == recent["low"].rolling(5, center=True).min()
+
+        last_highs = recent[recent["is_high"]]["high"].values
+        last_lows = recent[recent["is_low"]]["low"].values
+
+        if len(last_highs) < 2 or len(last_lows) < 2:
+            return "UNCLEAR"
+
+        # Bullish Structure: Higher Highs AND Higher Lows
+        if last_highs[-1] > last_highs[-2] and last_lows[-1] > last_lows[-2]:
+            return "BULL"
+
+        # Bearish Structure: Lower Lows AND Lower Highs
+        if last_lows[-1] < last_lows[-2] and last_highs[-1] < last_highs[-2]:
+            return "BEAR"
+
+        return "UNCLEAR"
 
     def find_flags(self, df: pd.DataFrame) -> List[Dict]:
         """

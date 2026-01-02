@@ -92,25 +92,51 @@ class StrategyAnalyzer:
         if curr["adx"] < 25:
             return None
 
+        # Use ZLEMA if available, else EMA
+        ema_50 = curr.get("zlema_50", curr["ema_50"])
+        ema_200 = curr["ema_200"]
+
         # Long: HTF Bullish + Price > EMA200 + Pullback to EMA50
-        if htf_trend == "BULL" and curr["close"] > curr["ema_200"]:
-            dist_ema50 = abs(curr["low"] - curr["ema_50"])
-            if dist_ema50 <= (curr["atr"] * 0.5):
-                # Volume Confirmation
-                if curr["rsi"] < 60 and curr["volume"] > curr["vol_sma"]:
-                    return {"strategy": "FX Golden Pullback", "signal": "BUY", "direction": "LONG", "confidence": 85.0}
+        if htf_trend == "BULL" and curr["close"] > ema_200:
+            dist_ema50 = abs(curr["low"] - ema_50)
+            # Don't buy if RSI is already hot (over 65)
+            if curr["rsi"] > 65:
+                return None
+
+            entry_price = ema_50
+
+            # Ensure entry is below current price (Discount)
+            if entry_price < curr["close"]:
+                sl_price = entry_price - (curr["atr"] * 1.5)
+
+                return {
+                    "strategy": "FX Golden Pullback",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 85.0,
+                    "order_type": "LIMIT",
+                    "price": entry_price,
+                    "suggested_sl": sl_price,  # Pass this to AI Engine
+                }
 
         # Short: HTF Bearish + Price < EMA200 + Pullback to EMA50
-        if htf_trend == "BEAR" and curr["close"] < curr["ema_200"]:
-            dist_ema50 = abs(curr["high"] - curr["ema_50"])
-            if dist_ema50 <= (curr["atr"] * 0.5):
-                if curr["rsi"] > 40 and curr["volume"] > curr["vol_sma"]:
-                    return {
-                        "strategy": "FX Golden Pullback",
-                        "signal": "SELL",
-                        "direction": "SHORT",
-                        "confidence": 85.0,
-                    }
+        if htf_trend == "BEAR" and curr["close"] < ema_200:
+            if curr["rsi"] < 35:
+                return None
+
+            entry_price = ema_50
+
+            if entry_price > curr["close"]:
+                sl_price = entry_price + (curr["atr"] * 1.5)
+                return {
+                    "strategy": "FX Golden Pullback",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 85.0,
+                    "order_type": "LIMIT",
+                    "price": entry_price,
+                    "suggested_sl": sl_price,
+                }
         return None
 
     def _fx_bb_reversion(self, curr: pd.Series) -> Optional[Dict]:
@@ -191,16 +217,30 @@ class StrategyAnalyzer:
         if not is_compressed:
             return None
 
-        # Expansion: Current candle breaks prev High/Low
-        # Long Breakout
-        if curr["close"] > prev["high"]:
-            if curr["volume"] > curr["vol_sma"]:  # Volume Confirmation
-                return {"strategy": "FX Vol Breakout", "signal": "BUY", "direction": "LONG", "confidence": 82.0}
+        # Buffer to avoid noise (e.g., 1 pip)
+        buffer = curr["atr"] * 0.1
 
-        # Short Breakout
-        if curr["close"] < prev["low"]:
-            if curr["volume"] > curr["vol_sma"]:
-                return {"strategy": "FX Vol Breakout", "signal": "SELL", "direction": "SHORT", "confidence": 82.0}
+        # Scenario: Trend is Bullish (Simple filter: Price > EMA 50)
+        if curr["close"] > curr["ema_50"]:
+            return {
+                "strategy": "FX Vol Breakout (Stop)",
+                "signal": "BUY",
+                "direction": "LONG",
+                "confidence": 80.0,
+                "order_type": "STOP",  # <--- Triggers only if price moves UP
+                "price": prev["high"] + buffer,  # <--- Entry is above previous high
+            }
+
+        # Scenario: Trend is Bearish
+        if curr["close"] < curr["ema_50"]:
+            return {
+                "strategy": "FX Vol Breakout (Stop)",
+                "signal": "SELL",
+                "direction": "SHORT",
+                "confidence": 80.0,
+                "order_type": "STOP",
+                "price": prev["low"] - buffer,  # <--- Entry is below previous low
+            }
 
         return None
 
@@ -238,16 +278,40 @@ class StrategyAnalyzer:
         Strategy 2: EMA Triple Alignment
         Logic: Captures strong momentum when 9 > 50 > 200.
         """
-        # Bullish Alignment
-        if curr["ema_9"] > curr["ema_50"] and curr["ema_50"] > curr["ema_200"]:
-            # Entry Trigger: Price is slightly pulling back to EMA 9 (Dip buy)
-            if curr["close"] > curr["ema_9"] and curr["low"] < curr["ema_9"]:
-                return {"strategy": "Crypto EMA Flow", "signal": "BUY", "direction": "LONG", "confidence": 85.0}
+        # Explicitly use ZLEMA columns
+        e9 = curr.get("zlema_9", curr["ema_9"])
+        e50 = curr.get("zlema_50", curr["ema_50"])
+        e200 = curr["ema_200"]
+
+        # Bullish Alignment (ZLEMA 9 > ZLEMA 50 > EMA 200)
+        if e9 > e50 and e50 > e200:
+            # Don't chase. Place LIMIT order at ZLEMA 9
+            entry_price = e9
+            if entry_price < curr["close"]:
+                return {
+                    "strategy": "Crypto EMA Flow",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 85.0,
+                    "order_type": "LIMIT",  # Perfect Entry
+                    "price": entry_price,
+                    # Tight SL for momentum trades (below EMA 50)
+                    "suggested_sl": e50 - (curr["atr"] * 0.5),
+                }
 
         # Bearish Alignment
-        if curr["ema_9"] < curr["ema_50"] and curr["ema_50"] < curr["ema_200"]:
-            if curr["close"] < curr["ema_9"] and curr["high"] > curr["ema_9"]:
-                return {"strategy": "Crypto EMA Flow", "signal": "SELL", "direction": "SHORT", "confidence": 85.0}
+        if e9 < e50 and e50 < e200:
+            entry_price = e9
+            if entry_price > curr["close"]:
+                return {
+                    "strategy": "Crypto EMA Flow",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 85.0,
+                    "order_type": "LIMIT",
+                    "price": entry_price,
+                    "suggested_sl": e50 + (curr["atr"] * 0.5),
+                }
 
         return None
 
@@ -290,7 +354,7 @@ class StrategyAnalyzer:
     def _crypto_liquidity_grab(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
         """
         Strategy 4: Liquidity Grab / Turtle Soup
-        Logic: Price breaks a recent low/high but closes back inside (Fakeout).
+        This strategy relies on a wick, so we must enter IMMEDIATELY on the close.
         """
         prev = df.iloc[-2]
 
@@ -302,7 +366,13 @@ class StrategyAnalyzer:
             lower_wick = min(curr["close"], curr["open"]) - curr["low"]
 
             if lower_wick > (body * 1.5) and curr["volume"] > curr["vol_sma"]:
-                return {"strategy": "Crypto Liq Grab", "signal": "BUY", "direction": "LONG", "confidence": 87.0}
+                return {
+                    "strategy": "Crypto Liq Grab",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 87.0,
+                    "order_type": "MARKET",
+                }
 
         # Bearish Liquidity Grab (Fake Breakout)
         if curr["high"] > prev["high"] and curr["close"] < prev["high"]:
@@ -310,6 +380,12 @@ class StrategyAnalyzer:
             upper_wick = curr["high"] - max(curr["close"], curr["open"])
 
             if upper_wick > (body * 1.5) and curr["volume"] > curr["vol_sma"]:
-                return {"strategy": "Crypto Liq Grab", "signal": "SELL", "direction": "SHORT", "confidence": 87.0}
+                return {
+                    "strategy": "Crypto Liq Grab",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 87.0,
+                    "order_type": "MARKET",
+                }
 
         return None

@@ -166,6 +166,8 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         # Crypto runs 24/7 so day of week is noise (set to 0.0), Forex respects weekday
         day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else curr_time.weekday() / 6.0
 
+        rolling_acc = 0.5  # Default neutral
+
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
@@ -181,6 +183,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             "dist_ema200": (curr["close"] - curr["ema_200"]) / curr["close"],
             "volatility_ratio": curr["atr"] / avg_atr,
             "dist_to_vwap": dist_to_vwap,
+            "rolling_acc": rolling_acc,
         }
 
         # 2. Check Strategy

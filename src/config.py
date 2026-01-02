@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.3.1"
+VERSION = "v1.3.2"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -106,6 +106,7 @@ FEATURE_COLS = [
     "dist_ema200",
     "volatility_ratio",
     "dist_to_vwap",
+    "rolling_acc",
 ]
 
 

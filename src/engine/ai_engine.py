@@ -73,7 +73,10 @@ class AITradingEngine:
         elif htf_trend == "BEAR" and signal["direction"] == "SHORT":
             trend_bonus = 5
         elif htf_trend != "FLAT":
-            trend_bonus = -20  # Counter trend trade
+            if "reversion" in signal["strategy"].lower():
+                trend_bonus = -5
+            else:
+                trend_bonus = -15  # Counter trend trade
 
         # 2. Historical Performance
         hist_win_rate = 0.5
@@ -81,7 +84,7 @@ class AITradingEngine:
             hist_win_rate = await self.db_manager.get_pair_performance(symbol)
 
         # Heavy Penalty for losers (< 40% win rate), Small Bonus for winners
-        history_factor = -20 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
+        history_factor = -10 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
 
         # 3. Neural Network Weighting
         # Map 0.5-1.0 prob to 0 to +15 score
@@ -94,8 +97,8 @@ class AITradingEngine:
         # Base (Strategy) + Trend + History + AI
         final_conf = base_conf + trend_bonus + history_factor + nn_factor + vol_penalty
 
-        # Clamp between 0 and 95
-        final_conf = max(0.0, min(95.0, final_conf))
+        # Clamp between 0 and 99
+        final_conf = max(0.0, min(99.0, final_conf))
 
         signal["confidence"] = final_conf
         return signal
@@ -118,7 +121,7 @@ class AITradingEngine:
         vol_step = info.get("vol_step", 0.01)
         atr = float(curr["atr"])
 
-        # --- SMART ENTRY LOGIC ---
+        # --- 1. SMART ENTRY LOGIC ---
         signal_close_price = curr["close"]
         current_market_price = ask if signal["direction"] == "LONG" else bid
 
@@ -129,12 +132,18 @@ class AITradingEngine:
             return None
 
         # Determine Order Type
-        # Strategy defaults (like FVG using LIMIT) take precedence
         order_type = signal.get("order_type", "MARKET")
         entry_price = signal.get("price", current_market_price)
 
+        # Smart Entry Enforcement (Convert Late Market to Limit)
+        dist_from_signal = abs(current_market_price - curr["close"])
+        atr_threshold = atr * 0.3
+
+        if order_type == "MARKET" and dist_from_signal > atr_threshold:
+            order_type = "LIMIT"
+            entry_price = curr["close"]  # Force entry at the candle close price
+
         # --- GHOST ORDER LOGIC ---
-        # Only override if strategy didn't specify strict order type
         strategy_name = signal.get("strategy", "").lower()
         if "fvg" not in strategy_name and "limit" not in str(order_type).lower():
             if signal["confidence"] <= 85.0:
@@ -146,14 +155,20 @@ class AITradingEngine:
                 else:
                     entry_price = current_market_price + ghost_pips
 
-        # --- TP / SL CALCULATION ---
+        # --- 2. TP / SL CALCULATION ---
         # Base SL is 1.5 ATR
         sl_dist = atr * 1.5
         min_dist = point * 50
         sl_dist = max(sl_dist, min_dist)
-        tp_dist = atr * nn_result["pred_exit_atr"]
 
-        # Enforce Minimum 1:1.5 Risk:Reward
+        # Use Dynamic SL if provided
+        if "suggested_sl" in signal:
+            suggested_dist = abs(signal["suggested_sl"] - entry_price)
+            # Safety Check: Don't allow SL to be dangerously tight (< 0.5 ATR) or too wide (> 3 ATR)
+            if (atr * 0.5) < suggested_dist < (atr * 3.0):
+                sl_dist = suggested_dist
+
+        tp_dist = atr * nn_result["pred_exit_atr"]
         if (tp_dist / sl_dist) < 1.5:
             tp_dist = sl_dist * 1.5
 
@@ -168,7 +183,7 @@ class AITradingEngine:
             sl_price = bid + sl_dist
             tp_price = bid - tp_dist
 
-        # --- RISK SIZING ---
+        # --- 3. RISK SIZING ---
         risk_mult = nn_result["risk_mult"]
         if signal.get("is_shadow", False):
             risk_mult = 0.1
@@ -191,20 +206,33 @@ class AITradingEngine:
         if risk_mult > 1.0:
             max_allowed_pct *= risk_mult
 
+        # Absolute hard cap in ZAR
         max_allowed_zar = self.user_balance_zar * (max_allowed_pct / 100.0)
 
-        # High Confidence Cap
+        # Check if risk exceeds cap
         if actual_risk_zar > max_allowed_zar and not signal.get("is_shadow", False):
+            # Try to reduce lots
             while actual_risk_zar > max_allowed_zar and lots > min_vol:
                 lots -= vol_step
                 actual_risk_zar = risk_per_lot * lots
 
             # Final check after reduction
             lots = round(lots, 2)
-            if lots < min_vol or actual_risk_zar > (max_allowed_zar * 1.1):  # Allow 10% buffer for rounding
+            if lots <= min_vol and actual_risk_zar > max_allowed_zar:
+                max_emergency_risk = self.user_balance_zar * 0.08  # 8% Hard Cap
+                if actual_risk_zar < max_emergency_risk:
+                    # Allow it
+                    pass
+                else:
+                    self._log_once(
+                        f"risk_{symbol}",
+                        f"Skipping {symbol}: Min Lot Risk (R{actual_risk_zar:.2f}) > 8% Safety Cap",
+                    )
+                    return None
+            elif actual_risk_zar > (max_allowed_zar * 1.1):
                 self._log_once(
                     f"risk_{symbol}",
-                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) exceeds safety cap (R{max_allowed_zar:.2f})",
+                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) > Cap (R{max_allowed_zar:.2f})",
                 )
                 return None
 
@@ -415,7 +443,7 @@ class AITradingEngine:
         fake_risk_penalty = 1.0
         htf_trend = None
 
-        # --- 2. Late Bloomer Check (Low Volatility Cache) ---
+        # 2. Late Bloomer Check (Low Volatility Cache)
         late_signal = self._check_low_vol_candidates(symbol, curr)
         final_signal_candidate = None
 
@@ -466,7 +494,7 @@ class AITradingEngine:
             if (time.time() - curr["time"]) > 1800:
                 return None
 
-            # FIX: Check Loss Cooldown (Visibly)
+            # Check Loss Cooldown
             try:
                 if self.db_manager:
                     is_loss = await self.db_manager.check_recent_loss(symbol)
@@ -482,21 +510,9 @@ class AITradingEngine:
             pattern_recognizer = PatternRecognizer()
             patterns = pattern_recognizer.analyze_patterns(df)
 
-            # Fakeout Check
-            breakout_detector = FakeBreakoutDetector()
-            fake_analysis = breakout_detector.analyze(df)
+            structure = pattern_recognizer.check_market_structure(df)
 
-            if fake_analysis["risk_score"] >= 50:
-                # If reason is Low Vol Breakout, cache it for 15 mins
-                if "Low Vol Breakout" in fake_analysis["reasons"]:
-                    pass
-                else:
-                    self._log_once(f"fake_{symbol}", f"Skipping {symbol}: Fakeout ({fake_analysis['reasons']})")
-                    return None
-            elif fake_analysis["risk_score"] >= 30:
-                fake_risk_penalty = 0.5
-
-            # Stratey Routing
+            # 7. Stratey Routing
             strat_signal = None
             symbol_info = await provider.get_symbol_info(symbol)
             if not symbol_info:
@@ -510,9 +526,9 @@ class AITradingEngine:
 
                 # Trend Strategies
                 elif market_regime == "TREND" and "TREND" in session_info["types"]:
-                    strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
+                    strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
                     if not strat_signal:
-                        strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
+                        strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
 
                 # Breakout (Only if allowed hour)
                 if not strat_signal and "BREAKOUT" in session_info["types"]:
@@ -542,19 +558,56 @@ class AITradingEngine:
             if not final_signal_candidate:
                 return None
 
-            # --- Apply Fakeout Cache Logic Here ---
-            if fake_analysis["risk_score"] >= 50 and "Low Vol Breakout" in fake_analysis["reasons"]:
-                self.low_vol_candidates[symbol] = {
-                    "time": time.time(),
-                    "signal": final_signal_candidate,
-                    "entry": curr["close"],
-                }
-                logger.debug(f"⏳ Cached {symbol} for late bloom (Low Volume)")
-                return None
-            elif fake_analysis["risk_score"] >= 50:
-                return None  # Other fakeouts are hard blocks
+            # Soft Veto Logic (Penalty Scoring)
+            penalty_score = 0
 
-        # 6. ML Prediction
+            # 8. Market Structure Veto (Fixed)
+            structure = pattern_recognizer.check_market_structure(df)
+            is_reversion = "reversion" in final_signal_candidate["strategy"].lower()
+
+            if not is_reversion:
+                if final_signal_candidate["direction"] == "LONG" and structure == "BEAR":
+                    penalty_score += 15
+                if final_signal_candidate["direction"] == "SHORT" and structure == "BULL":
+                    penalty_score += 15
+
+            # 9. Bitcoin Correlation Veto (Crypto Only)
+            if symbol in CRYPTO_SYMBOLS and symbol != "#BTCUSD":
+                # Ensure we have BTC trend
+                if "#BTCUSD" not in self.htf_cache:
+                    await self._get_htf_trend("#BTCUSD", provider)
+
+                btc_trend_data = self.htf_cache.get("#BTCUSD")
+                if btc_trend_data:
+                    btc_trend = btc_trend_data["trend"]
+                    if btc_trend == "BEAR" and final_signal_candidate["direction"] == "LONG":
+                        penalty_score += 20
+                    if btc_trend == "BULL" and final_signal_candidate["direction"] == "SHORT":
+                        penalty_score += 20
+
+            # 10. Fakeout Detector (Mixed Veto)
+            breakout_detector = FakeBreakoutDetector()
+            fake_analysis = breakout_detector.analyze(df)
+
+            if fake_analysis["risk_score"] >= 50:
+                # If reason is Low Vol Breakout, cache it for 15 mins
+                if "Low Vol Breakout" in fake_analysis["reasons"]:
+                    self.low_vol_candidates[symbol] = {
+                        "time": time.time(),
+                        "signal": final_signal_candidate,
+                        "entry": curr["close"],
+                    }
+                    return None
+                else:
+                    penalty_score += 25
+            elif fake_analysis["risk_score"] >= 30:
+                fake_risk_penalty = 0.5
+                penalty_score += 10
+
+            # Apply Penalties
+            final_signal_candidate["confidence"] -= penalty_score
+
+        # 11. ML Prediction
         now = datetime.now()
 
         # Looking at last 60 candles is sufficient for recent pivots
@@ -576,6 +629,10 @@ class AITradingEngine:
         # Handle Day Norm for Crypto (Remove noise)
         day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else now.weekday() / 6.0
 
+        rolling_acc = 0.5  # Default neutral
+        if self.db_manager:
+            rolling_acc = await self.db_manager.get_pair_performance(symbol)
+
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
@@ -591,12 +648,13 @@ class AITradingEngine:
             "dist_ema200": (curr["close"] - curr["ema_200"]) / curr["close"],
             "volatility_ratio": volatility_ratio,
             "dist_to_vwap": dist_to_vwap,
+            "rolling_acc": rolling_acc,
         }
 
         # Predict
         nn_result = self.nn_brain.predict(features)
 
-        # --- SHADOW TRADING LOGIC ---
+        # Shadow training logic
         is_shadow = False
         if nn_result["prob"] < 0.45:
             is_shadow = True
@@ -667,7 +725,6 @@ class AITradingEngine:
 
     def register_active_trade(self, symbol: str):
         """Manually marks a symbol as active (used during recovery)."""
-        # We place a placeholder dict so analyze_market skips this symbol
         if symbol not in self.active_features:
             self.active_features[symbol] = {}
 

@@ -30,6 +30,16 @@ class TechnicalAnalyzer:
         # Calculate angle/slope over last 5 periods
         df["ema_200_slope"] = df["ema_200"].diff(5)
 
+        # --- UTILIZATION FIX: WIRE UP ZLEMA ---
+        # We calculate ZLEMA 9 and 50 here so they are available to strategies
+        df["zlema_9"] = TechnicalAnalyzer.calculate_zlema(df["close"], 9)
+        df["zlema_50"] = TechnicalAnalyzer.calculate_zlema(df["close"], 50)
+
+        # OVERRIDE STANDARD EMA WITH ZLEMA FOR SIGNALS
+        # This instantly upgrades all strategies in strategies.py to be Zero-Lag
+        df["ema_9"] = df["zlema_9"]
+        df["ema_50"] = df["zlema_50"]
+
         # --- Momentum: RSI (Essential) ---
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -110,3 +120,15 @@ class TechnicalAnalyzer:
         df["bb_slope"] = df["sma20"].diff(3).abs()
 
         return df.fillna(0)
+
+    @staticmethod
+    def calculate_zlema(series: pd.Series, period: int) -> pd.Series:
+        """
+        Zero-Lag EMA Calculation.
+        Removes the lag inherent in standard EMAs by de-lagging the data before smoothing.
+        """
+        lag = (period - 1) // 2
+        # Shift data back to remove lag
+        ema_data = 2 * series - series.shift(lag)
+        # Apply standard EMA to de-lagged data
+        return ema_data.ewm(span=period, adjust=False).mean()
