@@ -92,47 +92,65 @@ class StrategyAnalyzer:
         if curr["adx"] < 25:
             return None
 
-        # Use ZLEMA if available, else EMA
-        ema_50 = curr.get("zlema_50", curr["ema_50"])
+        # Explicitly use Standard EMA for Pullback (Lag is desired here)
+        ema_50 = curr["ema_50"]
         ema_200 = curr["ema_200"]
 
         # Long: HTF Bullish + Price > EMA200 + Pullback to EMA50
         if htf_trend == "BULL" and curr["close"] > ema_200:
             dist_ema50 = abs(curr["low"] - ema_50)
-            # Don't buy if RSI is already hot (over 65)
             if curr["rsi"] > 65:
+                return None
+
+            # Require pullback not to be a tiny bounce nor a deep breakdown
+            min_pullback = curr["atr"] * 0.25
+            max_pullback = curr["atr"] * 2.0
+
+            # If pullback is too small, degrade confidence; if too deep, skip
+            confidence = 65.0 if dist_ema50 < min_pullback else 85.0
+
+            if dist_ema50 > max_pullback:
                 return None
 
             entry_price = ema_50
 
-            # Ensure entry is below current price (Discount)
             if entry_price < curr["close"]:
-                sl_price = entry_price - (curr["atr"] * 1.5)
+                sl_price = entry_price - (curr["atr"] * 1.0)
 
                 return {
                     "strategy": "FX Golden Pullback",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 85.0,
+                    "confidence": confidence,
                     "order_type": "LIMIT",
                     "price": entry_price,
-                    "suggested_sl": sl_price,  # Pass this to AI Engine
+                    "suggested_sl": sl_price,
                 }
 
         # Short: HTF Bearish + Price < EMA200 + Pullback to EMA50
         if htf_trend == "BEAR" and curr["close"] < ema_200:
+            # distance from the high to EMA50
+            dist_ema50 = abs(curr["high"] - ema_50)
             if curr["rsi"] < 35:
+                return None
+
+            min_pullback = curr["atr"] * 0.25
+            max_pullback = curr["atr"] * 2.0
+
+            confidence = 65.0 if dist_ema50 < min_pullback else 85.0
+
+            if dist_ema50 > max_pullback:
                 return None
 
             entry_price = ema_50
 
             if entry_price > curr["close"]:
-                sl_price = entry_price + (curr["atr"] * 1.5)
+                sl_price = entry_price + (curr["atr"] * 1.0)
                 return {
                     "strategy": "FX Golden Pullback",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 85.0,
+                    "confidence": confidence,
                     "order_type": "LIMIT",
                     "price": entry_price,
                     "suggested_sl": sl_price,
@@ -148,13 +166,59 @@ class StrategyAnalyzer:
         if curr["adx"] > 25:
             return None
 
-        # Buy: Price touches Lower BB + RSI Oversold (< 30)
-        if curr["low"] <= curr["bb_lower"] and curr["rsi"] < 30:
-            return {"strategy": "FX BB Reversion", "signal": "BUY", "direction": "LONG", "confidence": 80.0}
+        # Bollinger width filter: ensure we're in a range (not just a volatile move)
+        bb_width = curr["bb_upper"] - curr["bb_lower"]
+        # require width reasonably tight relative to ATR
+        if bb_width > (curr["atr"] * 2.5):
+            return None
 
-        # Sell: Price touches Upper BB + RSI Overbought (> 70)
-        if curr["high"] >= curr["bb_upper"] and curr["rsi"] > 70:
-            return {"strategy": "FX BB Reversion", "signal": "SELL", "direction": "SHORT", "confidence": 80.0}
+        # Buy: Price touches Lower BB and closes back inside, with wick/volume confirmation
+        if curr["low"] <= curr["bb_lower"] and curr["close"] > curr["bb_lower"]:
+            # momentum filter (loosened oversold)
+            if curr["rsi"] > 50:  # avoid fading in strong momentum
+                return None
+
+            body = abs(curr["close"] - curr["open"])
+            lower_wick = min(curr["close"], curr["open"]) - curr["low"]
+
+            vol_confirm = curr["volume"] > curr["vol_sma"]
+
+            # require clear rejection wick or a volume spike
+            if lower_wick > (body * 1.0) or vol_confirm:
+                entry_price = curr["bb_lower"]
+                suggested_sl = curr["low"] - (curr["atr"] * 0.5)
+                return {
+                    "strategy": "FX BB Reversion",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 82.0 + (5.0 if vol_confirm else 0.0),
+                    "order_type": "LIMIT",
+                    "price": entry_price,
+                    "suggested_sl": suggested_sl,
+                }
+
+        # Sell: Price touches Upper BB and closes back inside
+        if curr["high"] >= curr["bb_upper"] and curr["close"] < curr["bb_upper"]:
+            if curr["rsi"] < 50:
+                return None
+
+            body = abs(curr["close"] - curr["open"])
+            upper_wick = curr["high"] - max(curr["close"], curr["open"])
+
+            vol_confirm = curr["volume"] > curr["vol_sma"]
+
+            if upper_wick > (body * 1.0) or vol_confirm:
+                entry_price = curr["bb_upper"]
+                suggested_sl = curr["high"] + (curr["atr"] * 0.5)
+                return {
+                    "strategy": "FX BB Reversion",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 82.0 + (5.0 if vol_confirm else 0.0),
+                    "order_type": "LIMIT",
+                    "price": entry_price,
+                    "suggested_sl": suggested_sl,
+                }
 
         return None
 
@@ -175,32 +239,62 @@ class StrategyAnalyzer:
         if c2_body < curr["atr"]:
             return None
 
+        # Displacement should have higher-than-average volume (if volume available)
+        if c2["volume"] < curr["vol_sma"]:
+            return None
+
+        min_gap = curr["atr"] * 0.75
+
         # Bullish FVG (Gap between C1 High and C3 Low)
         if c2["close"] > c2["open"]:  # Green displacement
             if c1["high"] < c3["low"]:
                 gap_size = c3["low"] - c1["high"]
-                if gap_size > (curr["atr"] * 0.1):  # Minimum gap size
+                if gap_size > min_gap:
+                    # ensure gap not already filled or price moved beyond the gap start
+                    if c3["close"] >= c1["high"]:
+                        return None
+
+                    # optional trend alignment: prefer longs above EMA50/EMA200 if present
+                    if curr["close"] > curr["ema_50"] and curr["ema_50"] > curr["ema_200"]:
+                        confidence = 85.0
+                    else:
+                        confidence = 70.0
+
+                    entry_price = c1["high"] - (curr["atr"] * 0.02)  # slight buffer inside gap
+                    suggested_sl = c3["low"] - (curr["atr"] * 0.5)
                     return {
                         "strategy": "SMC FVG",
                         "signal": "BUY",
                         "direction": "LONG",
-                        "confidence": 85.0,
-                        "order_type": "LIMIT",  # SMC uses limits
-                        "price": c1["high"],  # Entry at top of C1
+                        "confidence": confidence,
+                        "order_type": "LIMIT",
+                        "price": entry_price,
+                        "suggested_sl": suggested_sl,
                     }
 
         # Bearish FVG (Gap between C1 Low and C3 High)
         if c2["close"] < c2["open"]:  # Red displacement
             if c1["low"] > c3["high"]:
                 gap_size = c1["low"] - c3["high"]
-                if gap_size > (curr["atr"] * 0.1):
+                if gap_size > min_gap:
+                    if c3["close"] <= c1["low"]:
+                        return None
+
+                    if curr["close"] < curr["ema_50"] and curr["ema_50"] < curr["ema_200"]:
+                        confidence = 85.0
+                    else:
+                        confidence = 70.0
+
+                    entry_price = c1["low"] + (curr["atr"] * 0.02)
+                    suggested_sl = c3["high"] + (curr["atr"] * 0.5)
                     return {
                         "strategy": "SMC FVG",
                         "signal": "SELL",
                         "direction": "SHORT",
-                        "confidence": 85.0,
+                        "confidence": confidence,
                         "order_type": "LIMIT",
-                        "price": c1["low"],
+                        "price": entry_price,
+                        "suggested_sl": suggested_sl,
                     }
         return None
 
@@ -209,37 +303,73 @@ class StrategyAnalyzer:
         Strategy 4: Volatility/Inside Bar Breakout
         Logic: Low volatility (compression) followed by a strong move.
         """
-        prev = df.iloc[-2]
-
-        prev_range = prev["high"] - prev["low"]
-        is_compressed = prev_range < (prev["atr"] * 0.6)
-
-        if not is_compressed:
+        if len(df) < 3:
             return None
 
-        # Buffer to avoid noise (e.g., 1 pip)
-        buffer = curr["atr"] * 0.1
+        prev = df.iloc[-2]
+        prev2 = df.iloc[-3]
 
-        # Scenario: Trend is Bullish (Simple filter: Price > EMA 50)
-        if curr["close"] > curr["ema_50"]:
+        # multi-bar compression: average prior range vs ATR
+        prev_range_avg = ((prev["high"] - prev["low"]) + (prev2["high"] - prev2["low"])) / 2.0
+        if prev_range_avg >= (curr["atr"] * 0.6):
+            return None
+
+        # breakout candle must be relatively strong vs prior compression or vs ATR
+        breakout_range = curr["high"] - curr["low"]
+        strong_breakout = breakout_range > max(prev_range_avg * 1.25, curr["atr"] * 0.9)
+        if not strong_breakout:
+            return None
+
+        # small buffer to avoid noise
+        buffer = curr["atr"] * 0.08
+
+        # volume confirmation (optional)
+        vol_confirm = curr["volume"] > curr["vol_sma"]
+
+        # Buy breakout: close above previous high
+        if curr["close"] > prev["high"]:
+            entry_price = prev["high"] + buffer
+            # suggested SL: below the compression low (safer) or breakout candle low
+            compression_low = min(prev2["low"], prev["low"])
+            suggested_sl = min(compression_low, curr["low"]) - (curr["atr"] * 0.6)
+
+            # confidence scaled by breakout strength and volume
+            confidence = 78.0
+            if breakout_range > (curr["atr"] * 1.5):
+                confidence += 6.0
+            if vol_confirm:
+                confidence += 6.0
+
             return {
                 "strategy": "FX Vol Breakout (Stop)",
                 "signal": "BUY",
                 "direction": "LONG",
-                "confidence": 80.0,
-                "order_type": "STOP",  # <--- Triggers only if price moves UP
-                "price": prev["high"] + buffer,  # <--- Entry is above previous high
+                "confidence": confidence,
+                "order_type": "STOP",
+                "price": entry_price,
+                "suggested_sl": suggested_sl,
             }
 
-        # Scenario: Trend is Bearish
-        if curr["close"] < curr["ema_50"]:
+        # Sell breakout: close below previous low
+        if curr["close"] < prev["low"]:
+            entry_price = prev["low"] - buffer
+            compression_high = max(prev2["high"], prev["high"])
+            suggested_sl = max(compression_high, curr["high"]) + (curr["atr"] * 0.6)
+
+            confidence = 78.0
+            if breakout_range > (curr["atr"] * 1.5):
+                confidence += 6.0
+            if vol_confirm:
+                confidence += 6.0
+
             return {
                 "strategy": "FX Vol Breakout (Stop)",
                 "signal": "SELL",
                 "direction": "SHORT",
-                "confidence": 80.0,
+                "confidence": confidence,
                 "order_type": "STOP",
-                "price": prev["low"] - buffer,  # <--- Entry is below previous low
+                "price": entry_price,
+                "suggested_sl": suggested_sl,
             }
 
         return None
@@ -253,23 +383,63 @@ class StrategyAnalyzer:
         Strategy 1: Ichimoku Kumo Breakout
         Logic: The most reputable trend strategy for Crypto.
         """
+        # basic cloud checks
+        span_a = curr.get("senkou_span_a")
+        span_b = curr.get("senkou_span_b")
+        tenkan = curr.get("tenkan_sen")
+        kijun = curr.get("kijun_sen")
+
+        if span_a is None or span_b is None or tenkan is None or kijun is None:
+            return None
+
         # Price is above the Cloud (Span A and Span B)
-        above_cloud = curr["close"] > curr["senkou_span_a"] and curr["close"] > curr["senkou_span_b"]
-        below_cloud = curr["close"] < curr["senkou_span_a"] and curr["close"] < curr["senkou_span_b"]
+        above_cloud = curr["close"] > span_a and curr["close"] > span_b
+        below_cloud = curr["close"] < span_a and curr["close"] < span_b
 
         # TK Cross Confirmation (Tenkan > Kijun for Buy)
-        tk_bullish = curr["tenkan_sen"] > curr["kijun_sen"]
-        tk_bearish = curr["tenkan_sen"] < curr["kijun_sen"]
+        tk_bullish = tenkan > kijun
+        tk_bearish = tenkan < kijun
 
-        dist_kijun = abs(curr["close"] - curr["kijun_sen"])
-        is_extended = dist_kijun > (curr["atr"] * 1.5)
+        # cloud thickness helps gauge strength
+        cloud_thickness = abs(span_a - span_b)
+        is_extended = abs(curr["close"] - kijun) > (curr["atr"] * 1.5)
 
-        if above_cloud and tk_bullish and not is_extended:
-            # Ensure we just broke out or are trending strongly
-            return {"strategy": "Crypto Ichimoku", "signal": "BUY", "direction": "LONG", "confidence": 90.0}
+        # optional chikou confirmation (if present)
+        chikou_ok = True
+        if "chikou_span" in curr:
+            chikou_ok = curr["chikou_span"] > curr["close"] if above_cloud else curr["chikou_span"] < curr["close"]
 
-        if below_cloud and tk_bearish and not is_extended:
-            return {"strategy": "Crypto Ichimoku", "signal": "SELL", "direction": "SHORT", "confidence": 90.0}
+        # volume confirmation optional
+        vol_bonus = 5.0 if curr["volume"] > curr["vol_sma"] else 0.0
+
+        if above_cloud and tk_bullish and not is_extended and chikou_ok:
+            # entry slightly above Tenkan or at Tenkan as limit
+            entry_price = min(tenkan, curr["close"] * 0.995)
+            suggested_sl = kijun - (curr["atr"] * 0.75)
+            confidence = 75.0 + (min(cloud_thickness / (curr["atr"] + 1e-9) * 5.0, 10.0)) + vol_bonus
+            return {
+                "strategy": "Crypto Ichimoku",
+                "signal": "BUY",
+                "direction": "LONG",
+                "confidence": confidence,
+                "order_type": "LIMIT",
+                "price": entry_price,
+                "suggested_sl": suggested_sl,
+            }
+
+        if below_cloud and tk_bearish and not is_extended and chikou_ok:
+            entry_price = max(tenkan, curr["close"] * 1.005)
+            suggested_sl = kijun + (curr["atr"] * 0.75)
+            confidence = 75.0 + (min(cloud_thickness / (curr["atr"] + 1e-9) * 5.0, 10.0)) + vol_bonus
+            return {
+                "strategy": "Crypto Ichimoku",
+                "signal": "SELL",
+                "direction": "SHORT",
+                "confidence": confidence,
+                "order_type": "LIMIT",
+                "price": entry_price,
+                "suggested_sl": suggested_sl,
+            }
 
         return None
 
@@ -278,39 +448,51 @@ class StrategyAnalyzer:
         Strategy 2: EMA Triple Alignment
         Logic: Captures strong momentum when 9 > 50 > 200.
         """
-        # Explicitly use ZLEMA columns
-        e9 = curr.get("zlema_9", curr["ema_9"])
-        e50 = curr.get("zlema_50", curr["ema_50"])
+        # Explicitly use ZLEMA for Momentum/Trend Flow
+        e9 = curr["zlema_9"]
+        e50 = curr["zlema_50"]
         e200 = curr["ema_200"]
+
+        # no trade if price is too extended from e9
+        dist = abs(curr["close"] - e9)
+        if dist > (curr["atr"] * 2.0):
+            return None
+
+        vol_bonus = 5.0 if curr["volume"] > curr["vol_sma"] else 0.0
 
         # Bullish Alignment (ZLEMA 9 > ZLEMA 50 > EMA 200)
         if e9 > e50 and e50 > e200:
-            # Don't chase. Place LIMIT order at ZLEMA 9
             entry_price = e9
             if entry_price < curr["close"]:
+                confidence = 80.0 + vol_bonus
+                # slightly penalize if price already far above e9
+                if dist > (curr["atr"] * 1.0):
+                    confidence -= 8.0
                 return {
                     "strategy": "Crypto EMA Flow",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 85.0,
-                    "order_type": "LIMIT",  # Perfect Entry
+                    "confidence": confidence,
+                    "order_type": "LIMIT",
                     "price": entry_price,
-                    # Tight SL for momentum trades (below EMA 50)
-                    "suggested_sl": e50 - (curr["atr"] * 0.5),
+                    "suggested_sl": e50 - (curr["atr"] * 0.6),
                 }
 
         # Bearish Alignment
         if e9 < e50 and e50 < e200:
             entry_price = e9
             if entry_price > curr["close"]:
+                confidence = 80.0 + vol_bonus
+                if dist > (curr["atr"] * 1.0):
+                    confidence -= 8.0
                 return {
                     "strategy": "Crypto EMA Flow",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 85.0,
+                    "confidence": confidence,
                     "order_type": "LIMIT",
                     "price": entry_price,
-                    "suggested_sl": e50 + (curr["atr"] * 0.5),
+                    "suggested_sl": e50 + (curr["atr"] * 0.6),
                 }
 
         return None
@@ -320,35 +502,47 @@ class StrategyAnalyzer:
         Strategy 3: Session VWAP Rejection.
         Triggers ONLY when price touches the VWAP and rejects with a large wick.
         """
-        # Trend Check
-        if curr["close"] > curr["vwap"]:
-            # Bullish: Price dipped below VWAP but closed above (Wick Rejection)
-            if curr["low"] < curr["vwap"] and curr["close"] > curr["vwap"]:
-                # Validation: Long lower wick
-                body = abs(curr["close"] - curr["open"])
-                lower_wick = min(curr["close"], curr["open"]) - curr["low"]
-                if lower_wick > body:  # Wick larger than body
+        if "vwap" not in curr:
+            return None
+
+        vwap = curr["vwap"]
+        prox_threshold = curr["atr"] * 0.25  # tolerance around VWAP considered a touch
+        body = abs(curr["close"] - curr["open"])
+
+        vol_bonus = 6.0 if curr["volume"] > curr["vol_sma"] else 0.0
+
+        # Bullish rejection: dipped to/through VWAP and closed above it with a long lower wick
+        if curr["close"] > vwap and curr["low"] <= (vwap + prox_threshold):
+            lower_wick = min(curr["close"], curr["open"]) - curr["low"]
+            if lower_wick > (body * 1.0):
+                if lower_wick > body:
+                    entry_type = "MARKET"
+                    confidence = 82.0 + vol_bonus
+                    suggested_sl = min(curr["low"], vwap - (curr["atr"] * 0.3))
                     return {
                         "strategy": "VWAP Rejection",
                         "signal": "BUY",
                         "direction": "LONG",
-                        "confidence": 88.0,
-                        "order_type": "MARKET",
+                        "confidence": confidence,
+                        "order_type": entry_type,
+                        "suggested_sl": suggested_sl,
                     }
 
-        elif curr["close"] < curr["vwap"]:
-            # Bearish
-            if curr["high"] > curr["vwap"] and curr["close"] < curr["vwap"]:
-                body = abs(curr["close"] - curr["open"])
-                upper_wick = curr["high"] - max(curr["close"], curr["open"])
-                if upper_wick > body:
-                    return {
-                        "strategy": "VWAP Rejection",
-                        "signal": "SELL",
-                        "direction": "SHORT",
-                        "confidence": 88.0,
-                        "order_type": "MARKET",
-                    }
+        # Bearish rejection
+        elif curr["close"] < vwap and curr["high"] >= (vwap - prox_threshold):
+            upper_wick = curr["high"] - max(curr["close"], curr["open"])
+            if upper_wick > (body * 1.0):
+                entry_type = "MARKET"
+                confidence = 82.0 + vol_bonus
+                suggested_sl = max(curr["high"], vwap + (curr["atr"] * 0.3))
+                return {
+                    "strategy": "VWAP Rejection",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": confidence,
+                    "order_type": entry_type,
+                    "suggested_sl": suggested_sl,
+                }
         return None
 
     def _crypto_liquidity_grab(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
@@ -356,36 +550,44 @@ class StrategyAnalyzer:
         Strategy 4: Liquidity Grab / Turtle Soup
         This strategy relies on a wick, so we must enter IMMEDIATELY on the close.
         """
+        if len(df) < 2:
+            return None
         prev = df.iloc[-2]
 
         # Bullish Liquidity Grab (Fake Breakdown)
-        # Current Low is lower than previous Low, but Close is HIGHER than previous Low
         if curr["low"] < prev["low"] and curr["close"] > prev["low"]:
             # Rejection Wick Check: Long lower wick
             body = abs(curr["close"] - curr["open"])
             lower_wick = min(curr["close"], curr["open"]) - curr["low"]
-
-            if lower_wick > (body * 1.5) and curr["volume"] > curr["vol_sma"]:
+            prev_range = prev["high"] - prev["low"]
+            # wick should be a sizeable move beyond prior low and larger than a fraction of prev range
+            if lower_wick > (body * 1.2) and lower_wick > (prev_range * 0.35):
+                vol_ok = "volume" in curr and "vol_sma" in curr and curr["volume"] > curr["vol_sma"]
+                confidence = 78.0 + (7.0 if vol_ok else 0.0)
                 return {
                     "strategy": "Crypto Liq Grab",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 87.0,
+                    "confidence": confidence,
                     "order_type": "MARKET",
+                    "suggested_sl": curr["low"] - (curr["atr"] * 0.6),
                 }
 
         # Bearish Liquidity Grab (Fake Breakout)
         if curr["high"] > prev["high"] and curr["close"] < prev["high"]:
             body = abs(curr["close"] - curr["open"])
             upper_wick = curr["high"] - max(curr["close"], curr["open"])
-
-            if upper_wick > (body * 1.5) and curr["volume"] > curr["vol_sma"]:
+            prev_range = prev["high"] - prev["low"]
+            if upper_wick > (body * 1.2) and upper_wick > (prev_range * 0.35):
+                vol_ok = "volume" in curr and "vol_sma" in curr and curr["volume"] > curr["vol_sma"]
+                confidence = 78.0 + (7.0 if vol_ok else 0.0)
                 return {
                     "strategy": "Crypto Liq Grab",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 87.0,
+                    "confidence": confidence,
                     "order_type": "MARKET",
+                    "suggested_sl": curr["high"] + (curr["atr"] * 0.6),
                 }
 
         return None

@@ -129,6 +129,10 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     # Keep only time and trend columns to merge
     df_htf = df_htf[["time", "htf_trend_val"]].sort_values("time")
 
+    # Shift HTF timestamps forward by the candle duration so we don't peer into the future.
+    shift_seconds = 14400 if htf_tf == "4h" else 3600
+    df_htf["time"] = df_htf["time"] + shift_seconds
+
     # 3. Merge HTF Data into M15 Data
     # 'merge_asof' finds the last known H4 candle for each M15 candle
     df_m15 = df_m15.sort_values("time")
@@ -168,10 +172,21 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
 
         rolling_acc = 0.5  # Default neutral
 
+        # recent_range_std (high-low) over prior 20 candles (safe with i check)
+        start_idx = max(0, i - 20)
+        recent_body = df_merged.iloc[start_idx:i]
+        recent_range_std = recent_body["high"].sub(recent_body["low"]).std() if not recent_body.empty else 0.0
+
+        # atr_ratio and avg_atr_24 align with AI Engine FEATURE_COLS
+        avg_atr_24 = avg_atr
+        atr_ratio = curr["atr"] / (avg_atr_24 + 1e-9)
+
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
             "atr": curr["atr"],
+            "atr_ratio": atr_ratio,
+            "avg_atr_24": avg_atr_24,
             "ema_dist": (curr["close"] - curr["ema_50"]) / curr["close"],
             "bb_width": curr["bb_width"],
             "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
@@ -184,6 +199,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             "volatility_ratio": curr["atr"] / avg_atr,
             "dist_to_vwap": dist_to_vwap,
             "rolling_acc": rolling_acc,
+            "recent_range_std": recent_range_std if not pd.isna(recent_range_std) else 0.0,
         }
 
         # 2. Check Strategy
@@ -199,7 +215,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             entry = curr["close"]
             is_long = signal["direction"] == "LONG"
             atr = curr["atr"]
-            sl_dist = atr * 1.5
+            sl_dist = atr * 1.0
 
             # Ensure this matches your Live Bot duration (e.g., 4 hours = 16 candles)
             lookahead_candles = 16
@@ -214,14 +230,14 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
                         break
                     gain = row["high"] - entry
                     max_atr_gain = max(max_atr_gain, gain / atr)
-                    if gain > (atr * 1.5):
+                    if gain > (atr * 1.0):
                         won = True
                 else:
                     if row["high"] > (entry + sl_dist):  # Hit SL
                         break
                     gain = entry - row["low"]
                     max_atr_gain = max(max_atr_gain, gain / atr)
-                    if gain > (atr * 1.5):
+                    if gain > (atr * 1.0):
                         won = True
 
             buffer_backfill_data(features, won, 0.0, max_atr_gain)

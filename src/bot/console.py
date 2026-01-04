@@ -333,6 +333,10 @@ class NexubotConsole:
         print(f"{YELLOW}🧹 Cleaning old database records...{RESET}")
         await self.db.cleanup_db()
 
+        # Fetch and display Total Historical Win Rate
+        total_wr = await self.db.get_total_historical_win_rate()
+        print(f"{BOLD}{MAGENTA}🏆 Lifetime Win Rate: {total_wr:.1f}%{RESET}")
+
         # Init MT5 via Provider
         print(f"✅ {WHITE}Account Set: {GREEN}R{DEFAULT_BALANCE_ZAR:.2f}{RESET}")
         self.ai_engine.set_context(DEFAULT_BALANCE_ZAR, self.db)

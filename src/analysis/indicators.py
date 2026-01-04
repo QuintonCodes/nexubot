@@ -35,11 +35,6 @@ class TechnicalAnalyzer:
         df["zlema_9"] = TechnicalAnalyzer.calculate_zlema(df["close"], 9)
         df["zlema_50"] = TechnicalAnalyzer.calculate_zlema(df["close"], 50)
 
-        # OVERRIDE STANDARD EMA WITH ZLEMA FOR SIGNALS
-        # This instantly upgrades all strategies in strategies.py to be Zero-Lag
-        df["ema_9"] = df["zlema_9"]
-        df["ema_50"] = df["zlema_50"]
-
         # --- Momentum: RSI (Essential) ---
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -58,7 +53,6 @@ class TechnicalAnalyzer:
         df["vol_sma"] = df["volume"].rolling(window=20).mean()
 
         # --- VWAP (Session/Daily Reset) ---
-        # Explicitly grouping by Date to reset calculation at 00:00
         df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
         df["date_group"] = df["datetime"].dt.date
         df["cum_pv"] = df.groupby("date_group")["pv"].cumsum()
@@ -128,7 +122,5 @@ class TechnicalAnalyzer:
         Removes the lag inherent in standard EMAs by de-lagging the data before smoothing.
         """
         lag = (period - 1) // 2
-        # Shift data back to remove lag
         ema_data = 2 * series - series.shift(lag)
-        # Apply standard EMA to de-lagged data
         return ema_data.ewm(span=period, adjust=False).mean()

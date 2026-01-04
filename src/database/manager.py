@@ -180,6 +180,30 @@ class DatabaseManager:
         except Exception:
             return 0.5
 
+    async def get_total_historical_win_rate(self) -> float:
+        """
+        Calculates the win rate across ALL trades stored in the database.
+        """
+        if not self.engine:
+            return 0.0
+
+        try:
+            async with self.async_session() as session:
+                # Select only the result column (1=Win, 0=Loss)
+                stmt = select(TradeResult.result)
+                result = await session.execute(stmt)
+                outcomes = result.scalars().all()
+
+                total = len(outcomes)
+                if total == 0:
+                    return 0.0
+
+                wins = sum(outcomes)
+                return (wins / total) * 100.0
+        except Exception as e:
+            logger.error(f"Failed to fetch historical win rate: {e}")
+            return 0.0
+
     async def init_database(self):
         """Creates tables if they don't exist"""
         if not self.engine:

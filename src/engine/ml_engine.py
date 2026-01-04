@@ -5,9 +5,11 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import joblib
 import logging
+import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils import class_weight
 from typing import Dict
 
 from src.config import (
@@ -98,8 +100,24 @@ class NeuralPredictor:
             return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 2.0}
 
         try:
-            # Ensure safe extraction of values (defaults to 0 if missing)
-            data = {k: [features.get(k, 0)] for k in FEATURE_COLS}
+            defaults = {
+                "rsi": 50,
+                "adx": 20,
+                "atr": 0,
+                "ema_dist": 0,
+                "bb_width": 0,
+                "vol_ratio": 1.0,
+                "htf_trend": 0,
+                "dist_to_pivot": 0,
+                "hour_norm": 0,
+                "day_norm": 0,
+                "wick_ratio": 0,
+                "dist_ema200": 0,
+                "volatility_ratio": 1.0,
+                "dist_to_vwap": 0,
+                "rolling_acc": 0.5,
+            }
+            data = {k: [features.get(k, defaults.get(k, 0))] for k in FEATURE_COLS}
             df_input = pd.DataFrame(data)
             X_new = self.scaler.transform(df_input)
 
@@ -109,7 +127,7 @@ class NeuralPredictor:
             pred_exit_atr = 2.0
             if self.exit_model:
                 raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
-                pred_exit_atr = max(1.5, min(raw_exit, 4.0))
+                pred_exit_atr = max(1.0, min(raw_exit, 4.0))
 
             # Dynamic Risk Sizing
             risk_mult = 0.5  # Base Low
@@ -156,23 +174,47 @@ class NeuralPredictor:
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
 
+            # compute class weights to correct imbalance
+            classes = np.unique(y_entry)
+            cw = dict()
+            try:
+                weights = class_weight.compute_class_weight("balanced", classes=classes, y=y_entry)
+                cw = {int(c): float(w) for c, w in zip(classes, weights)}
+            except Exception:
+                cw = None
+
+            # callbacks
+            callbacks = [
+                tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True),
+                tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-6),
+            ]
+
             # --- 1. Train Entry Model (Binary Classification) ---
             logger.info("🧠 Training Entry Model...")
             entry_model = tf.keras.models.Sequential(
                 [
                     tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
                     tf.keras.layers.Dense(64, activation="relu"),
-                    tf.keras.layers.Dropout(0.3),  # Prevent overfitting
+                    tf.keras.layers.Dropout(0.3),
                     tf.keras.layers.Dense(32, activation="relu"),
-                    tf.keras.layers.Dense(1, activation="sigmoid"),  # Output 0.0 to 1.0
+                    tf.keras.layers.Dense(1, activation="sigmoid"),
                 ]
             )
             entry_model.compile(
-                optimizer="adam",
+                optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
                 loss="binary_crossentropy",
                 metrics=["accuracy"],
             )
-            entry_model.fit(X_scaled, y_entry, epochs=50, batch_size=16, verbose=0)
+            entry_model.fit(
+                X_scaled,
+                y_entry,
+                epochs=200,
+                batch_size=32,
+                verbose=1,
+                validation_split=0.15,
+                callbacks=callbacks,
+                class_weight=cw,
+            )
             entry_model.save(ENTRY_MODEL_FILE)
             self.entry_model = entry_model
 
@@ -186,8 +228,10 @@ class NeuralPredictor:
                     tf.keras.layers.Dense(1, activation="linear"),  # Linear output for regression
                 ]
             )
-            exit_model.compile(optimizer="adam", loss="mse", metrics=["mae"])
-            exit_model.fit(X_scaled, y_exit, epochs=50, batch_size=16, verbose=0)
+            exit_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3), loss="mse", metrics=["mae"])
+            exit_model.fit(
+                X_scaled, y_exit, epochs=200, batch_size=32, verbose=1, validation_split=0.15, callbacks=callbacks
+            )
             exit_model.save(EXIT_MODEL_FILE)
             self.exit_model = exit_model
 

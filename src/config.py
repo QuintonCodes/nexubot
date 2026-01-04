@@ -68,7 +68,7 @@ CHOP_THRESHOLD_RANGE = 61.8
 # ---------------------------------------------------------
 # RISK MANAGEMENT (ZAR ACCOUNT)
 # ---------------------------------------------------------
-DEFAULT_BALANCE_ZAR = 5000.0
+DEFAULT_BALANCE_ZAR = 450.0
 RISK_PER_TRADE_PCT = 2.0
 MAX_LOT_SIZE = 1
 
@@ -95,6 +95,8 @@ FEATURE_COLS = [
     "rsi",
     "adx",
     "atr",
+    "atr_ratio",
+    "avg_atr_24",
     "ema_dist",
     "bb_width",
     "vol_ratio",
@@ -107,6 +109,7 @@ FEATURE_COLS = [
     "volatility_ratio",
     "dist_to_vwap",
     "rolling_acc",
+    "recent_range_std",
 ]
 
 

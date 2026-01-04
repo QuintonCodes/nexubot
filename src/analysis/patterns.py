@@ -18,99 +18,107 @@ class PatternRecognizer:
         if len(df) < 60:
             return patterns
 
-        # 1. Swing Detection (Pivots)
-        window = 2
-        df["is_pivot_high"] = (
-            (df["high"] > df["high"].shift(1))
-            & (df["high"] > df["high"].shift(2))
-            & (df["high"] > df["high"].shift(-1))
-            & (df["high"] > df["high"].shift(-2))
-        )
-        df["is_pivot_low"] = (
-            (df["low"] < df["low"].shift(1))
-            & (df["low"] < df["low"].shift(2))
-            & (df["low"] < df["low"].shift(-1))
-            & (df["low"] < df["low"].shift(-2))
-        )
-        df["max_id"] = df.iloc[argrelextrema(df["close"].values, np.greater_equal, order=5)[0]]["close"]
+        # Work on a short local copy to avoid mutating caller's df
+        local = df.copy()
 
-        highs = df[df["is_pivot_high"]].copy()
-        lows = df[df["is_pivot_low"]].copy()
-        curr_price = df.iloc[-1]["close"]
+        # --- Robust Swing Detection (Pivots) ---
+        order = 3  # slightly larger order reduces noise
+        try:
+            highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=order)[0]
+            lows_idx = argrelextrema(local["low"].values, np.less_equal, order=order)[0]
+        except Exception:
+            return patterns
+
+        highs = local.iloc[highs_idx].dropna()
+        lows = local.iloc[lows_idx].dropna()
+        curr_price = local.iloc[-1]["close"]
+        last_pos = len(local) - 1
+
+        # helper: safe recency check (positions, not index labels)
+        def is_recent(row_pos, max_age=15):
+            return (last_pos - row_pos) <= max_age
 
         # --- DOUBLE TOP (Bearish) ---
         if len(highs) >= 2:
             h1 = highs.iloc[-2]
             h2 = highs.iloc[-1]
-
-            # Check recency: The second peak must be recent (within last 10 candles)
-            if (df.index.get_loc(df.index[-1]) - df.index.get_loc(h2.name)) < 15:
+            pos_h2 = highs.index.get_loc(h2.name)
+            # ensure recency and similar peak heights
+            if is_recent(pos_h2, max_age=15) and abs(h1["high"] - h2["high"]) / h1["high"] < 0.002:
                 # Tolerance 0.15% (Slightly looser for faster detection)
-                if abs(h1["high"] - h2["high"]) / h1["high"] < 0.0015:
-                    mask = (df.index > h1.name) & (df.index < h2.name)
-                    if mask.any():
-                        neckline = df.loc[mask, "low"].min()
-                        # Aggressive Entry: Signal slightly BEFORE neckline break if volume matches
+                mask = (local.index > h1.name) & (local.index < h2.name)
+                if mask.any():
+                    neckline = local.loc[mask, "low"].min()
+                    # require reasonable dip between peaks and volume confirmation
+                    dip_size = max(h1["high"], h2["high"]) - neckline
+                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
+                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
                         dist_to_break = (curr_price - neckline) / curr_price
-
-                        if curr_price < neckline or (
-                            dist_to_break < 0.001 and df.iloc[-1]["volume"] > df.iloc[-1]["vol_sma"]
-                        ):
+                        if curr_price < neckline or (dist_to_break < 0.0015 and vol_ok):
                             patterns.append(
                                 {
                                     "pattern": "Double Top",
                                     "signal": "SELL",
                                     "direction": "SHORT",
-                                    "confidence": 88.0,
+                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
                                     "order_type": "STOP",
                                     "price": neckline,
                                 }
                             )
 
+        # --- DOUBLE BOTTOM (Bullish) ---
         if len(lows) >= 2:
             l1 = lows.iloc[-2]
             l2 = lows.iloc[-1]
-
-            if (df.index.get_loc(df.index[-1]) - df.index.get_loc(l2.name)) < 15:
-                if abs(l1["low"] - l2["low"]) / l1["low"] < 0.0015:
-                    mask = (df.index > l1.name) & (df.index < l2.name)
-                    if mask.any():
-                        neckline = df.loc[mask, "high"].max()
+            pos_l2 = lows.index.get_loc(l2.name)
+            if is_recent(pos_l2, max_age=15) and abs(l1["low"] - l2["low"]) / l1["low"] < 0.002:
+                mask = (local.index > l1.name) & (local.index < l2.name)
+                if mask.any():
+                    neckline = local.loc[mask, "high"].max()
+                    dip_size = neckline - min(l1["low"], l2["low"])
+                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
+                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
                         dist_to_break = (neckline - curr_price) / neckline
-
-                        if curr_price > neckline or (
-                            dist_to_break < 0.001 and df.iloc[-1]["volume"] > df.iloc[-1]["vol_sma"]
-                        ):
+                        if curr_price > neckline or (dist_to_break < 0.0015 and vol_ok):
                             patterns.append(
                                 {
                                     "pattern": "Double Bottom",
                                     "signal": "BUY",
                                     "direction": "LONG",
-                                    "confidence": 88.0,
+                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
                                     "order_type": "STOP",
                                     "price": neckline,
                                 }
                             )
 
         # --- HEAD AND SHOULDERS (Bearish) ---
-        # Left Shoulder, Head (Higher), Right Shoulder (Lower than head, ~Left)
         if len(highs) >= 3:
             l_sh = highs.iloc[-3]
             head = highs.iloc[-2]
             r_sh = highs.iloc[-1]
 
-            # Head must be higher than both shoulders
+            # head must be clearly higher than shoulders and shoulders roughly equal
+            shoulder_tol = 0.02
             if head["high"] > l_sh["high"] and head["high"] > r_sh["high"]:
-                # Shoulders roughly equal (2% tolerance)
-                if abs(l_sh["high"] - r_sh["high"]) / l_sh["high"] < 0.02:
-                    # Neckline break check
-                    neckline = min(
-                        df.loc[l_sh.name : head.name, "low"].min(), df.loc[head.name : r_sh.name, "low"].min()
-                    )
-                    if curr_price < neckline:
-                        patterns.append(
-                            {"pattern": "Head & Shoulders", "signal": "SELL", "direction": "SHORT", "confidence": 90.0}
-                        )
+                if abs(l_sh["high"] - r_sh["high"]) / l_sh["high"] < shoulder_tol:
+                    # neckline: lower of the troughs between L->H and H->R
+                    neckline_1 = local.loc[l_sh.name : head.name, "low"].min()
+                    neckline_2 = local.loc[head.name : r_sh.name, "low"].min()
+                    neckline = min(neckline_1, neckline_2)
+                    # require meaningful head-to-neck gap and recent structure
+                    if (head["high"] - neckline) > (local.iloc[-1]["atr"] * 0.8):
+                        if curr_price < neckline:
+                            vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
+                            patterns.append(
+                                {
+                                    "pattern": "Head & Shoulders",
+                                    "signal": "SELL",
+                                    "direction": "SHORT",
+                                    "confidence": 85.0 + (5.0 if vol_ok else 0.0),
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
 
         # --- BULL/BEAR FLAGS (Continuation) ---
         flags = self.find_flags(df)
@@ -159,37 +167,28 @@ class PatternRecognizer:
 
         recent = df.iloc[-lookback:]
         pole_start = df.iloc[-lookback - 5]
+        pole_end = recent.iloc[0]
         atr = curr["atr"]
-        if atr == 0:
+        if atr == 0 or np.isnan(atr):
             return patterns  # Safety check
 
-        pole_end = recent.iloc[0]
-
         # BULL FLAG
-        # 1. Pole: Strong move UP
         move_up = pole_end["close"] - pole_start["close"]
         if move_up > (3 * atr):
-            # 2. Flag Body: Consolidation (Volume drops)
             flag_body = recent.iloc[:-1]
             vol_drop = flag_body["volume"].mean() < flag_body["vol_sma"].mean()
-
-            # 3. Structure: Price stayed in upper 50% of the pole
             held_gains = flag_body["low"].min() > (pole_start["low"] + (0.5 * move_up))
 
             if vol_drop and held_gains:
-                # 4. Breakout: Current candle breaks flag high + Volume
                 flag_high = flag_body["high"].max()
                 if curr["close"] > flag_high and curr["volume"] > curr["vol_sma"]:
                     patterns.append({"pattern": "Bull Flag", "signal": "BUY", "direction": "LONG", "confidence": 85.0})
 
         # BEAR FLAG
-        # 1. Pole: Strong move DOWN
         move_down = pole_start["close"] - pole_end["close"]
         if move_down > (3 * atr):
             flag_body = recent.iloc[:-1]
             vol_drop = flag_body["volume"].mean() < flag_body["vol_sma"].mean()
-
-            # Structure: Price stayed in lower 50% of the pole
             held_lows = flag_body["high"].max() < (pole_start["high"] - (0.5 * move_down))
 
             if vol_drop and held_lows:
@@ -212,21 +211,23 @@ class FakeBreakoutDetector:
         """
         Scans for manipulation patterns
         """
+        if len(df) < 5:
+            return {"is_fake": False, "risk_score": 0, "reasons": []}
+
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         risk_score = 0
         reasons = []
 
         # 1. Low Volume Breakout (Fakeout)
-        # If we are making a new high but volume is dropping
         if curr["high"] > prev["high"] and curr["volume"] < (curr["vol_sma"] * 0.8):
             risk_score += 40
             reasons.append("Low Vol Breakout")
 
         # 2. RSI Divergence (Exhaustion)
-        # Price High, RSI Lower
-        if curr["high"] > prev["high"] and curr["rsi"] < df.iloc[-5]["rsi"]:
-            risk_score += 30
+        rsi_5 = df.iloc[-5]["rsi"]
+        if curr["high"] > prev["high"] and curr["rsi"] < rsi_5:
+            risk_score += 25
             reasons.append("RSI Divergence")
 
         # 3. Climax Wick (Rejection)
@@ -235,5 +236,19 @@ class FakeBreakoutDetector:
         if wick_len > (body * 2):
             risk_score += 30
             reasons.append("Wick Rejection")
+
+        # 4. Range/Volume mismatch: large range with low volume
+        range_ratio = (curr["high"] - curr["low"]) / (curr["atr"] + 1e-9)
+        if range_ratio > 1.5 and curr["volume"] < curr["vol_sma"]:
+            risk_score += 20
+            reasons.append("Range with Low Volume")
+
+        # 5. Quick retracement after breakout (sign of trap)
+        # If a breakout is followed by a close back within previous range
+        prev_range_high = df.iloc[-3]["high"] if len(df) >= 3 else prev["high"]
+        prev_range_low = df.iloc[-3]["low"] if len(df) >= 3 else prev["low"]
+        if curr["high"] > prev_range_high and curr["close"] < prev_range_high:
+            risk_score += 20
+            reasons.append("Retrace After Breakout")
 
         return {"is_fake": risk_score >= 50, "risk_score": risk_score, "reasons": reasons}

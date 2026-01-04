@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import pandas as pd
 import time
@@ -87,7 +88,6 @@ class AITradingEngine:
         history_factor = -10 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
 
         # 3. Neural Network Weighting
-        # Map 0.5-1.0 prob to 0 to +15 score
         nn_factor = (nn_prob - 0.5) * 40
 
         # 4. Volatility Penalty
@@ -119,6 +119,7 @@ class AITradingEngine:
         min_vol = info.get("min_vol", 0.01)
         max_vol = info.get("max_vol", 100.0)
         vol_step = info.get("vol_step", 0.01)
+        digits = info.get("digits", 5)
         atr = float(curr["atr"])
 
         # --- 1. SMART ENTRY LOGIC ---
@@ -145,7 +146,11 @@ class AITradingEngine:
 
         # --- GHOST ORDER LOGIC ---
         strategy_name = signal.get("strategy", "").lower()
-        if "fvg" not in strategy_name and "limit" not in str(order_type).lower():
+
+        # Momentum needs immediate execution. Limit orders cause missed trades here.
+        is_momentum = any(x in strategy_name for x in ["breakout", "flow", "ichimoku"])
+
+        if "fvg" not in strategy_name and "limit" not in str(order_type).lower() and not is_momentum:
             if signal["confidence"] <= 85.0:
                 is_reversal = "reversion" in strategy_name or "divergence" in strategy_name
                 order_type = "LIMIT"
@@ -156,8 +161,8 @@ class AITradingEngine:
                     entry_price = current_market_price + ghost_pips
 
         # --- 2. TP / SL CALCULATION ---
-        # Base SL is 1.5 ATR
-        sl_dist = atr * 1.5
+        # Base SL is tightened to 1.0 ATR
+        sl_dist = atr * 1.0
         min_dist = point * 50
         sl_dist = max(sl_dist, min_dist)
 
@@ -168,9 +173,40 @@ class AITradingEngine:
             if (atr * 0.5) < suggested_dist < (atr * 3.0):
                 sl_dist = suggested_dist
 
-        tp_dist = atr * nn_result["pred_exit_atr"]
-        if (tp_dist / sl_dist) < 1.5:
-            tp_dist = sl_dist * 1.5
+        # Probability calibration hook
+        prob = nn_result.get("prob", 0.5)
+        pred_exit_atr = float(nn_result.get("pred_exit_atr", 2.0))
+        # Bound predicted exit for sanity
+        pred_exit_atr = max(0.8, min(pred_exit_atr, 6.0))
+
+        # conservative TP based on predicted exit ATR but always at least 1.2x SL
+        tp_dist = max(atr * pred_exit_atr, sl_dist * 1.2)
+
+        rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
+        expected_ev = prob * rr - (1.0 - prob)
+
+        # Kelly-informed adjustment (small, capped multiplier)
+        kelly = prob - ((1 - prob) / (rr + 1e-9))
+        if kelly > 0:
+            kelly_factor = min(1.5, max(0.5, 1.0 + (kelly * 2.0)))  # modest scaling
+        else:
+            kelly_factor = 0.5  # shrink size for negative Kelly
+
+        # If EV is clearly negative, reduce risk_mult / skip
+        if expected_ev < 0:
+            # degrade risk multiplier to limit exposure
+            nn_result["risk_mult"] = max(0.25, nn_result.get("risk_mult", 1.0) * 0.5)
+            # hard skip if very negative
+            if expected_ev < -0.25:
+                self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
+                return None
+
+        # Enforce minimum acceptable RR for low-prob trades
+        if rr < 1.2 and prob < 0.65:
+            self._log_once(
+                f"rr_bad_{symbol}", f"Skipping {symbol}: Low RR {rr:.2f} with low prob {prob:.2f}", logging.DEBUG
+            )
+            return None
 
         # Calculate Absolute Prices
         if signal["signal"] == "BUY":
@@ -184,9 +220,9 @@ class AITradingEngine:
             tp_price = bid - tp_dist
 
         # --- 3. RISK SIZING ---
-        risk_mult = nn_result["risk_mult"]
+        risk_mult = nn_result.get("risk_mult", 1.0) * kelly_factor
         if signal.get("is_shadow", False):
-            risk_mult = 0.1
+            risk_mult = min(risk_mult, 0.1)
 
         target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
         points_risk = sl_dist / point
@@ -196,7 +232,15 @@ class AITradingEngine:
 
         # Lot Sizing
         lots = target_risk_zar / risk_per_lot
+
+        # Round lots to exchange vol_step safely using floor to avoid over-risk
+        try:
+            steps = math.floor(lots / vol_step)
+            lots = steps * vol_step
+        except Exception:
+            lots = round(lots / vol_step) * vol_step
         lots = round(lots / vol_step) * vol_step
+
         lots = max(min_vol, min(lots, max_vol, MAX_LOT_SIZE))
 
         actual_risk_zar = risk_per_lot * lots
@@ -239,6 +283,11 @@ class AITradingEngine:
         # Profit Calculation
         points_profit = tp_dist / point
         profit_zar = points_profit * tick_value * lots
+
+        # Final rounding of prices
+        sl_formatted = round(sl_price, digits)
+        tp_formatted = round(tp_price, digits)
+        entry_formatted = round(entry_price, digits)
 
         signal.update(
             {
@@ -467,7 +516,7 @@ class AITradingEngine:
                     return None  # Don't trade trend in Asia
 
             # 4. Volatility Checks
-            avg_atr = df["atr"].tail(24).mean()
+            avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
             if avg_atr > 0:
                 volatility_ratio = curr["atr"] / avg_atr
 
@@ -477,10 +526,7 @@ class AITradingEngine:
                 return None
 
             # Adaptive Cooldown logic
-            current_cooldown_req = PAIR_SIGNAL_COOLDOWN
-            if volatility_ratio > 1.5:
-                current_cooldown_req *= 2
-
+            current_cooldown_req = PAIR_SIGNAL_COOLDOWN * (2 if volatility_ratio > 1.5 else 1)
             last_time = self.signal_history.get(symbol, 0)
             if (time.time() - last_time) < current_cooldown_req:
                 return None
@@ -488,6 +534,16 @@ class AITradingEngine:
             # 5. Check DB and Spread
             spread_info = await provider.get_spread(symbol)
             if spread_info["spread_high"]:
+                return None
+
+            symbol_info = await provider.get_symbol_info(symbol)
+            if not symbol_info:
+                return None
+
+            # Guard: don't trade if spread is large relative to ATR
+            spread = spread_info.get("spread", 0.0)
+            if spread > (curr["atr"] * 0.25):
+                self._log_once(f"spread_{symbol}", f"Skipping {symbol}: Spread {spread:.6f} > 0.25 ATR", logging.DEBUG)
                 return None
 
             # Stale Check
@@ -506,17 +562,12 @@ class AITradingEngine:
 
             # 6. Strategy & Pattern Matching
             htf_trend = await self._get_htf_trend(symbol, provider)
-
             pattern_recognizer = PatternRecognizer()
             patterns = pattern_recognizer.analyze_patterns(df)
-
             structure = pattern_recognizer.check_market_structure(df)
 
             # 7. Stratey Routing
             strat_signal = None
-            symbol_info = await provider.get_symbol_info(symbol)
-            if not symbol_info:
-                return None
             point = symbol_info.get("point", 0.00001)
 
             if symbol in FOREX_SYMBOLS:
@@ -525,7 +576,7 @@ class AITradingEngine:
                     strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
 
                 # Trend Strategies
-                elif market_regime == "TREND" and "TREND" in session_info["types"]:
+                elif market_regime in ["TREND", "NEUTRAL"] and "TREND" in session_info["types"]:
                     strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
                     if not strat_signal:
                         strat_signal = self.strategy_analyzer._fx_golden_pullback(curr, htf_trend)
@@ -545,8 +596,23 @@ class AITradingEngine:
                     strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
                     final_signal_candidate = strat_signal
                 else:
-                    self._log_once(f"conflict_{symbol}", f"Skipping {symbol}: Strategy/Pattern Conflict")
-                    return None
+                    # Fundamental Type Check
+                    # Classify Strategy
+                    s_name = strat_signal["strategy"].lower()
+                    s_type = "REVERSION" if "reversion" in s_name or "divergence" in s_name else "TREND"
+
+                    # Classify Pattern (Heuristic)
+                    p_name = pattern_signal["pattern"].lower()
+                    p_type = "TREND" if "flag" in p_name else "REVERSION"
+
+                    if s_type == p_type:
+                        self._log_once(f"conflict_{symbol}", f"Skipping {symbol}: Strategy/Pattern Conflict")
+                        return None
+                    else:
+                        # Different types (e.g. Trend Buy vs Reversal Sell) -> SOFT PENALTY
+                        strat_signal["confidence"] -= 15
+                        strat_signal["strategy"] += f" - {pattern_signal['pattern']} (Conflict)"
+                        final_signal_candidate = strat_signal
             # Case B: Only Strategy
             elif strat_signal:
                 final_signal_candidate = strat_signal
@@ -558,13 +624,9 @@ class AITradingEngine:
             if not final_signal_candidate:
                 return None
 
-            # Soft Veto Logic (Penalty Scoring)
+            # 8. Market Structure Veto
             penalty_score = 0
-
-            # 8. Market Structure Veto (Fixed)
-            structure = pattern_recognizer.check_market_structure(df)
             is_reversion = "reversion" in final_signal_candidate["strategy"].lower()
-
             if not is_reversion:
                 if final_signal_candidate["direction"] == "LONG" and structure == "BEAR":
                     penalty_score += 15
@@ -623,23 +685,27 @@ class AITradingEngine:
         if htf_trend is None:
             htf_trend = await self._get_htf_trend(symbol, provider)
 
-        # Calculate Distance to VWAP
         dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
-
-        # Handle Day Norm for Crypto (Remove noise)
         day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else now.weekday() / 6.0
-
         rolling_acc = 0.5  # Default neutral
         if self.db_manager:
             rolling_acc = await self.db_manager.get_pair_performance(symbol)
+
+        # extra features
+        avg_atr_24 = avg_atr
+        atr_ratio = curr["atr"] / (avg_atr_24 + 1e-9)
+        vol_sma_ratio = curr["volume"] / (curr["vol_sma"] + 1e-9)
+        recent_range_std = recent_df["high"].sub(recent_df["low"]).tail(20).std()
 
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
             "atr": curr["atr"],
+            "atr_ratio": atr_ratio,
+            "avg_atr_24": avg_atr_24,
             "ema_dist": (curr["close"] - curr["ema_50"]) / curr["close"],
             "bb_width": curr["bb_width"],
-            "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
+            "vol_ratio": vol_sma_ratio,
             "htf_trend": 1 if htf_trend == "BULL" else (-1 if htf_trend == "BEAR" else 0),
             "dist_to_pivot": dist_to_pivot,
             "hour_norm": now.hour / 24.0,
@@ -649,6 +715,7 @@ class AITradingEngine:
             "volatility_ratio": volatility_ratio,
             "dist_to_vwap": dist_to_vwap,
             "rolling_acc": rolling_acc,
+            "recent_range_std": recent_range_std if not math.isnan(recent_range_std) else 0.0,
         }
 
         # Predict
