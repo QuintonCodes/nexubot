@@ -1,7 +1,8 @@
 import asyncio
-import sys
+import numpy as np
 import os
 import pandas as pd
+import sys
 from typing import Dict, List
 
 # Adjust path to root
@@ -120,23 +121,29 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         return 0
 
     df_htf = pd.DataFrame(klines_htf)
-    # Calculate simple EMA trend for HTF
-    df_htf["htf_ema_200"] = df_htf["close"].ewm(span=200).mean()
-    df_htf["htf_trend_val"] = df_htf.apply(
-        lambda x: 1 if x["close"] > x["htf_ema_200"] else (-1 if x["close"] < x["htf_ema_200"] else 0), axis=1
-    )
+    df_htf = TechnicalAnalyzer.calculate_indicators(df_htf, heavy=False)
+
+    df_htf["htf_ema_200"] = df_htf["ema_200"]
+    df_htf["htf_slope"] = df_htf["ema_200_slope"]
+
+    # Vectorized Trend Calculation for Merge
+    conditions = [
+        (df_htf["close"] > df_htf["htf_ema_200"]) & (df_htf["ema_200_slope"] > 0),
+        (df_htf["close"] < df_htf["htf_ema_200"]) & (df_htf["ema_200_slope"] < 0),
+    ]
+    choices = [1, -1]  # 1=BULL, -1=BEAR
+    df_htf["htf_trend_val"] = np.select(conditions, choices, default=0)
 
     # Keep only time and trend columns to merge
-    df_htf = df_htf[["time", "htf_trend_val"]].sort_values("time")
+    df_htf_clean = df_htf[["time", "htf_trend_val"]].sort_values("time")
 
-    # Shift HTF timestamps forward by the candle duration so we don't peer into the future.
+    # Shift HTF timestamps to prevent lookahead
     shift_seconds = 14400 if htf_tf == "4h" else 3600
-    df_htf["time"] = df_htf["time"] + shift_seconds
+    df_htf_clean["time"] = df_htf_clean["time"] + shift_seconds
 
-    # 3. Merge HTF Data into M15 Data
-    # 'merge_asof' finds the last known H4 candle for each M15 candle
+    # Merge HTF Data into M15 Data
     df_m15 = df_m15.sort_values("time")
-    df_merged = pd.merge_asof(df_m15, df_htf, on="time", direction="backward")  # Look for the closest PAST H4 candle
+    df_merged = pd.merge_asof(df_m15, df_htf_clean, on="time", direction="backward")
 
     if len(df_merged) > 500:
         df_merged = df_merged.iloc[500:].reset_index(drop=True)
@@ -151,8 +158,6 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             break
 
         curr = df_merged.iloc[i]
-
-        # Determine HTF Trend string for Strategy Analyzer
         trend_val = curr["htf_trend_val"]
         htf_trend_str = "BULL" if trend_val == 1 else ("BEAR" if trend_val == -1 else "FLAT")
 
@@ -162,12 +167,9 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         range_len = curr["high"] - curr["low"]
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0
         avg_atr = curr["avg_atr"] if curr["avg_atr"] > 0 else curr["atr"]
-
         dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
 
-        # --- Time Normalization Fix ---
         curr_time = pd.to_datetime(curr["time"], unit="s")
-        # Crypto runs 24/7 so day of week is noise (set to 0.0), Forex respects weekday
         day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else curr_time.weekday() / 6.0
 
         rolling_acc = 0.5  # Default neutral
@@ -177,16 +179,12 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         recent_body = df_merged.iloc[start_idx:i]
         recent_range_std = recent_body["high"].sub(recent_body["low"]).std() if not recent_body.empty else 0.0
 
-        # atr_ratio and avg_atr_24 align with AI Engine FEATURE_COLS
-        avg_atr_24 = avg_atr
-        atr_ratio = curr["atr"] / (avg_atr_24 + 1e-9)
-
         features = {
             "rsi": curr["rsi"],
             "adx": curr["adx"],
             "atr": curr["atr"],
-            "atr_ratio": atr_ratio,
-            "avg_atr_24": avg_atr_24,
+            "atr_ratio": curr["atr"] / (avg_atr + 1e-9),
+            "avg_atr_24": avg_atr,
             "ema_dist": (curr["close"] - curr["ema_50"]) / curr["close"],
             "bb_width": curr["bb_width"],
             "vol_ratio": curr["volume"] / curr["vol_sma"] if curr["vol_sma"] else 1,
@@ -211,40 +209,142 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
             signal = analyzer.analyze_crypto(curr, df_merged.iloc[: i + 1], [])
 
         if signal:
-            # 3. Simulate Outcome (Max Excursion)
+            # 3. Simulate Outcome
             entry = curr["close"]
+            if signal.get("order_type") == "LIMIT":
+                entry = signal["price"]
+
             is_long = signal["direction"] == "LONG"
             atr = curr["atr"]
+
             sl_dist = atr * 1.0
+            if "suggested_sl" in signal:
+                sl_dist = abs(entry - signal["suggested_sl"])
+
+            tp_dist = max(atr * 2.0, sl_dist * 1.5)
+
+            sl = entry - sl_dist if is_long else entry + sl_dist
+            tp = entry + tp_dist if is_long else entry - tp_dist
 
             # Ensure this matches your Live Bot duration (e.g., 4 hours = 16 candles)
             lookahead_candles = 16
             future = df_merged.iloc[i + 1 : i + 1 + lookahead_candles]
 
-            won = False
-            max_atr_gain = 0.0
+            # Simulate
+            won, pnl, excursion = simulate_trade_management(entry, sl, tp, is_long, future, atr)
 
-            for _, row in future.iterrows():
-                if is_long:
-                    if row["low"] < (entry - sl_dist):  # Hit SL
-                        break
-                    gain = row["high"] - entry
-                    max_atr_gain = max(max_atr_gain, gain / atr)
-                    if gain > (atr * 1.0):
-                        won = True
-                else:
-                    if row["high"] > (entry + sl_dist):  # Hit SL
-                        break
-                    gain = entry - row["low"]
-                    max_atr_gain = max(max_atr_gain, gain / atr)
-                    if gain > (atr * 1.0):
-                        won = True
-
-            buffer_backfill_data(features, won, 0.0, max_atr_gain)
+            buffer_backfill_data(features, won, pnl, excursion)
             processed += 1
 
     print(f"✅ {symbol}: {processed} signals found.")
     return processed
+
+
+def simulate_trade_management(
+    entry: float, sl: float, tp: float, is_long: bool, future_candles: pd.DataFrame, atr: float
+) -> tuple[bool, float, float]:
+    """
+    Simulates the Live Bot's Trailing Stop Logic (BE -> 1R -> 2R).
+    Returns: (won, pnl_r_multiple, max_excursion_atr)
+    """
+    current_sl = sl
+    be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
+
+    max_favorable_dist = 0.0
+    outcome_pnl = 0.0
+    won = False
+
+    entry_price = entry
+
+    for _, row in future_candles.iterrows():
+        # Approx Tick Data from Candle
+        row_high = row["high"]
+        row_low = row["low"]
+
+        if is_long:
+            # 1. Check Stops/TP
+            if row_low <= current_sl:
+                outcome_pnl = current_sl - entry_price
+                won = False
+                break
+
+            if row_high >= tp:
+                outcome_pnl = tp - entry_price
+                won = True
+                break
+
+            # 2. Update Max Excursion
+            curr_dist = row_high - entry_price
+            if curr_dist > max_favorable_dist:
+                max_favorable_dist = curr_dist
+
+            # 3. Trailing Logic (Mirrors console.py)
+            # Stage 3: Lock 2R
+            if be_stage < 3 and max_favorable_dist > (atr * 3.0):
+                new_sl = entry_price + (atr * 2.0)
+                if new_sl > current_sl:
+                    current_sl = new_sl
+                    be_stage = 3
+
+            # Stage 2: Lock 1R
+            elif be_stage < 2 and max_favorable_dist > (atr * 2.0):
+                new_sl = entry_price + (atr * 1.0)
+                if new_sl > current_sl:
+                    current_sl = new_sl
+                    be_stage = 2
+
+            # Stage 1: Breakeven
+            elif be_stage < 1 and max_favorable_dist > (atr * 1.0):
+                new_sl = entry_price + (atr * 0.1)  # Small buffer
+                if new_sl > current_sl:
+                    current_sl = new_sl
+                    be_stage = 1
+
+        else:  # Short
+            # 1. Check Stops/TP
+            if row_high >= current_sl:
+                outcome_pnl = entry_price - current_sl
+                won = False
+                break
+
+            if row_low <= tp:
+                outcome_pnl = entry_price - tp
+                won = True
+                break
+
+            # 2. Update Max Excursion
+            curr_dist = entry_price - row_low
+            if curr_dist > max_favorable_dist:
+                max_favorable_dist = curr_dist
+
+            # 3. Trailing Logic
+            if be_stage < 3 and max_favorable_dist > (atr * 3.0):
+                new_sl = entry_price - (atr * 2.0)
+                if new_sl < current_sl:
+                    current_sl = new_sl
+                    be_stage = 3
+            elif be_stage < 2 and max_favorable_dist > (atr * 2.0):
+                new_sl = entry_price - (atr * 1.0)
+                if new_sl < current_sl:
+                    current_sl = new_sl
+                    be_stage = 2
+            elif be_stage < 1 and max_favorable_dist > (atr * 1.0):
+                new_sl = entry_price - (atr * 0.1)
+                if new_sl < current_sl:
+                    current_sl = new_sl
+                    be_stage = 1
+
+    # Check for timeout (end of candles)
+    if outcome_pnl == 0.0:
+        # Close at last candle close
+        last_close = future_candles.iloc[-1]["close"]
+        if is_long:
+            outcome_pnl = last_close - entry_price
+        else:
+            outcome_pnl = entry_price - last_close
+        won = outcome_pnl > 0
+
+    return won, outcome_pnl, (max_favorable_dist / atr if atr > 0 else 0)
 
 
 if __name__ == "__main__":

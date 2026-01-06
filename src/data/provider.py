@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class DataProvider:
     """
-    MT5 Direct Provider - HFM Optimized.
+    MT5 Direct Provider - Generic / Exness Optimized.
     Wraps standard MT5 functions with error handling and retries.
     """
 
@@ -69,11 +69,9 @@ class DataProvider:
             if self._login and self._password:
                 authorized = mt5.login(int(self._login), password=self._password, server=self._server)
                 if authorized:
-                    account_info = mt5.account_info()
-                    if account_info:
-                        logger.info(f"✅ Connected to HFM Account: {self._login}")
-                        self.connected = True
-                        return True
+                    logger.info(f"✅ Connected to Broker Account: {self._login}")
+                    self.connected = True
+                    return True
 
             self.connected = True
             return True
@@ -86,7 +84,7 @@ class DataProvider:
         # 1. Select symbol in Market Watch to trigger sync
         selected = mt5.symbol_select(symbol, True)
         if not selected:
-            logger.warning(f"Symbol {symbol} not found or not selectable.")
+            logger.warning(f"Symbol {symbol} not found in Market Watch.")
             return []
 
         # 2. Attempt to fetch data with retries
@@ -100,12 +98,6 @@ class DataProvider:
 
         if rates is None or len(rates) == 0:
             return []
-
-        # 3. Freshness Check: Is the last candle stale?
-        # Note: Market might be closed, so we allow some lag..
-        last_time = rates[-1]["time"]
-        if (time.time() - last_time) > 86400 * 3:  # If data is older than 3 days
-            pass
 
         # Convert to standard list of dicts
         data = []
@@ -217,13 +209,7 @@ class DataProvider:
         if len(self.spread_cache[symbol]) > 50:
             self.spread_cache[symbol].pop(0)
 
-        # Dynamic Check
-        avg_spread = sum(self.spread_cache[symbol]) / len(self.spread_cache[symbol])
-
-        # Block if spread is 1.5x the session average
-        is_high = spread_raw > (avg_spread * 1.5) and spread_raw > 10  # Min threshold
-
-        return {"spread": spread_raw, "spread_high": is_high}
+        return {"spread": spread_raw, "spread_high": False}
 
     async def shutdown(self):
         """Safely shuts down the connection."""

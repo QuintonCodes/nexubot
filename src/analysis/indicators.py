@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from typing import Literal
 
 
 class TechnicalAnalyzer:
@@ -124,3 +125,29 @@ class TechnicalAnalyzer:
         lag = (period - 1) // 2
         ema_data = 2 * series - series.shift(lag)
         return ema_data.ewm(span=period, adjust=False).mean()
+
+    @staticmethod
+    def get_htf_trend(df: pd.DataFrame) -> Literal["BULL", "BEAR", "FLAT"]:
+        """
+        Shared Trend Logic for Backfill and Live Engine.
+        Uses EMA 200 Position + Slope.
+        """
+        if df.empty or len(df) < 5:
+            return "FLAT"
+
+        price = df["close"].iloc[-1]
+        ema_200 = df["ema_200"].iloc[-1]
+        slope = df["ema_200_slope"].iloc[-1]
+
+        # 1. Price vs EMA Check
+        above_ema = price > ema_200
+
+        # 2. Slope Check (Threshold helps filter noise)
+        positive_slope = slope > 0
+
+        if above_ema and positive_slope:
+            return "BULL"
+        elif not above_ema and not positive_slope:
+            return "BEAR"
+
+        return "FLAT"

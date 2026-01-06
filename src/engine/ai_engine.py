@@ -123,26 +123,20 @@ class AITradingEngine:
         atr = float(curr["atr"])
 
         # --- 1. SMART ENTRY LOGIC ---
-        signal_close_price = curr["close"]
         current_market_price = ask if signal["direction"] == "LONG" else bid
+        order_type = signal.get("order_type", "MARKET")
+        entry_price = signal.get("price", current_market_price)
+
+        # Determine Order Type
+        if order_type == "MARKET":
+            entry_price = current_market_price
 
         # Calculate Chase Distance (in ATR multiples)
+        signal_close_price = curr["close"]
         chase_dist = abs(current_market_price - signal_close_price)
         if chase_dist > (atr * 0.5):
             logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
             return None
-
-        # Determine Order Type
-        order_type = signal.get("order_type", "MARKET")
-        entry_price = signal.get("price", current_market_price)
-
-        # Smart Entry Enforcement (Convert Late Market to Limit)
-        dist_from_signal = abs(current_market_price - curr["close"])
-        atr_threshold = atr * 0.3
-
-        if order_type == "MARKET" and dist_from_signal > atr_threshold:
-            order_type = "LIMIT"
-            entry_price = curr["close"]  # Force entry at the candle close price
 
         # --- GHOST ORDER LOGIC ---
         strategy_name = signal.get("strategy", "").lower()
@@ -362,17 +356,10 @@ class AITradingEngine:
         trend = "FLAT"
         if klines:
             df = pd.DataFrame(klines)
-            df["ema_200"] = df["close"].ewm(span=200).mean()
-            df["slope"] = df["ema_200"].diff(3)
-
-            slope = df["slope"].iloc[-1]
-            price = df["close"].iloc[-1]
-            ema = df["ema_200"].iloc[-1]
-
-            if price > ema and slope > 0:
-                trend = "BULL"
-            elif price < ema and slope < 0:
-                trend = "BEAR"
+            # Calculate Indicators
+            df = TechnicalAnalyzer.calculate_indicators(df, heavy=False)
+            # Use Shared Logic
+            trend = TechnicalAnalyzer.get_htf_trend(df)
 
         self.htf_cache[symbol] = {"trend": trend, "time": now}
         return trend
@@ -480,6 +467,7 @@ class AITradingEngine:
 
         session_info = self._get_session_status()
         if not session_info["allow_trade"]:
+            self._log_once("session_block", f"Skipping analysis: {session_info['reason']}")
             return None
 
         # 1. Data Prep
@@ -499,8 +487,29 @@ class AITradingEngine:
         if late_signal:
             final_signal_candidate = late_signal
         else:
+            # Cooldown check
             if self.is_on_cooldown(symbol) or symbol in self.active_features:
                 return None
+
+            # Adaptive Cooldown logic
+            current_cooldown_req = PAIR_SIGNAL_COOLDOWN * (2 if volatility_ratio > 1.5 else 1)
+            last_time = self.signal_history.get(symbol, 0)
+            if (time.time() - last_time) < current_cooldown_req:
+                return None
+
+            # Stale Check
+            if (time.time() - curr["time"]) > 1800:
+                return None
+
+            # Check Loss Cooldown
+            try:
+                if self.db_manager:
+                    is_loss = await self.db_manager.check_recent_loss(symbol)
+                    if is_loss:
+                        self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
+                        return None
+            except Exception:
+                pass
 
             # 3. Choppiness & Regime Logic
             chop_idx = curr["chop_idx"]
@@ -525,40 +534,20 @@ class AITradingEngine:
                 self.signal_history[symbol] = time.time() + 1800  # 30 min ban
                 return None
 
-            # Adaptive Cooldown logic
-            current_cooldown_req = PAIR_SIGNAL_COOLDOWN * (2 if volatility_ratio > 1.5 else 1)
-            last_time = self.signal_history.get(symbol, 0)
-            if (time.time() - last_time) < current_cooldown_req:
-                return None
-
-            # 5. Check DB and Spread
             spread_info = await provider.get_spread(symbol)
-            if spread_info["spread_high"]:
+            spread = spread_info.get("spread", 0.0)
+
+            if spread > (curr["atr"] * 0.5):
+                self._log_once(
+                    f"spread_{symbol}",
+                    f"Skipping {symbol}: Spread {spread:.1f} > 0.5 ATR ({curr['atr'] * 0.5:.1f})",
+                    logging.WARNING,
+                )
                 return None
 
             symbol_info = await provider.get_symbol_info(symbol)
             if not symbol_info:
                 return None
-
-            # Guard: don't trade if spread is large relative to ATR
-            spread = spread_info.get("spread", 0.0)
-            if spread > (curr["atr"] * 0.25):
-                self._log_once(f"spread_{symbol}", f"Skipping {symbol}: Spread {spread:.6f} > 0.25 ATR", logging.DEBUG)
-                return None
-
-            # Stale Check
-            if (time.time() - curr["time"]) > 1800:
-                return None
-
-            # Check Loss Cooldown
-            try:
-                if self.db_manager:
-                    is_loss = await self.db_manager.check_recent_loss(symbol)
-                    if is_loss:
-                        self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
-                        return None
-            except Exception:
-                pass
 
             # 6. Strategy & Pattern Matching
             htf_trend = await self._get_htf_trend(symbol, provider)
@@ -588,6 +577,10 @@ class AITradingEngine:
                 strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
 
             pattern_signal = patterns[0] if patterns else None
+
+            if not strat_signal and not patterns:
+                self._log_once(f"no_sig_{symbol}", f"{symbol}: No strategy matched.")
+                pass
 
             # Case A: Strategy + Pattern (Confluence)
             if strat_signal and pattern_signal:

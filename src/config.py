@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.3.2"
+VERSION = "v1.4.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -16,7 +16,7 @@ VERSION = "v1.3.2"
 MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
-MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\HFM Metatrader 5\terminal64.exe")
+MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
 
 # ---------------------------------------------------------
 # DATABASE
@@ -27,19 +27,19 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # MARKET SELECTION
 # ---------------------------------------------------------
 CRYPTO_SYMBOLS: list[str] = [
-    "#BTCUSD",
-    "#ETHUSD",
-    "#BNBUSD",
-    "#XRPUSD",
-    "#TRXUSD",
+    "BTCUSDm",
+    "ETHUSDm",
+    "BNBUSDm",
+    "XRPUSDm",
+    "SOLUSDm",
 ]
 
 # slow scan (credit conservation)
-FOREX_SYMBOLS: list[str] = ["GBPJPY", "USDJPY", "EURUSD", "AUDUSD", "XAUUSD"]
+FOREX_SYMBOLS: list[str] = ["GBPJPYm", "USDJPYm", "EURUSDm", "AUDUSDm", "XAUUSDm"]
 
 # Combined for internal use
 ALL_SYMBOLS = CRYPTO_SYMBOLS + FOREX_SYMBOLS
-HIGH_RISK_SYMBOLS: list[str] = ["#XRPUSD", "#TRXUSD", "XAUUSD", "GBPJPY"]
+HIGH_RISK_SYMBOLS: list[str] = ["XRPUSDm", "SOLUSDm", "XAUUSDm", "GBPJPYm"]
 
 # ---------------------------------------------------------
 # SESSION & TIME FILTERS (SAST)
@@ -61,16 +61,16 @@ SESSION_CONFIG = {
 # ---------------------------------------------------------
 TIMEFRAME = "M15"
 CANDLE_LIMIT = 500
-MIN_CONFIDENCE = 70.0
+MIN_CONFIDENCE = 65.0
 CHOP_THRESHOLD_TREND = 38.2
 CHOP_THRESHOLD_RANGE = 61.8
 
 # ---------------------------------------------------------
 # RISK MANAGEMENT (ZAR ACCOUNT)
 # ---------------------------------------------------------
-DEFAULT_BALANCE_ZAR = 450.0
+DEFAULT_BALANCE_ZAR = 500.0
 RISK_PER_TRADE_PCT = 2.0
-MAX_LOT_SIZE = 1
+MAX_LOT_SIZE = 0.5
 
 # Scanner Timing
 SCAN_INTERVAL_CRYPTO = 30
@@ -123,18 +123,12 @@ def get_account_risk_caps(balance: float) -> float:
     Larger accounts get tighter safety caps.
     """
     if balance < 2000:
-        # Small Account: Allow up to 5% risk to accommodate
-        # multiplier logic (2% base * 2x multiplier = 4%).
         return 5.0
     elif balance < 10000:
-        # Medium-Small: Cap at 4%
         return 4.0
     elif balance < 100000:
-        # Medium: Standard conservative cap
         return 3.0
     elif balance < 1000000:
-        # Large: Very conservative
         return 2.0
     else:
-        # Institutional: Ultra conservative
         return 1.5

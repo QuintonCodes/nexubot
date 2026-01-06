@@ -125,7 +125,6 @@ class NexubotConsole:
     async def _verify_offline_outcome(self, symbol: str, signal: dict, start_time: float) -> bool:
         """
         Checks if a trade that existed while offline has finished.
-        Uses asyncio.to_thread for the heavy calculation loop.
         """
         print(f"{MAGENTA}Checking offline history for {symbol}...{RESET}")
 
@@ -302,6 +301,8 @@ class NexubotConsole:
             # Fetch
             klines = await self.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
             if not klines:
+                # NEW: WARN IF DATA IS MISSING (SILENCE DETECTOR)
+                print(f"{YELLOW}⚠️ No data for {sym} (Check MT5 Connection){RESET}")
                 continue
 
             # Analyze
@@ -328,8 +329,6 @@ class NexubotConsole:
 
         # Init DB
         await self.db.init_database()
-
-        # CLEANUP OLD LOGS
         print(f"{YELLOW}🧹 Cleaning old database records...{RESET}")
         await self.db.cleanup_db()
 
@@ -357,8 +356,6 @@ class NexubotConsole:
             print(f"{CYAN}Found {len(active_trades)} active trades. Resuming monitoring...{RESET}")
             for symbol, signal, start_time in active_trades:
                 self.ai_engine.register_active_trade(symbol)
-
-                # Check if the trade finished while we were offline
                 is_finished = await self._verify_offline_outcome(symbol, signal, start_time)
 
                 if not is_finished:
@@ -385,6 +382,7 @@ class NexubotConsole:
         last_crypto = 0
         last_forex = 0
         last_sort_time = 0
+        last_heartbeat = time.time()
 
         active_crypto = list(CRYPTO_SYMBOLS)
         active_forex = list(FOREX_SYMBOLS)
@@ -398,6 +396,13 @@ class NexubotConsole:
                     return
 
                 now = time.time()
+
+                # Prints every 15 minutes if no other signals have appeared
+                if now - last_heartbeat > 900:
+                    print(
+                        f"{GRAY}💓 [{datetime.now().strftime('%H:%M')}] Scanner is alive. Monitoring markets...{RESET}"
+                    )
+                    last_heartbeat = now
 
                 if now - last_sort_time > 900:
                     active_crypto = await self.sort_pairs(active_crypto)
@@ -676,7 +681,6 @@ class NexubotConsole:
                 print(f"{GRAY}👻 Shadow Result ({symbol}): {color}{outcome}{RESET} (Virtual)")
 
             if is_filled:
-                # Pass is_shadow flag to exclude from training
                 self.ai_engine.record_trade_outcome(symbol, won, final_pnl, excursion_atr, is_shadow)
 
         except asyncio.CancelledError:
