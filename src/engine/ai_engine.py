@@ -156,7 +156,9 @@ class AITradingEngine:
 
         # --- 2. TP / SL CALCULATION ---
         # Base SL is tightened to 1.0 ATR
-        sl_dist = atr * 1.0
+        # FOR XAUUSD: Tighten to 0.75 ATR to reduce absolute risk amount (cheaper trade).
+        sl_multiplier = 0.75 if "XAU" in symbol else 1.0
+        sl_dist = atr * sl_multiplier
         min_dist = point * 50
         sl_dist = max(sl_dist, min_dist)
 
@@ -206,12 +208,12 @@ class AITradingEngine:
         if signal["signal"] == "BUY":
             # For Limit orders, SL/TP relative to Limit Price
             ref_price = entry_price if order_type == "LIMIT" else ask
-            sl_price = ask - sl_dist
-            tp_price = ask + tp_dist
+            sl_price = ref_price - sl_dist
+            tp_price = ref_price + tp_dist
         else:
             ref_price = entry_price if order_type == "LIMIT" else bid
-            sl_price = bid + sl_dist
-            tp_price = bid - tp_dist
+            sl_price = ref_price + sl_dist
+            tp_price = ref_price - tp_dist
 
         # --- 3. RISK SIZING ---
         risk_mult = nn_result.get("risk_mult", 1.0) * kelly_factor
@@ -257,20 +259,27 @@ class AITradingEngine:
             # Final check after reduction
             lots = round(lots, 2)
             if lots <= min_vol and actual_risk_zar > max_allowed_zar:
-                max_emergency_risk = self.user_balance_zar * 0.08  # 8% Hard Cap
+                emergency_cap_pct = 0.35 if "XAU" in symbol else 0.08
+                max_emergency_risk = self.user_balance_zar * emergency_cap_pct
                 if actual_risk_zar < max_emergency_risk:
-                    # Allow it
+                    # Allow trade but log warning
+                    self._log_once(
+                        f"high_risk_{symbol}",
+                        f"⚠️ High Risk Accepted for {symbol}: R{actual_risk_zar:.2f} ({actual_risk_zar/self.user_balance_zar*100:.1f}%)",
+                    )
                     pass
                 else:
                     self._log_once(
                         f"risk_{symbol}",
                         f"Skipping {symbol}: Min Lot Risk (R{actual_risk_zar:.2f}) > 8% Safety Cap",
+                        logging.DEBUG,
                     )
                     return None
             elif actual_risk_zar > (max_allowed_zar * 1.1):
                 self._log_once(
                     f"risk_{symbol}",
                     f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) > Cap (R{max_allowed_zar:.2f})",
+                    logging.DEBUG,
                 )
                 return None
 
@@ -278,16 +287,11 @@ class AITradingEngine:
         points_profit = tp_dist / point
         profit_zar = points_profit * tick_value * lots
 
-        # Final rounding of prices
-        sl_formatted = round(sl_price, digits)
-        tp_formatted = round(tp_price, digits)
-        entry_formatted = round(entry_price, digits)
-
         signal.update(
             {
-                "price": entry_price,
-                "sl": round(sl_price, info["digits"]),
-                "tp": round(tp_price, info["digits"]),
+                "price": round(entry_price, digits),
+                "sl": round(sl_price, digits),
+                "tp": round(tp_price, digits),
                 "lot_size": round(lots, 2),
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
@@ -461,47 +465,93 @@ class AITradingEngine:
 
     async def analyze_market(self, symbol: str, klines: List[Dict], provider: DataProvider) -> Optional[Dict]:
         """
-        Main Analysis Pipeline with Spread, Volatility, and Context filters.
+        Main Analysis with step-by-step pipeline
         """
-        self._check_news_update()
+        # --- 1. Cooldown & Active states ---
+        # Check simple memory-based flags first to avoid expensive calls
+        if self.is_on_cooldown(symbol) or symbol in self.active_features:
+            return None
+
+        # --- 2. Session & News Filter ---
+        # Check static time blocks (CPU only)
+        if self._is_news_blocked():
+            self._log_once(f"news_static_{symbol}", f"Skipping {symbol}: 🔴 Static News Block Active")
+            return None
 
         session_info = self._get_session_status()
         if not session_info["allow_trade"]:
             self._log_once("session_block", f"Skipping analysis: {session_info['reason']}")
             return None
 
-        # 1. Data Prep
+        # Check live news (Requires API/Network)
+        is_news_blocked = await provider.check_live_news_block(symbol, [])
+        if is_news_blocked:
+            self._log_once(f"news_{symbol}", f"Skipping {symbol}: 🔴 Live High-Impact News Detected")
+            return None
+
+        # --- 3. Data Preparation & Integrity ---
         df = await asyncio.to_thread(self._prepare_data, klines, True)
         if df is None:
             return None
         curr = df.iloc[-1]
 
-        volatility_ratio = 1.0
-        fake_risk_penalty = 1.0
-        htf_trend = None
+        # Stale Check
+        if (time.time() - curr["time"]) > 1800:
+            return None
 
-        # 2. Late Bloomer Check (Low Volatility Cache)
+        # --- 4. Basic Volatility & Spread ---
+        # ATR Check
+        if curr["atr"] <= 0:
+            self._log_once(f"atr_low_{symbol}", f"⏳ Initializing {symbol}: ATR is 0 (Waiting for more data)")
+            return None
+
+        avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
+
+        # Volatility Spike Check
+        if curr["atr"] > (avg_atr * 3):
+            self._log_once(f"vol_{symbol}", f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
+            self.signal_history[symbol] = time.time() + 1800  # 30 min ban
+            return None
+
+        # Spread Check (Network Call)
+        symbol_info = await provider.get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+        point = symbol_info.get("point", 0.00001)
+
+        # Filter: Spread > 90% of 14-period ATR
+        spread_info = await provider.get_spread(symbol)
+        spread_points = spread_info.get("spread", 0.0)
+        spread_price = spread_points * point
+
+        if spread_price > (curr["atr"] * 0.9):
+            self._log_once(
+                f"spread_{symbol}",
+                f"Skipping {symbol}: Spread {spread_points:.0f}pts ({spread_price:.5f}) > 0.5 ATR ({curr['atr']:.5f})",
+                logging.DEBUG,
+            )
+            return None
+
+        volatility_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
+        htf_trend = await self._get_htf_trend(symbol, provider)
+
+        # --- 5. Recovery Check (Late Bloomers / Loss Cooldown) ---
         late_signal = self._check_low_vol_candidates(symbol, curr)
         final_signal_candidate = None
+        is_late_recovery = False
 
         if late_signal:
             final_signal_candidate = late_signal
+            is_late_recovery = True
+            logger.info(f"🚀 Processing Late Bloomer for {symbol} | Trend: {htf_trend}")
         else:
-            # Cooldown check
-            if self.is_on_cooldown(symbol) or symbol in self.active_features:
-                return None
-
             # Adaptive Cooldown logic
             current_cooldown_req = PAIR_SIGNAL_COOLDOWN * (2 if volatility_ratio > 1.5 else 1)
             last_time = self.signal_history.get(symbol, 0)
             if (time.time() - last_time) < current_cooldown_req:
                 return None
 
-            # Stale Check
-            if (time.time() - curr["time"]) > 1800:
-                return None
-
-            # Check Loss Cooldown
+            # Check Loss Cooldown (Database)
             try:
                 if self.db_manager:
                     is_loss = await self.db_manager.check_recent_loss(symbol)
@@ -511,60 +561,73 @@ class AITradingEngine:
             except Exception:
                 pass
 
-            # 3. Choppiness & Regime Logic
-            chop_idx = curr["chop_idx"]
-            market_regime = "NEUTRAL"
-            if chop_idx > CHOP_THRESHOLD_RANGE:
-                market_regime = "RANGE"
-            elif chop_idx < CHOP_THRESHOLD_TREND:
-                market_regime = "TREND"
+        # --- 6. Technical Analysis & Context ---
+        # Define shared variables
+        rsi = curr["rsi"]
+        stoch_k = curr.get("stoch_k", 50)
+        chop_idx = curr["chop_idx"]
 
-            # Filter Strategies based on Regime AND Session
+        # Regime Logic
+        market_regime = "NEUTRAL"
+        if chop_idx > CHOP_THRESHOLD_RANGE:
+            market_regime = "RANGE"
+        elif chop_idx < CHOP_THRESHOLD_TREND:
+            market_regime = "TREND"
+
+        # Session/Regime Filter (Skip if not recovering late signal)
+        if not is_late_recovery:
             if "REVERSION" in session_info["types"] and "TREND" not in session_info["types"]:
                 if market_regime == "TREND":
                     return None  # Don't trade trend in Asia
 
-            # 4. Volatility Checks
-            avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
-            if avg_atr > 0:
-                volatility_ratio = curr["atr"] / avg_atr
+        # Structure & Patterns
+        htf_trend = await self._get_htf_trend(symbol, provider)
+        pattern_recognizer = PatternRecognizer()
+        structure = pattern_recognizer.check_market_structure(df)
+        patterns = pattern_recognizer.analyze_patterns(df, structure)
+        pattern_signal = patterns[0] if patterns else None
 
-            if curr["atr"] > (avg_atr * 3):
-                self._log_once(f"vol_{symbol}", f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
-                self.signal_history[symbol] = time.time() + 1800  # 30 min ban
-                return None
+        # Support & Resistance Context
+        sr_levels = TechnicalAnalyzer.get_support_resistance_levels(df)
+        dist_threshold = curr["atr"] * 0.5
+        near_support = any(abs(curr["close"] - lvl) < dist_threshold for lvl in sr_levels if lvl < curr["close"])
+        near_resistance = any(abs(curr["close"] - lvl) < dist_threshold for lvl in sr_levels if lvl > curr["close"])
 
-            spread_info = await provider.get_spread(symbol)
-            spread = spread_info.get("spread", 0.0)
+        bullish_momentum = rsi > 50 and stoch_k < 80  # Not overbought yet
+        bearish_momentum = rsi < 50 and stoch_k > 20  # Not oversold yet
+        oversold_condition = stoch_k < 20 or rsi < 30
+        overbought_condition = stoch_k > 80 or rsi > 70
 
-            if spread > (curr["atr"] * 0.5):
-                self._log_once(
-                    f"spread_{symbol}",
-                    f"Skipping {symbol}: Spread {spread:.1f} > 0.5 ATR ({curr['atr'] * 0.5:.1f})",
-                    logging.WARNING,
-                )
-                return None
+        context_bias = "NEUTRAL"
+        if structure == "BULL":
+            if near_support and oversold_condition:
+                context_bias = "LONG_BOUNCE"  # High Probability
+            elif bullish_momentum:
+                context_bias = "LONG_CONTINUATION"
+        elif structure == "BEAR":
+            if near_resistance and overbought_condition:
+                context_bias = "SHORT_REJECTION"  # High Probability
+            elif bearish_momentum:
+                context_bias = "SHORT_CONTINUATION"
+        elif structure == "RANGE":
+            if near_support and oversold_condition:
+                context_bias = "LONG_RANGE"
+            elif near_resistance and overbought_condition:
+                context_bias = "SHORT_RANGE"
 
-            symbol_info = await provider.get_symbol_info(symbol)
-            if not symbol_info:
-                return None
+        # --- 7. Strategy Routing & Signal Generation ---
+        fake_risk_penalty = 1.0  # Default
 
-            # 6. Strategy & Pattern Matching
-            htf_trend = await self._get_htf_trend(symbol, provider)
-            pattern_recognizer = PatternRecognizer()
-            patterns = pattern_recognizer.analyze_patterns(df)
-            structure = pattern_recognizer.check_market_structure(df)
-
-            # 7. Stratey Routing
+        if not is_late_recovery:
             strat_signal = None
-            point = symbol_info.get("point", 0.00001)
-
             if symbol in FOREX_SYMBOLS:
-                # BB Reversion Check (Must be Flat)
-                if market_regime == "RANGE" and curr["bb_slope"] < (point * 50):  # Flat bands
+                # BB Reversion
+                if market_regime == "RANGE" and curr["bb_slope"] < (curr["atr"] * 0.1):
                     strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
 
-                # Trend Strategies
+                # Continuation / Trend
+                if "CONTINUATION" in context_bias:
+                    strat_signal = self.strategy_analyzer._fx_volatility_breakout(curr, df)
                 elif market_regime in ["TREND", "NEUTRAL"] and "TREND" in session_info["types"]:
                     strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
                     if not strat_signal:
@@ -573,28 +636,23 @@ class AITradingEngine:
                 # Breakout (Only if allowed hour)
                 if not strat_signal and "BREAKOUT" in session_info["types"]:
                     strat_signal = self.strategy_analyzer._fx_volatility_breakout(curr, df)
+
+                # Fallback FVG
+                if not strat_signal:
+                    strat_signal = self.strategy_analyzer._fx_fvg_entry(curr, df)
             else:
                 strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
 
-            pattern_signal = patterns[0] if patterns else None
-
-            if not strat_signal and not patterns:
-                self._log_once(f"no_sig_{symbol}", f"{symbol}: No strategy matched.")
-                pass
-
-            # Case A: Strategy + Pattern (Confluence)
+            # --- 8. Confluence & Conflict Checks ---
             if strat_signal and pattern_signal:
                 if strat_signal["direction"] == pattern_signal["direction"]:
                     strat_signal["confidence"] += 10
                     strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
                     final_signal_candidate = strat_signal
                 else:
-                    # Fundamental Type Check
-                    # Classify Strategy
+                    # Conflict Logic
                     s_name = strat_signal["strategy"].lower()
                     s_type = "REVERSION" if "reversion" in s_name or "divergence" in s_name else "TREND"
-
-                    # Classify Pattern (Heuristic)
                     p_name = pattern_signal["pattern"].lower()
                     p_type = "TREND" if "flag" in p_name else "REVERSION"
 
@@ -602,37 +660,40 @@ class AITradingEngine:
                         self._log_once(f"conflict_{symbol}", f"Skipping {symbol}: Strategy/Pattern Conflict")
                         return None
                     else:
-                        # Different types (e.g. Trend Buy vs Reversal Sell) -> SOFT PENALTY
                         strat_signal["confidence"] -= 15
                         strat_signal["strategy"] += f" - {pattern_signal['pattern']} (Conflict)"
                         final_signal_candidate = strat_signal
-            # Case B: Only Strategy
             elif strat_signal:
                 final_signal_candidate = strat_signal
-            # Case C: Only Pattern
             elif pattern_signal:
                 pattern_signal["strategy"] = pattern_signal["pattern"]
                 final_signal_candidate = pattern_signal
 
-            if not final_signal_candidate:
-                return None
+        if not final_signal_candidate:
+            return None
 
-            # 8. Market Structure Veto
+        # --- 9. Signal Vetting (Structure & Crypto) ---
+        # We skip deep vetting for Late Bloomers as they are already vetted survivors
+        if not is_late_recovery:
             penalty_score = 0
             is_reversion = "reversion" in final_signal_candidate["strategy"].lower()
+
             if not is_reversion:
-                if final_signal_candidate["direction"] == "LONG" and structure == "BEAR":
+                if final_signal_candidate["direction"] == "LONG" and structure == "BEAR" and "LONG" not in context_bias:
                     penalty_score += 15
-                if final_signal_candidate["direction"] == "SHORT" and structure == "BULL":
+                if (
+                    final_signal_candidate["direction"] == "SHORT"
+                    and structure == "BULL"
+                    and "SHORT" not in context_bias
+                ):
                     penalty_score += 15
 
-            # 9. Bitcoin Correlation Veto (Crypto Only)
-            if symbol in CRYPTO_SYMBOLS and symbol != "#BTCUSD":
-                # Ensure we have BTC trend
-                if "#BTCUSD" not in self.htf_cache:
-                    await self._get_htf_trend("#BTCUSD", provider)
+            # Bitcoin Correlation Veto
+            if symbol in CRYPTO_SYMBOLS and symbol != "BTCUSDm":
+                if "BTCUSDm" not in self.htf_cache:
+                    await self._get_htf_trend("BTCUSDm", provider)
 
-                btc_trend_data = self.htf_cache.get("#BTCUSD")
+                btc_trend_data = self.htf_cache.get("BTCUSDm")
                 if btc_trend_data:
                     btc_trend = btc_trend_data["trend"]
                     if btc_trend == "BEAR" and final_signal_candidate["direction"] == "LONG":
@@ -640,7 +701,7 @@ class AITradingEngine:
                     if btc_trend == "BULL" and final_signal_candidate["direction"] == "SHORT":
                         penalty_score += 20
 
-            # 10. Fakeout Detector (Mixed Veto)
+            # Fakeout Detector
             breakout_detector = FakeBreakoutDetector()
             fake_analysis = breakout_detector.analyze(df)
 
@@ -662,10 +723,8 @@ class AITradingEngine:
             # Apply Penalties
             final_signal_candidate["confidence"] -= penalty_score
 
-        # 11. ML Prediction
+        # --- 10. ML Prediction (Feature Extraction) ---
         now = datetime.now()
-
-        # Looking at last 60 candles is sufficient for recent pivots
         recent_df = df.iloc[-60:]
         pivots = recent_df[recent_df["high"] == recent_df["high"].rolling(10, center=True).max()]["high"]
         last_pivot = pivots.iloc[-1] if not pivots.empty else curr["high"]
@@ -673,25 +732,20 @@ class AITradingEngine:
 
         range_len = curr["high"] - curr["low"]
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0.0
-
-        # HTF Trend might be missing if we took the Late Bloomer path
-        if htf_trend is None:
-            htf_trend = await self._get_htf_trend(symbol, provider)
-
         dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
         day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else now.weekday() / 6.0
+
         rolling_acc = 0.5  # Default neutral
         if self.db_manager:
             rolling_acc = await self.db_manager.get_pair_performance(symbol)
 
-        # extra features
         avg_atr_24 = avg_atr
         atr_ratio = curr["atr"] / (avg_atr_24 + 1e-9)
         vol_sma_ratio = curr["volume"] / (curr["vol_sma"] + 1e-9)
         recent_range_std = recent_df["high"].sub(recent_df["low"]).tail(20).std()
 
         features = {
-            "rsi": curr["rsi"],
+            "rsi": rsi,
             "adx": curr["adx"],
             "atr": curr["atr"],
             "atr_ratio": atr_ratio,
@@ -731,13 +785,11 @@ class AITradingEngine:
         # Apply Fakeout Penalty to Risk Multiplier
         nn_result["risk_mult"] *= fake_risk_penalty
 
+        # --- 11. Execution & Risk Sizing ---
         # Get live Tick data for true Bid/Ask
         tick = await provider.get_current_tick(symbol)
         if not tick:
             return None
-
-        if not "symbol_info" in locals():
-            symbol_info = await provider.get_symbol_info(symbol)
 
         result = self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result)
         if result:

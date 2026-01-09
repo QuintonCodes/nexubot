@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-from typing import Literal
+from typing import Literal, List, Tuple
+from scipy.signal import argrelextrema
 
 
 class TechnicalAnalyzer:
@@ -26,12 +27,8 @@ class TechnicalAnalyzer:
         df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
         df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
         df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
-
-        # --- Trend Slope (EMA 200) ---
-        # Calculate angle/slope over last 5 periods
         df["ema_200_slope"] = df["ema_200"].diff(5)
 
-        # --- UTILIZATION FIX: WIRE UP ZLEMA ---
         # We calculate ZLEMA 9 and 50 here so they are available to strategies
         df["zlema_9"] = TechnicalAnalyzer.calculate_zlema(df["close"], 9)
         df["zlema_50"] = TechnicalAnalyzer.calculate_zlema(df["close"], 50)
@@ -42,6 +39,12 @@ class TechnicalAnalyzer:
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df["rsi"] = 100 - (100 / (1 + rs))
+
+        # --- Stochastics (Oscillator Confluence) ---
+        low_14 = df["low"].rolling(14).min()
+        high_14 = df["high"].rolling(14).max()
+        df["stoch_k"] = 100 * ((df["close"] - low_14) / (high_14 - low_14))
+        df["stoch_d"] = df["stoch_k"].rolling(3).mean()
 
         # --- Volatility: ATR (Essential) ---
         high_low = df["high"] - df["low"]
@@ -64,17 +67,20 @@ class TechnicalAnalyzer:
             return df.fillna(0)
 
         # --- EXPENSIVE INDICATORS (Optional) ---
+        # --- Bollinger Bands ---
+        df["sma20"] = df["close"].rolling(window=20).mean()
+        df["std20"] = df["close"].rolling(window=20).std()
+        df["bb_upper"] = df["sma20"] + (df["std20"] * 2)
+        df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
+        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["sma20"]
+        df["bb_slope"] = df["sma20"].diff(3).abs()
 
         # --- CHOPPINESS INDEX (CI) ---
         ci_period = 14
         df["tr_sum"] = tr.rolling(window=ci_period).sum()
         df["hh_n"] = df["high"].rolling(window=ci_period).max()
         df["ll_n"] = df["low"].rolling(window=ci_period).min()
-
-        # Avoid division by zero
-        range_n = df["hh_n"] - df["ll_n"]
-        range_n = range_n.replace(0, 0.00001)
-
+        range_n = (df["hh_n"] - df["ll_n"]).replace(0, 0.00001)
         df["chop_idx"] = 100 * np.log10(df["tr_sum"] / range_n) / np.log10(ci_period)
 
         # --- MACD ---
@@ -105,14 +111,6 @@ class TechnicalAnalyzer:
         high_52 = df["high"].rolling(window=52).max()
         low_52 = df["low"].rolling(window=52).min()
         df["senkou_span_b"] = ((high_52 + low_52) / 2).shift(26)
-
-        # --- Bollinger Bands ---
-        df["sma20"] = df["close"].rolling(window=20).mean()
-        df["std20"] = df["close"].rolling(window=20).std()
-        df["bb_upper"] = df["sma20"] + (df["std20"] * 2)
-        df["bb_lower"] = df["sma20"] - (df["std20"] * 2)
-        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["sma20"]
-        df["bb_slope"] = df["sma20"].diff(3).abs()
 
         return df.fillna(0)
 
@@ -151,3 +149,39 @@ class TechnicalAnalyzer:
             return "BEAR"
 
         return "FLAT"
+
+    @staticmethod
+    def get_support_resistance_levels(df: pd.DataFrame, lookback: int = 60) -> List[float]:
+        """
+        Identifies key S&R levels using K-Means-like clustering of local extrema.
+        """
+        if len(df) < lookback:
+            return []
+
+        subset = df.iloc[-lookback:]
+
+        # Find local highs and lows
+        order = 5
+        highs = subset.iloc[argrelextrema(subset["high"].values, np.greater_equal, order=order)[0]]["high"]
+        lows = subset.iloc[argrelextrema(subset["low"].values, np.less_equal, order=order)[0]]["low"]
+
+        levels = pd.concat([highs, lows]).sort_values().values
+        if len(levels) == 0:
+            return []
+
+        # Cluster levels (e.g., within 0.1% of each other)
+        grouped = []
+        current_group = [levels[0]]
+
+        atr = subset["atr"].iloc[-1]
+        tolerance = atr * 0.5  # Use ATR for dynamic tolerance
+
+        for i in range(1, len(levels)):
+            if levels[i] - levels[i - 1] < tolerance:
+                current_group.append(levels[i])
+            else:
+                grouped.append(np.mean(current_group))
+                current_group = [levels[i]]
+        grouped.append(np.mean(current_group))
+
+        return grouped

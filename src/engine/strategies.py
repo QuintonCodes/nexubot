@@ -204,7 +204,7 @@ class StrategyAnalyzer:
 
         # Displacement should have higher-than-average volume (if volume available)
         low_vol = c2["volume"] < curr["vol_sma"]
-        min_gap = curr["atr"] * 0.5
+        min_gap = curr["atr"] * 0.3
 
         # Bullish FVG (Gap between C1 High and C3 Low)
         if c2["close"] > c2["open"]:  # Green displacement
@@ -503,7 +503,7 @@ class StrategyAnalyzer:
             lower_wick = min(curr["close"], curr["open"]) - curr["low"]
             prev_range = prev["high"] - prev["low"]
             # wick should be a sizeable move beyond prior low and larger than a fraction of prev range
-            if lower_wick > (body * 1.0) and lower_wick > (prev_range * 0.25):
+            if lower_wick > (body * 0.7) and lower_wick > (prev_range * 0.25):
                 vol_ok = "volume" in curr and "vol_sma" in curr and curr["volume"] > curr["vol_sma"]
                 confidence = 75.0 + (7.0 if vol_ok else 0.0)
                 return {
@@ -520,7 +520,7 @@ class StrategyAnalyzer:
             body = abs(curr["close"] - curr["open"])
             upper_wick = curr["high"] - max(curr["close"], curr["open"])
             prev_range = prev["high"] - prev["low"]
-            if upper_wick > (body * 1.0) and upper_wick > (prev_range * 0.25):
+            if upper_wick > (body * 0.7) and upper_wick > (prev_range * 0.25):
                 vol_ok = "volume" in curr and "vol_sma" in curr and curr["volume"] > curr["vol_sma"]
                 confidence = 75.0 + (7.0 if vol_ok else 0.0)
                 return {

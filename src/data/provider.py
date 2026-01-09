@@ -4,6 +4,7 @@ import MetaTrader5 as mt5
 import os
 import time
 import subprocess
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
@@ -13,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 class DataProvider:
     """
-    MT5 Direct Provider - Generic / Exness Optimized.
-    Wraps standard MT5 functions with error handling and retries.
+    MT5 Direct Provider with Live Economic Calender.
     """
 
     def __init__(self):
@@ -25,6 +25,43 @@ class DataProvider:
         self._path = MT5_PATH
         self.spread_cache = {}
         self.last_cache_clear = time.time()
+        self._news_cache = []
+        self._last_news_fetch = 0
+
+    def _fetch_calendar_events(self) -> List[Dict]:
+        """
+        Fetches High Impact news events from MT5 Calendar.
+        Filters for upcoming events in the next 2 hours.
+        """
+        if not hasattr(mt5, "calendar_get_events"):
+            # Return empty so the bot falls back to news_block.txt silently
+            return []
+
+        try:
+            now = datetime.now()
+            future = now + timedelta(hours=2)
+
+            # Fetch calendar values (news events)
+            events = mt5.calendar_get_events(None, None)
+            if not events:
+                return []
+
+            # Filter for High Impact (importance=2 or 3 depending on broker, usually 1=Low, 2=Med, 3=High)
+            high_impact_ids = {e.id for e in events if e.importance >= 3}
+
+            # Get actual values/timings for today
+            values = mt5.calendar_get_values(datetime.now() - timedelta(hours=1), future)
+
+            news_buffer = []
+            if values:
+                for v in values:
+                    if v.event_id in high_impact_ids:
+                        news_buffer.append({"time": v.time, "impact": "HIGH", "event_id": v.event_id})
+            return news_buffer
+
+        except Exception as e:
+            logger.error(f"News fetch failed: {e}")
+            return []
 
     def _kill_terminal(self):
         """Force kills MT5 terminal process."""
@@ -89,11 +126,10 @@ class DataProvider:
 
         # 2. Attempt to fetch data with retries
         rates = None
-        for attempt in range(3):
+        for _ in range(3):
             rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, limit)
             if rates is not None and len(rates) > 0:
                 break
-            # Wait briefly for MT5 to catch up
             time.sleep(0.2)
 
         if rates is None or len(rates) == 0:
@@ -144,7 +180,32 @@ class DataProvider:
             "vol_step": info.volume_step,
             "point": info.point,
             "trade_tick_value": info.trade_tick_value,
+            "currency_profit": info.currency_profit,
+            "currency_base": info.currency_base,
         }
+
+    async def check_live_news_block(self, symbol: str, currencies: List[str]) -> bool:
+        """
+        Returns True if High Impact news is imminent (within 30 mins) for the symbol's currencies.
+        """
+        # Update cache every 5 minutes
+        if time.time() - self._last_news_fetch > 300:
+            self._news_cache = await asyncio.to_thread(self._fetch_calendar_events)
+            self._last_news_fetch = time.time()
+            if self._news_cache:
+                logger.info(f"📅 Live News Updated: {len(self._news_cache)} high impact events found.")
+
+        if not self._news_cache:
+            return False
+
+        now = datetime.now()
+        for event in self._news_cache:
+            event_time = event["time"]
+            # Block 30 mins before and 30 mins after
+            if (event_time - timedelta(minutes=30)) <= now <= (event_time + timedelta(minutes=30)):
+                return True
+
+        return False
 
     async def initialize(self) -> bool:
         """

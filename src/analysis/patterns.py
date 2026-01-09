@@ -1,37 +1,25 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 
 class PatternRecognizer:
     """
     High-Fidelity Pattern Recognition Engine.
-    Filters out weak patterns to ensure high win-rate.
+    Features: Pivots, Structure, Classic Patterns (H&S, Flags, Triangles).
     """
 
-    def analyze_patterns(self, df: pd.DataFrame) -> List[Dict]:
-        """
-        Scans for chart patterns: Double Top/Bottom, Head & Shoulders, Flags.
-        """
+    def _find_reversals(self, df: pd.DataFrame) -> List[Dict]:
         patterns = []
-        if len(df) < 60:
-            return patterns
+        local = df.iloc[-60:].copy()
+        curr_price = local.iloc[-1]["close"]
 
-        # Work on a short local copy to avoid mutating caller's df
-        local = df.copy()
-
-        # --- Robust Swing Detection (Pivots) ---
-        order = 3  # slightly larger order reduces noise
-        try:
-            highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=order)[0]
-            lows_idx = argrelextrema(local["low"].values, np.less_equal, order=order)[0]
-        except Exception:
-            return patterns
+        highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=3)[0]
+        lows_idx = argrelextrema(local["low"].values, np.less_equal, order=3)[0]
 
         highs = local.iloc[highs_idx].dropna()
         lows = local.iloc[lows_idx].dropna()
-        curr_price = local.iloc[-1]["close"]
         last_pos = len(local) - 1
 
         # helper: safe recency check (positions, not index labels)
@@ -120,42 +108,9 @@ class PatternRecognizer:
                                 }
                             )
 
-        # --- BULL/BEAR FLAGS (Continuation) ---
-        flags = self.find_flags(df)
-        if flags:
-            patterns.extend(flags)
-
         return patterns
 
-    def check_market_structure(self, df: pd.DataFrame) -> str:
-        """
-        Returns 'BULL', 'BEAR', or 'UNCLEAR' based on recent swing points.
-        Prevents buying into a Lower Low structure.
-        """
-        # Get last 20 candles
-        recent = df.iloc[-20:].copy()
-
-        # Find simple local max/min
-        recent["is_high"] = recent["high"] == recent["high"].rolling(5, center=True).max()
-        recent["is_low"] = recent["low"] == recent["low"].rolling(5, center=True).min()
-
-        last_highs = recent[recent["is_high"]]["high"].values
-        last_lows = recent[recent["is_low"]]["low"].values
-
-        if len(last_highs) < 2 or len(last_lows) < 2:
-            return "UNCLEAR"
-
-        # Bullish Structure: Higher Highs AND Higher Lows
-        if last_highs[-1] > last_highs[-2] and last_lows[-1] > last_lows[-2]:
-            return "BULL"
-
-        # Bearish Structure: Lower Lows AND Lower Highs
-        if last_lows[-1] < last_lows[-2] and last_highs[-1] < last_highs[-2]:
-            return "BEAR"
-
-        return "UNCLEAR"
-
-    def find_flags(self, df: pd.DataFrame) -> List[Dict]:
+    def _find_flags(self, df: pd.DataFrame) -> List[Dict]:
         """
         Identifies Flags: Sharp Pole -> Low Vol Consolidation -> Breakout
         """
@@ -199,6 +154,163 @@ class PatternRecognizer:
                     )
 
         return patterns
+
+    def _find_triangles_wedges(self, df: pd.DataFrame) -> List[Dict]:
+        """
+        Detects Ascending/Descending Triangles and Wedges.
+        """
+        patterns = []
+        recent = df.iloc[-40:]
+
+        highs_idx = argrelextrema(recent["high"].values, np.greater_equal, order=2)[0]
+        lows_idx = argrelextrema(recent["low"].values, np.less_equal, order=2)[0]
+
+        if len(highs_idx) < 3 or len(lows_idx) < 3:
+            return patterns
+
+        highs = recent.iloc[highs_idx]["high"].values
+        lows = recent.iloc[lows_idx]["low"].values
+
+        # Slopes
+        slope_highs = np.polyfit(range(len(highs)), highs, 1)[0]
+        slope_lows = np.polyfit(range(len(lows)), lows, 1)[0]
+
+        curr = df.iloc[-1]
+        vol_ok = curr["volume"] > curr["vol_sma"]
+
+        # Ascending Triangle (Flat Highs, Rising Lows)
+        if abs(slope_highs) < 0.5 and slope_lows > 0.5:
+            # Resistance Breakout
+            resistance = np.mean(highs)
+            if curr["close"] > resistance and vol_ok:
+                patterns.append(
+                    {
+                        "pattern": "Ascending Triangle",
+                        "strategy": "Triangle",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 82.0,
+                        "order_type": "STOP",
+                        "price": resistance,
+                    }
+                )
+
+        # Descending Triangle (Flat Lows, Falling Highs)
+        if abs(slope_lows) < 0.5 and slope_highs < -0.5:
+            # Support Breakdown
+            support = np.mean(lows)
+            if curr["close"] < support and vol_ok:
+                patterns.append(
+                    {
+                        "pattern": "Descending Triangle",
+                        "strategy": "Triangle",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 82.0,
+                        "order_type": "STOP",
+                        "price": support,
+                    }
+                )
+
+        # Falling Wedge (Lower Highs, Lower Lows, converging)
+        if slope_highs < -0.5 and slope_lows < -0.2 and slope_highs < slope_lows:
+            # Bullish Reversal
+            if curr["close"] > recent["ema_50"].iloc[-1]:  # Simple trend break check
+                patterns.append(
+                    {
+                        "pattern": "Falling Wedge",
+                        "strategy": "Wedge",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 85.0,
+                        "order_type": "MARKET",
+                        "price": curr["close"],
+                    }
+                )
+
+        return patterns
+
+    def analyze_patterns(self, df: pd.DataFrame, structure: str) -> List[Dict]:
+        """
+        Scans for chart patterns: Double Top/Bottom, Head & Shoulders, Flags.
+        """
+        patterns = []
+        if len(df) < 60:
+            return patterns
+
+        # 1. Reversal Patterns (Double Top/Bottom, H&S)
+        patterns.extend(self._find_reversals(df))
+
+        # 2. Continuation Patterns (Flags)
+        patterns.extend(self._find_flags(df))
+
+        # 3. Consolidation Patterns (Triangles/Wedges) - NEW
+        patterns.extend(self._find_triangles_wedges(df))
+
+        # Filter by Structure (The Step-by-Step Logic)
+        filtered = []
+        for p in patterns:
+            # If structure is BULL, we prefer LONG continuation or Reversal from Support
+            if structure == "BULL":
+                if p["direction"] == "LONG":
+                    p["confidence"] += 10  # Alignment bonus
+                    filtered.append(p)
+                elif p["strategy"] == "Wedge" and p["direction"] == "SHORT":
+                    # Rising Wedge in Bull trend is valid reversal
+                    filtered.append(p)
+
+            elif structure == "BEAR":
+                if p["direction"] == "SHORT":
+                    p["confidence"] += 10
+                    filtered.append(p)
+                elif p["strategy"] == "Wedge" and p["direction"] == "LONG":
+                    # Falling Wedge in Bear trend is valid reversal
+                    filtered.append(p)
+            else:
+                # In Range, accept both
+                filtered.append(p)
+
+        return filtered
+
+    def check_market_structure(self, df: pd.DataFrame) -> str:
+        """
+        Returns 'BULL', 'BEAR', or 'UNCLEAR' based on recent swing points.
+        Prevents buying into a Lower Low structure.
+        """
+        if len(df) < 30:
+            return "UNCLEAR"
+
+        # Get last 20 candles
+        recent = df.iloc[-30:].copy()
+
+        # Find Pivots
+        order = 3
+        highs_idx = argrelextrema(recent["high"].values, np.greater_equal, order=order)[0]
+        lows_idx = argrelextrema(recent["low"].values, np.less_equal, order=order)[0]
+
+        if len(highs_idx) < 2 or len(lows_idx) < 2:
+            return "UNCLEAR"
+
+        last_h = recent.iloc[highs_idx[-1]]["high"]
+        prev_h = recent.iloc[highs_idx[-2]]["high"]
+        last_l = recent.iloc[lows_idx[-1]]["low"]
+        prev_l = recent.iloc[lows_idx[-2]]["low"]
+
+        # Structure Logic
+        hh = last_h > prev_h
+        hl = last_l > prev_l
+        lh = last_h < prev_h
+        ll = last_l < prev_l
+
+        if hh and hl:
+            return "BULL"
+        if lh and ll:
+            return "BEAR"
+        if (hh and ll) or (lh and hl):
+            # Broadening or compressing (Triangle/Range)
+            return "RANGE"
+
+        return "UNCLEAR"
 
 
 class FakeBreakoutDetector:
