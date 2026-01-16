@@ -75,6 +75,14 @@ class DataProvider:
         except Exception as e:
             logger.error(f"Failed to kill terminal: {e}")
 
+    def _sync_account_info(self) -> Dict:
+        """Fetches live account balance and equity."""
+        info = mt5.account_info()
+        if not info:
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0}
+
+        return {"balance": float(info.balance), "equity": float(info.equity), "profit": float(info.profit)}
+
     def _sync_connect(self) -> bool:
         """Synchronous MT5 Connection with Retries and Auto-Kill"""
         try:
@@ -233,6 +241,12 @@ class DataProvider:
         mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M15)
 
         return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
+
+    async def get_account_summary(self) -> Dict:
+        """Async wrapper to get account details"""
+        if not self.connected:
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0}
+        return await asyncio.to_thread(self._sync_account_info)
 
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
         """Returns full tick object (Bid/Ask)."""

@@ -54,6 +54,27 @@ class AITradingEngine:
         self.signal_history = {}
         self.user_balance_zar = 0.0
 
+        # --- DYNAMIC CONFIGURATION (Overridable) ---
+        self.risk_pct = RISK_PER_TRADE_PCT
+        self.max_lot = MAX_LOT_SIZE
+        self.min_confidence = MIN_CONFIDENCE
+        self.allow_high_volatility = False  # Default to False for safety
+
+    def update_config(self, settings: Dict):
+        """Updates engine parameters dynamically."""
+        if "risk" in settings:
+            self.risk_pct = float(settings["risk"])
+        if "lot_size" in settings:
+            self.max_lot = float(settings["lot_size"])
+        if "confidence" in settings:
+            self.min_confidence = float(settings["confidence"])
+        if "high_vol" in settings:
+            self.allow_high_volatility = bool(settings["high_vol"])
+
+        logger.info(
+            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}"
+        )
+
     async def _adjust_confidence(
         self,
         symbol: str,
@@ -140,8 +161,6 @@ class AITradingEngine:
 
         # --- GHOST ORDER LOGIC ---
         strategy_name = signal.get("strategy", "").lower()
-
-        # Momentum needs immediate execution. Limit orders cause missed trades here.
         is_momentum = any(x in strategy_name for x in ["breakout", "flow", "ichimoku"])
 
         if "fvg" not in strategy_name and "limit" not in str(order_type).lower() and not is_momentum:
@@ -155,8 +174,6 @@ class AITradingEngine:
                     entry_price = current_market_price + ghost_pips
 
         # --- 2. TP / SL CALCULATION ---
-        # Base SL is tightened to 1.0 ATR
-        # FOR XAUUSD: Tighten to 0.75 ATR to reduce absolute risk amount (cheaper trade).
         sl_multiplier = 0.75 if "XAU" in symbol else 1.0
         sl_dist = atr * sl_multiplier
         min_dist = point * 50
@@ -165,19 +182,16 @@ class AITradingEngine:
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
             suggested_dist = abs(signal["suggested_sl"] - entry_price)
-            # Safety Check: Don't allow SL to be dangerously tight (< 0.5 ATR) or too wide (> 3 ATR)
             if (atr * 0.5) < suggested_dist < (atr * 3.0):
                 sl_dist = suggested_dist
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
         pred_exit_atr = float(nn_result.get("pred_exit_atr", 2.0))
-        # Bound predicted exit for sanity
         pred_exit_atr = max(0.8, min(pred_exit_atr, 6.0))
 
         # conservative TP based on predicted exit ATR but always at least 1.2x SL
         tp_dist = max(atr * pred_exit_atr, sl_dist * 1.2)
-
         rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
         expected_ev = prob * rr - (1.0 - prob)
 
@@ -190,9 +204,7 @@ class AITradingEngine:
 
         # If EV is clearly negative, reduce risk_mult / skip
         if expected_ev < 0:
-            # degrade risk multiplier to limit exposure
             nn_result["risk_mult"] = max(0.25, nn_result.get("risk_mult", 1.0) * 0.5)
-            # hard skip if very negative
             if expected_ev < -0.25:
                 self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
                 return None
@@ -206,7 +218,6 @@ class AITradingEngine:
 
         # Calculate Absolute Prices
         if signal["signal"] == "BUY":
-            # For Limit orders, SL/TP relative to Limit Price
             ref_price = entry_price if order_type == "LIMIT" else ask
             sl_price = ref_price - sl_dist
             tp_price = ref_price + tp_dist
@@ -220,7 +231,7 @@ class AITradingEngine:
         if signal.get("is_shadow", False):
             risk_mult = min(risk_mult, 0.1)
 
-        target_risk_zar = self.user_balance_zar * ((RISK_PER_TRADE_PCT * risk_mult) / 100)
+        target_risk_zar = self.user_balance_zar * ((self.risk_pct * risk_mult) / 100)
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
         if risk_per_lot == 0:
@@ -235,9 +246,8 @@ class AITradingEngine:
             lots = steps * vol_step
         except Exception:
             lots = round(lots / vol_step) * vol_step
-        lots = round(lots / vol_step) * vol_step
 
-        lots = max(min_vol, min(lots, max_vol, MAX_LOT_SIZE))
+        lots = round(max(min_vol, min(lots, max_vol, self.max_lot)), 2)
 
         actual_risk_zar = risk_per_lot * lots
 
@@ -259,7 +269,7 @@ class AITradingEngine:
             # Final check after reduction
             lots = round(lots, 2)
             if lots <= min_vol and actual_risk_zar > max_allowed_zar:
-                emergency_cap_pct = 0.35 if "XAU" in symbol else 0.08
+                emergency_cap_pct = 0.35 if "XAU" in symbol else 0.1
                 max_emergency_risk = self.user_balance_zar * emergency_cap_pct
                 if actual_risk_zar < max_emergency_risk:
                     # Allow trade but log warning
@@ -360,9 +370,7 @@ class AITradingEngine:
         trend = "FLAT"
         if klines:
             df = pd.DataFrame(klines)
-            # Calculate Indicators
             df = TechnicalAnalyzer.calculate_indicators(df, heavy=False)
-            # Use Shared Logic
             trend = TechnicalAnalyzer.get_htf_trend(df)
 
         self.htf_cache[symbol] = {"trend": trend, "time": now}
@@ -467,6 +475,11 @@ class AITradingEngine:
         """
         Main Analysis with step-by-step pipeline
         """
+        # Dynamic High Vol Check
+        if symbol in HIGH_RISK_SYMBOLS and not self.allow_high_volatility:
+            # Silent skip
+            return None
+
         # --- 1. Cooldown & Active states ---
         # Check simple memory-based flags first to avoid expensive calls
         if self.is_on_cooldown(symbol) or symbol in self.active_features:
@@ -562,7 +575,6 @@ class AITradingEngine:
                 pass
 
         # --- 6. Technical Analysis & Context ---
-        # Define shared variables
         rsi = curr["rsi"]
         stoch_k = curr.get("stoch_k", 50)
         chop_idx = curr["chop_idx"]
@@ -581,7 +593,6 @@ class AITradingEngine:
                     return None  # Don't trade trend in Asia
 
         # Structure & Patterns
-        htf_trend = await self._get_htf_trend(symbol, provider)
         pattern_recognizer = PatternRecognizer()
         structure = pattern_recognizer.check_market_structure(df)
         patterns = pattern_recognizer.analyze_patterns(df, structure)
@@ -786,7 +797,6 @@ class AITradingEngine:
         nn_result["risk_mult"] *= fake_risk_penalty
 
         # --- 11. Execution & Risk Sizing ---
-        # Get live Tick data for true Bid/Ask
         tick = await provider.get_current_tick(symbol)
         if not tick:
             return None

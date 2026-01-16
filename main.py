@@ -1,9 +1,13 @@
 import asyncio
-import sys
 import os
+import sys
+import warnings
 
 # Ensure the src directory is in the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+
+# Filter out the specific Keras/NumPy warning
+warnings.filterwarnings("ignore", category=FutureWarning, module="keras.src.export.tf2onnx_lib")
 
 # Import the Bot class from the refactored structure
 from src.bot.console import NexubotConsole

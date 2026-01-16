@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>Nexubot Signal Intelligence</title>
+    <link href="css/style.css" rel="stylesheet" />
+
+    <script type="text/javascript" src="/eel.js"></script>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+    <script src="js/shared.js"></script>
+    <script src="js/signal.js" defer></script>
+  </head>
+
+  <body
+    class="bg-gray-100 dark:bg-background-dark text-gray-800 dark:text-gray-300 min-h-screen relative overflow-x-hidden selection:bg-primary selection:text-black"
+  >
+    <div
+      class="absolute inset-0 z-0 opacity-20 pointer-events-none bg-grid dark:opacity-100"
+    ></div>
+    <div class="scanline pointer-events-none hidden dark:block"></div>
+
+    <nav
+      class="relative z-10 border-b border-gray-300 dark:border-border-dark bg-white dark:bg-panel-dark/90 backdrop-blur-sm"
+    >
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between h-16">
+          <div class="flex items-center">
+            <div class="flex items-center gap-3 group cursor-pointer">
+              <div
+                class="w-10 h-10 border border-gray-400 dark:border-primary flex items-center justify-center bg-gray-100 dark:bg-transparent shadow-none dark:shadow-neon-green transition-all duration-300 group-hover:bg-primary group-hover:text-black"
+              >
+                <span
+                  class="material-icons text-xl dark:text-primary text-gray-800 group-hover:text-black transition-colors"
+                  >hub</span
+                >
+              </div>
+
+              <div>
+                <h1
+                  class="text-xl font-bold tracking-wider text-gray-900 dark:text-white group-hover:text-primary transition-colors"
+                >
+                  NEXUBOT
+                  <span
+                    class="text-xs font-normal text-gray-500 dark:text-gray-400 ml-1"
+                    >v1.4.0</span
+                  >
+                </h1>
+
+                <div
+                  class="text-[10px] uppercase tracking-[0.2em] text-primary hidden dark:block animate-pulse"
+                >
+                  System Online
+                </div>
+              </div>
+            </div>
+
+            <div class="hidden md:block">
+              <div class="ml-10 flex items-baseline space-x-4">
+                <a
+                  class="text-gray-600 dark:text-gray-400 hover:text-primary dark:hover:text-primary px-3 py-2 rounded-md text-sm font-medium transition-colors"
+                  href="dashboard.html"
+                  >DASHBOARD</a
+                >
+                <a
+                  class="text-black dark:text-primary px-3 py-2 rounded-md text-sm font-medium border-b-2 border-primary bg-primary/10"
+                  href="#"
+                  >INTELLIGENCE &amp; SIGNAL</a
+                >
+                <a
+                  class="text-gray-600 dark:text-gray-400 hover:text-primary dark:hover:text-primary px-3 py-2 rounded-md text-sm font-medium transition-colors"
+                  href="history.html"
+                  >HISTORY</a
+                >
+                <a
+                  class="text-gray-600 dark:text-gray-400 hover:text-primary dark:hover:text-primary px-3 py-2 rounded-md text-sm font-medium transition-colors"
+                  href="settings.html"
+                  >SETTINGS</a
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <div
+              class="hidden md:flex flex-col items-end text-xs text-gray-500 dark:text-gray-400"
+            >
+              <span class="flex items-center gap-1"
+                ><span
+                  class="w-2 h-2 rounded-full bg-primary animate-pulse"
+                ></span>
+                SYSTEM ONLINE</span
+              >
+              <span class="text-[10px] text-primary"
+                >LATENCY: <span id="latency-display">--</span>ms</span
+              >
+            </div>
+
+            <button
+              onclick="window.close()"
+              class="bg-primary hover:bg-green-400 text-black font-bold py-1.5 px-4 text-sm rounded-none border border-primary shadow-[0_0_10px_rgba(0,255,65,0.4)] transition-all transform hover:scale-105 uppercase tracking-wider"
+            >
+              Stop Engine
+            </button>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <main class="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div class="mb-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div
+          class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-3 flex items-center justify-between"
+        >
+          <div>
+            <div
+              class="text-[10px] uppercase text-gray-500 tracking-wider mb-1"
+            >
+              Account Balance
+            </div>
+            <div
+              id="sig-balance"
+              class="text-xl font-bold text-black dark:text-white"
+            >
+              R --
+            </div>
+          </div>
+
+          <span class="material-icons text-gray-400 dark:text-gray-600"
+            >account_balance_wallet</span
+          >
+        </div>
+
+        <div
+          class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-3 flex items-center justify-between"
+        >
+          <div>
+            <div
+              class="text-[10px] uppercase text-gray-500 tracking-wider mb-1"
+            >
+              Win Rate (Lifetime)
+            </div>
+            <div id="sig-wr" class="text-xl font-bold text-primary">--%</div>
+          </div>
+
+          <span class="material-icons text-primary/50">emoji_events</span>
+        </div>
+
+        <div
+          class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-3 flex items-center justify-between"
+        >
+          <div>
+            <div
+              class="text-[10px] uppercase text-gray-500 tracking-wider mb-1"
+            >
+              Active Trades
+            </div>
+            <div id="sig-active" class="text-xl font-bold text-secondary">
+              0
+            </div>
+          </div>
+
+          <span class="material-icons text-secondary/50">trending_up</span>
+        </div>
+
+        <div
+          class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-3 flex items-center justify-between"
+        >
+          <div>
+            <div
+              class="text-[10px] uppercase text-gray-500 tracking-wider mb-1"
+            >
+              Session PnL
+            </div>
+            <div id="sig-pnl" class="text-xl font-bold text-primary">
+              R 0.00
+            </div>
+          </div>
+
+          <span class="material-icons text-primary/50">show_chart</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="lg:col-span-2 space-y-6">
+          <div id="signal-container" class="relative">
+            <div
+              id="empty-state"
+              class="bg-white dark:bg-panel-dark border border-gray-800 p-12 text-center"
+            >
+              <div
+                class="w-16 h-16 border-4 border-t-primary border-gray-800 rounded-full animate-spin mx-auto mb-4"
+              ></div>
+              <h2
+                class="text-xl text-white font-bold tracking-widest animate-pulse"
+              >
+                SCANNING MARKETS...
+              </h2>
+              <p class="text-gray-500 text-sm mt-2">
+                Neural Engine is analyzing price action.
+              </p>
+            </div>
+          </div>
+
+          <!-- <div
+            class="bg-white dark:bg-panel-dark border border-red-500 dark:border-red-600 shadow-neon-red relative overflow-hidden group"
+          >
+            <div class="absolute top-0 right-0 p-2 opacity-50">
+              <span class="material-icons text-danger text-4xl">warning</span>
+            </div>
+
+            <div class="p-6">
+              <div class="flex items-center gap-3 mb-4">
+                <span
+                  class="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-red-400 opacity-75 left-6"
+                ></span>
+                <span
+                  class="relative inline-flex rounded-full h-3 w-3 bg-danger"
+                ></span>
+                <h2
+                  class="text-2xl md:text-3xl font-bold text-danger tracking-tight glitch-hover cursor-default"
+                >
+                  SELL SIGNAL DETECTED
+                </h2>
+                <span
+                  class="bg-danger/20 text-danger text-xs px-2 py-0.5 border border-danger/50 rounded-sm"
+                  >IMMEDIATE ACTION</span
+                >
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
+                <div class="space-y-4 text-sm">
+                  <div
+                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
+                  >
+                    <span class="text-gray-500">ASSET:</span>
+                    <span class="text-black dark:text-white font-bold text-lg"
+                      >ETHUSDm</span
+                    >
+                  </div>
+                  <div
+                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
+                  >
+                    <span class="text-gray-500">STRATEGY:</span>
+                    <span class="text-secondary">Crypto Ichimoku</span>
+                  </div>
+                  <div
+                    class="flex justify-between items-center border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
+                  >
+                    <span class="text-gray-500">CONFIDENCE:</span>
+                    <div class="flex items-center gap-2">
+                      <div
+                        class="w-24 h-2 bg-gray-800 rounded-full overflow-hidden"
+                      >
+                        <div
+                          class="h-full bg-secondary shadow-neon-cyan"
+                          style="width: 69.3%"
+                        ></div>
+                      </div>
+                      <span class="text-secondary font-bold">69.3%</span>
+                    </div>
+                  </div>
+                  <div
+                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1 pt-2"
+                  >
+                    <span class="text-gray-500">LOT SIZE:</span>
+                    <span class="text-warning font-bold">0.10 Lots</span>
+                  </div>
+                </div>
+                <div
+                  class="space-y-4 text-sm bg-gray-50 dark:bg-black/40 p-4 border border-gray-200 dark:border-gray-800"
+                >
+                  <div class="flex justify-between">
+                    <span class="text-gray-500">ENTRY PRICE:</span>
+                    <span class="text-black dark:text-white">3095.42</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-danger font-bold">STOP LOSS:</span>
+                    <span class="text-danger">3103.35</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-primary font-bold">TAKE PROFIT:</span>
+                    <span class="text-primary">3084.43</span>
+                  </div>
+                  <div
+                    class="mt-4 pt-4 border-t border-gray-700 grid grid-cols-2 gap-4"
+                  >
+                    <div>
+                      <div class="text-[10px] text-gray-500">MAX RISK (SL)</div>
+                      <div class="text-danger font-bold">-R13.14</div>
+                    </div>
+                    <div class="text-right">
+                      <div class="text-[10px] text-gray-500">
+                        EST PROFIT (TP)
+                      </div>
+                      <div class="text-primary font-bold">+R18.21</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                class="mt-6 flex flex-col sm:flex-row gap-4 pt-4 border-t border-dashed border-gray-700"
+              >
+                <div
+                  class="flex-1 bg-black/50 p-2 border border-gray-700 text-xs text-gray-400 flex items-center"
+                >
+                  <span class="material-icons text-sm mr-2 animate-spin"
+                    >sync</span
+                  >
+                  Executing trade via MetaTrader 5 bridge...
+                </div>
+                <div class="flex gap-2">
+                  <button
+                    class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 border border-gray-600 text-sm uppercase transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    class="bg-danger hover:bg-red-600 text-white px-6 py-2 border border-danger shadow-neon-red text-sm font-bold uppercase transition-all"
+                  >
+                    Force Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div> -->
+
+          <div
+            class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-6 relative"
+          >
+            <h3
+              class="text-lg font-bold text-secondary mb-4 flex items-center gap-2"
+            >
+              <span class="material-icons">psychology</span>
+              NEURAL VALIDATION LAYER
+            </h3>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div
+                class="bg-gray-50 dark:bg-black/30 p-3 border-l-2 border-primary"
+              >
+                <div class="text-xs text-gray-500 uppercase">
+                  TensorFlow Prediction
+                </div>
+                <div id="neural-pred" class="text-primary font-bold mt-1">
+                  --
+                </div>
+              </div>
+
+              <div
+                class="bg-gray-50 dark:bg-black/30 p-3 border-l-2 border-warning"
+              >
+                <div class="text-xs text-gray-500 uppercase">
+                  Sentiment Analysis
+                </div>
+                <div id="neural-sent" class="text-warning font-bold mt-1">
+                  --
+                </div>
+              </div>
+
+              <div
+                class="bg-gray-50 dark:bg-black/30 p-3 border-l-2 border-secondary"
+              >
+                <div class="text-xs text-gray-500 uppercase">
+                  Volatility Index
+                </div>
+                <div id="neural-vol" class="text-secondary font-bold mt-1">
+                  --
+                </div>
+              </div>
+            </div>
+
+            <div
+              id="neural-process-log"
+              class="bg-black p-4 text-xs text-gray-400 border border-gray-800 h-40 overflow-y-auto"
+            >
+              <p class="animate-pulse">_</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="space-y-6">
+          <div
+            class="bg-white dark:bg-panel-dark border border-secondary/30 dark:border-secondary/20 p-5 shadow-[0_0_15px_rgba(0,255,255,0.05)]"
+          >
+            <h3
+              class="text-sm font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-4 border-b border-gray-700 pb-2"
+            >
+              Pattern Recognition
+            </h3>
+
+            <div id="pattern-list" class="space-y-4">
+              <div class="text-xs text-gray-500 italic">
+                Waiting for signal context...
+              </div>
+            </div>
+
+            <div class="mt-6 pt-4 border-t border-gray-800">
+              <div class="text-xs text-secondary mb-2 uppercase">
+                Market Conditions
+              </div>
+              <div id="market-tags" class="flex flex-wrap gap-2"></div>
+            </div>
+          </div>
+
+          <div
+            class="bg-[#050505] border border-gray-800 p-4 text-xs overflow-hidden h-[300px] flex flex-col"
+          >
+            <div
+              class="flex justify-between items-center mb-2 pb-2 border-b border-gray-800"
+            >
+              <span class="text-gray-500">SYSTEM LOG</span>
+              <span class="w-2 h-2 rounded-full bg-primary animate-ping"></span>
+            </div>
+            <div
+              id="system-logs"
+              class="overflow-y-auto space-y-1.5 flex-1 pr-1 custom-scrollbar"
+            ></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-8 border-t border-secondary border-double pt-1">
+        <div class="border-t border-secondary p-4 bg-black/40 backdrop-blur-md">
+          <div
+            class="flex flex-col md:flex-row justify-between items-center text-sm text-gray-300"
+          >
+            <div class="flex gap-8">
+              <div>
+                <span class="text-gray-500">Time Running:</span>
+                <span id="footer-time" class="text-white">--</span>
+              </div>
+              <div>
+                <span class="text-gray-500">Session PnL:</span>
+                <span id="footer-pnl" class="text-primary">--</span>
+              </div>
+            </div>
+            <div class="mt-4 md:mt-0 flex gap-8">
+              <div>
+                <span class="text-gray-500">Total Signals:</span>
+                <span id="footer-signals" class="text-white">0</span>
+              </div>
+              <div>
+                <span class="text-gray-500">W/L:</span>
+                <span id="footer-wins" class="text-primary">0</span> /
+                <span id="footer-losses" class="text-danger">0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer
+      class="mt-8 py-6 text-center text-xs text-gray-600 dark:text-gray-700"
+    >
+      <p>
+        NEXUBOT INSTITUTIONAL ENGINE © <span id="footer-year"></span>. ALL
+        RIGHTS RESERVED.
+      </p>
+      <p class="mt-1">WARNING: Trading involves substantial risk of loss.</p>
+    </footer>
+
+    <script>
+      // Set footer year dynamically
+      (function () {
+        const el = document.getElementById("footer-year");
+        if (el) el.textContent = new Date().getFullYear();
+      })();
+    </script>
+  </body>
+</html>
