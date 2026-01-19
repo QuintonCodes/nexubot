@@ -3,7 +3,8 @@ import logging
 import json
 import re
 import time
-from sqlalchemy import select, desc, delete
+from functools import wraps
+from sqlalchemy import select, desc, delete, text, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
 from typing import List
@@ -11,6 +12,34 @@ from typing import List
 from src.config import DATABASE_URL, LOSS_COOLDOWN_DURATION
 
 logger = logging.getLogger(__name__)
+
+
+# --- RETRY DECORATOR ---
+def db_retry(retries=3, delay=1):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for i in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    # Filter out network noise
+                    if "getaddrinfo" in str(e) or "connection" in str(e).lower():
+                        if i < retries - 1:
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.error(f"DB Error in {func.__name__}: {e}")
+                        break
+            # Return default empty values on failure
+            if "get_total" in func.__name__ or "performance" in func.__name__:
+                return 0.0
+            if "get_active" in func.__name__ or "get_history" in func.__name__:
+                return []
+            return None
+
+        return wrapper
+
+    return decorator
 
 
 # --- ORM MODELS ---
@@ -30,12 +59,13 @@ class TradeResult(Base):
     result: Mapped[int] = mapped_column()  # 1=Win, 0=Loss
     pnl_zar: Mapped[float] = mapped_column()
     strategy: Mapped[str] = mapped_column()
+    size: Mapped[float] = mapped_column(default=0.01)
 
 
 class ActiveTrade(Base):
     __tablename__ = "active_trades"
     symbol: Mapped[str] = mapped_column(primary_key=True)
-    signal_json: Mapped[str] = mapped_column()  # Stores the full signal dict as JSON
+    signal_json: Mapped[str] = mapped_column()
     start_time: Mapped[float] = mapped_column()
 
 
@@ -47,6 +77,18 @@ class SessionAnalytics(Base):
     total_trades: Mapped[int] = mapped_column()
     win_rate: Mapped[float] = mapped_column()
     net_pnl_zar: Mapped[float] = mapped_column()
+
+
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    login: Mapped[str] = mapped_column(nullable=True)
+    server: Mapped[str] = mapped_column(nullable=True)
+    password: Mapped[str] = mapped_column(nullable=True)
+    lot_size: Mapped[float] = mapped_column(default=0.1)
+    risk: Mapped[float] = mapped_column(default=2.0)
+    confidence: Mapped[int] = mapped_column(default=75)
+    high_vol: Mapped[bool] = mapped_column(default=False)
 
 
 # --- MANAGER ---
@@ -136,6 +178,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to delete active trade {symbol}: {e}")
 
+    @db_retry()
     async def get_active_trades(self) -> List:
         """Returns list of (symbol, signal_dict, start_time)"""
         if not self.engine:
@@ -180,6 +223,32 @@ class DatabaseManager:
         except Exception:
             return 0.5
 
+    @db_retry()
+    async def get_settings(self) -> dict:
+        """Fetches user settings from DB"""
+        if not self.engine:
+            return {}
+        try:
+            async with self.async_session() as session:
+                stmt = select(UserSettings).where(UserSettings.id == 1)
+                result = await session.execute(stmt)
+                settings = result.scalars().first()
+                if settings:
+                    return {
+                        "login": settings.login,
+                        "server": settings.server,
+                        "password": settings.password,
+                        "lot_size": settings.lot_size,
+                        "risk": settings.risk,
+                        "confidence": settings.confidence,
+                        "high_vol": settings.high_vol,
+                    }
+                return {}
+        except Exception as e:
+            logger.error(f"Failed to load settings from DB: {e}")
+            return {}
+
+    @db_retry()
     async def get_total_historical_win_rate(self) -> float:
         """
         Calculates the win rate across ALL trades stored in the database.
@@ -209,23 +278,24 @@ class DatabaseManager:
         if not self.engine:
             return
 
-        retries = 3
-        delay = 2
+        try:
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
 
-        for attempt in range(retries):
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
-                logger.info("✅ DB Connected")
-                return
-            except Exception as e:
-                logger.warning(f"⚠️ DB Connection failed (Attempt {attempt+1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(
-                        "❌ DB Connection failed after max retries. Continuing without DB persistence (Session only)."
-                    )
+            # --- AUTO-MIGRATION: Check for missing columns ---
+            async with self.async_session() as session:
+                try:
+                    await session.execute(text("SELECT size FROM trade_results LIMIT 1"))
+                except Exception:
+                    logger.info("🔧 Migrating DB: Adding 'size' column...")
+                    await session.rollback()  # Rollback the failed select
+                    async with self.engine.begin() as conn:
+                        await conn.execute(text("ALTER TABLE trade_results ADD COLUMN size FLOAT DEFAULT 0.01"))
+
+            logger.info("✅ DB Connected")
+            return
+        except Exception as e:
+            logger.warning(f"⚠️ DB Connection failed: {e}")
 
     async def log_session(self, session_id: str, start_time: float, stats: dict):
         """Logs session summary on shutdown"""
@@ -249,6 +319,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to log session: {e}")
 
+    @db_retry()
     async def log_trade(self, trade_data: dict):
         """Logs a trade asynchronously"""
         if not self.engine:
@@ -267,6 +338,7 @@ class DatabaseManager:
                     result=1 if trade_data["won"] else 0,
                     pnl_zar=trade_data["pnl"],
                     strategy=trade_data["strategy"],
+                    size=trade_data.get("size", 0.01),
                 )
                 session.add(trade)
                 await session.commit()
@@ -287,3 +359,36 @@ class DatabaseManager:
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed to save active trade {symbol}: {e}")
+
+    async def save_settings(self, data: dict):
+        """Upserts user settings"""
+        if not self.engine:
+            return
+        try:
+            async with self.async_session() as session:
+                stmt = select(UserSettings).where(UserSettings.id == 1)
+                result = await session.execute(stmt)
+                obj = result.scalars().first()
+
+                if not obj:
+                    obj = UserSettings(id=1)
+                    session.add(obj)
+
+                if "login" in data:
+                    obj.login = data["login"]
+                if "server" in data:
+                    obj.server = data["server"]
+                if "password" in data:
+                    obj.password = data["password"]
+                if "lot_size" in data:
+                    obj.lot_size = float(data["lot_size"])
+                if "risk" in data:
+                    obj.risk = float(data["risk"])
+                if "confidence" in data:
+                    obj.confidence = int(data["confidence"])
+                if "high_vol" in data:
+                    obj.high_vol = bool(data["high_vol"])
+
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to save settings: {e}")

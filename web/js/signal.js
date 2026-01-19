@@ -3,9 +3,21 @@ let currentSignalIndex = 0;
 
 document.addEventListener("DOMContentLoaded", () => {
   if (document.getElementById("signal-container")) {
-    initSignalPage();
+    setTimeout(initSignalPage, 100);
   }
 });
+
+function clearContextDetails() {
+  safeSetText("neural-pred", "--");
+  safeSetText("neural-sent", "--");
+  safeSetText("neural-vol", "--");
+  if (document.getElementById("neural-process-log"))
+    document.getElementById("neural-process-log").innerHTML =
+      '<p class="animate-pulse">_</p>';
+  if (document.getElementById("pattern-list"))
+    document.getElementById("pattern-list").innerHTML =
+      '<div class="text-xs text-gray-500 italic">Waiting for signal...</div>';
+}
 
 function initSignalPage() {
   setInterval(pollSignalData, 1000); // Poll every second
@@ -17,16 +29,12 @@ async function pollSignalData() {
   try {
     const data = await eel.fetch_signal_updates()();
     if (data) {
+      if (data.latency !== undefined) updateLatencyDisplay(data.latency, true);
+
       updateSignalStats(data);
-      updateLogs(data.logs);
+      updateLogs(data.logs || []);
 
-      // Handle Signal List Update
-      // Only update if list changed to avoid UI flickering/resetting carousel index unnecessarily
-      // Simple check: compare lengths or IDs
       const newSignals = data.signals || [];
-
-      // Check for deep equality or just update always?
-      // Updating always is safer for PnL changes, but we must preserve index
       activeSignals = newSignals;
       renderSignalCarousel(data.mode);
 
@@ -42,33 +50,6 @@ async function pollSignalData() {
   } catch (e) {
     console.error("Signal poll error:", e);
   }
-}
-
-function updateSignalStats(data) {
-  // Top Bar
-  safeSetText("sig-balance", `R ${data.account.balance.toFixed(2)}`);
-  safeSetText("sig-wr", `${data.stats.lifetime_wr.toFixed(1)}%`);
-  safeSetText("sig-active", data.stats.active_count);
-
-  const pnl = data.stats.session_pnl;
-  const pnlEl = document.getElementById("sig-pnl");
-  if (pnlEl) {
-    pnlEl.innerText = `R ${pnl.toFixed(2)}`;
-    pnlEl.className =
-      pnl >= 0
-        ? "text-xl font-bold text-primary"
-        : "text-xl font-bold text-danger";
-  }
-
-  // Footer
-  safeSetText("footer-time", data.stats.time_running);
-  safeSetText("footer-pnl", `R ${pnl.toFixed(2)}`);
-  safeSetText(
-    "footer-signals",
-    data.stats.session_total + data.stats.active_count
-  );
-  safeSetText("footer-wins", data.stats.session_wins);
-  safeSetText("footer-losses", data.stats.session_losses);
 }
 
 function renderSignalCarousel(mode) {
@@ -92,8 +73,11 @@ function renderSignalCarousel(mode) {
   const sig = activeSignals[currentSignalIndex];
   const isLong = sig.direction === "LONG";
   const colorClass = isLong ? "primary" : "danger"; // green vs red
-  const colorHex = isLong ? "#00FF41" : "#FF0055";
   const typeText = isLong ? "BUY SIGNAL" : "SELL SIGNAL";
+  const statusColor =
+    sig.status === "FILLED"
+      ? "text-primary border-primary"
+      : "text-warning border-warning";
 
   // Dynamic Buttons based on Automation Mode
   let actionButtons = "";
@@ -136,18 +120,18 @@ function renderSignalCarousel(mode) {
         <div class="bg-white dark:bg-panel-dark border border-${
           colorClass === "primary" ? "primary" : "red-500"
         } shadow-neon-${
-    colorClass === "primary" ? "green" : "red"
-  } relative overflow-hidden group">
+          colorClass === "primary" ? "green" : "red"
+        } relative overflow-hidden group">
             <div class="p-6">
               <div class="flex items-center gap-3 mb-4">
                 <span class="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-${
                   colorClass === "primary" ? "green-400" : "red-400"
                 } opacity-75 left-6"></span>
                 <span class="relative inline-flex rounded-full h-3 w-3 bg-${colorClass}"></span>
-                <h2 class="text-2xl md:text-3xl font-bold text-${colorClass} tracking-tight glitch-hover cursor-default">
+                <h2 class="text-2xl md:text-3xl font-bold text-${colorClass} tracking-tight cursor-default">
                   ${typeText} DETECTED
                 </h2>
-                <span class="bg-${colorClass}/20 text-${colorClass} text-xs px-2 py-0.5 border border-${colorClass}/50 rounded-sm">IMMEDIATE ACTION</span>
+                <span class="bg-black/20 ${statusColor} text-xs px-2 py-0.5 border rounded-sm">${sig.status || "PENDING"}</span>
               </div>
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
@@ -308,21 +292,13 @@ function updateContextDetails(sig) {
   }
 }
 
-function clearContextDetails() {
-  safeSetText("neural-pred", "--");
-  safeSetText("neural-sent", "--");
-  safeSetText("neural-vol", "--");
-  if (document.getElementById("neural-process-log"))
-    document.getElementById("neural-process-log").innerHTML =
-      '<p class="animate-pulse">_</p>';
-  if (document.getElementById("pattern-list"))
-    document.getElementById("pattern-list").innerHTML =
-      '<div class="text-xs text-gray-500 italic">Waiting for signal...</div>';
-}
-
 function updateLogs(logs) {
   const logContainer = document.getElementById("system-logs");
   if (!logContainer) return;
+
+  const isScrolledToBottom =
+    logContainer.scrollHeight - logContainer.scrollTop <=
+    logContainer.clientHeight + 50;
 
   // Create HTML string
   const html = logs
@@ -341,6 +317,27 @@ function updateLogs(logs) {
   // Only update if content changed to prevent scrolling lock
   if (logContainer.innerHTML !== html) {
     logContainer.innerHTML = html;
-    logContainer.scrollTop = logContainer.scrollHeight;
+    if (isScrolledToBottom) {
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
   }
+}
+
+function updateSignalStats(data) {
+  // Top Bar
+  safeSetText("sig-balance", data.account.balance);
+  safeSetText("sig-wr", data.stats.lifetime_wr); // Helper adds '%' if ID suggests it
+  safeSetText("sig-active", data.stats.active_count);
+
+  safeSetText("sig-pnl", data.stats.session_pnl);
+
+  // Footer
+  safeSetText("footer-time", data.stats.time_running);
+  safeSetText("footer-pnl", data.stats.session_pnl);
+  safeSetText(
+    "footer-signals",
+    (data.stats.session_total || 0) + (data.stats.active_count || 0)
+  );
+  safeSetText("footer-wins", data.stats.session_wins);
+  safeSetText("footer-losses", data.stats.session_losses);
 }

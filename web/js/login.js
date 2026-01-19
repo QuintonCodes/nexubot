@@ -3,6 +3,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (form) {
     form.addEventListener("submit", handleLogin);
   }
+  const startTime = Date.now();
+
+  const latency = Date.now() - startTime;
+  updateLatencyDisplay(latency, true);
 });
 
 async function handleLogin(e) {
@@ -23,12 +27,15 @@ async function handleLogin(e) {
   // Call Python Function via Eel
   try {
     let response = await eel.attempt_login(login_id, server, password)();
+
     if (response.success) {
       window.location.href = "dashboard.html";
     } else {
       throw new Error(response.message);
     }
   } catch (error) {
+    updateLatencyDisplay(null, false);
+
     btn.innerHTML =
       '<span class="material-icons text-sm">power_settings_new</span> Initialize Connection';
     btn.disabled = false;

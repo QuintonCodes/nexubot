@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -123,7 +123,7 @@
             </div>
 
             <button
-              onclick="window.close()"
+              id="stop-btn"
               class="bg-primary hover:bg-green-400 text-black font-bold py-1.5 px-4 text-sm rounded-none border border-primary shadow-[0_0_10px_rgba(0,255,65,0.4)] transition-all transform hover:scale-105 uppercase tracking-wider"
             >
               Stop Engine
@@ -147,7 +147,11 @@
         </div>
       </div>
 
-      <form class="space-y-8" onsubmit="event.preventDefault();">
+      <form
+        id="settings-form"
+        class="space-y-8"
+        onsubmit="event.preventDefault()"
+      >
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div
             class="bg-panel-dark border border-gray-800 p-1 relative group overflow-hidden"
@@ -267,6 +271,7 @@
                       >Risk Per Trade %</label
                     >
                     <input
+                      id="setting-risk"
                       class="w-full bg-black border border-gray-700 text-white font-bold text-sm focus:border-primary focus:ring-1 focus:ring-primary py-2 px-3 rounded-none transition-colors"
                       type="number"
                       step="0.01"
@@ -354,7 +359,10 @@
                     id="confidenceRange"
                     max="99"
                     min="50"
-                    oninput="document.getElementById('confidenceVal').innerText = this.value + '%'"
+                    oninput="
+                      document.getElementById('confidenceVal').innerText =
+                        this.value + '%'
+                    "
                     type="range"
                     value="75"
                   />
@@ -375,15 +383,15 @@
                 <div class="space-y-2">
                   <div class="flex justify-between">
                     <span class="text-gray-400">Model:</span>
-                    <span class="text-primary">Transformer-XL</span>
+                    <span id="meta-model" class="text-primary">--</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-gray-400">Epochs:</span>
-                    <span class="text-white">50,000</span>
+                    <span id="meta-epochs" class="text-white">--</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-gray-400">Bias:</span>
-                    <span class="text-danger">Low</span>
+                    <span id="meta-bias" class="text-danger">--</span>
                   </div>
                 </div>
               </div>
@@ -394,6 +402,8 @@
         <div class="pt-6 flex flex-col items-center justify-center gap-4">
           <button
             onclick="handleSaveSettings(event)"
+            type="submit"
+            id="save-settings-btn"
             class="relative group bg-primary hover:bg-green-400 text-black font-bold py-4 px-12 text-lg rounded-sm border border-primary shadow-[0_0_15px_rgba(0,255,65,0.4)] transition-all transform hover:scale-[1.02] uppercase font-display tracking-widest overflow-hidden"
           >
             <span

@@ -1,7 +1,6 @@
 let perfChart;
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Dashboard Page
   if (document.getElementById("performanceChart")) {
     setTimeout(initDashboard, 100);
   }
@@ -114,16 +113,11 @@ function initDashboard() {
 async function refreshStats() {
   if (typeof eel === "undefined") return;
 
-  const startTime = Date.now();
-
   try {
     const data = await eel.fetch_dashboard_update()();
 
-    // Latency Calculation
-    const latency = Date.now() - startTime;
-    updateLatencyDisplay(latency, true);
-
     if (data) {
+      if (data.latency !== undefined) updateLatencyDisplay(data.latency, true);
       updateTextStats(data);
       updateChart(data);
       if (data.recent_trades) {
@@ -132,48 +126,7 @@ async function refreshStats() {
     }
   } catch (e) {
     console.error("Stats refresh error:", e);
-    // show offline latency on failure
     updateLatencyDisplay(null, false);
-  }
-}
-
-function updateTextStats(data) {
-  if (document.getElementById("balance-display")) {
-    document.getElementById(
-      "balance-display"
-    ).innerText = `R ${data.balance.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-    })}`;
-  }
-  if (document.getElementById("equity-display")) {
-    document.getElementById(
-      "equity-display"
-    ).innerText = `R ${data.equity.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-    })}`;
-  }
-
-  const pnlEl = document.getElementById("pnl-display");
-  if (pnlEl) {
-    pnlEl.innerText = `R ${data.total_pnl.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-    })}`;
-    pnlEl.className =
-      data.total_pnl >= 0
-        ? "text-2xl font-bold text-primary tracking-tight"
-        : "text-2xl font-bold text-danger tracking-tight";
-  }
-
-  if (document.getElementById("wr-display")) {
-    document.getElementById("wr-display").innerText = `${data.win_rate.toFixed(
-      1
-    )}%`;
-  }
-
-  if (document.getElementById("wl-count-display")) {
-    document.getElementById(
-      "wl-count-display"
-    ).innerText = `${data.wins} Wins / ${data.losses} Losses`;
   }
 }
 
@@ -217,17 +170,17 @@ function updateRecentTradesTable(trades) {
                     <span class="text-${
                       trade.signal_type === "BUY" ? "primary" : "danger"
                     } bg-${
-      trade.signal_type === "BUY" ? "primary" : "danger"
-    }/10 px-1.5 py-0.5 text-[10px] rounded border border-${
-      trade.signal_type === "BUY" ? "primary" : "danger"
-    }/20">${trade.signal_type}</span>
+                      trade.signal_type === "BUY" ? "primary" : "danger"
+                    }/10 px-1.5 py-0.5 text-[10px] rounded border border-${
+                      trade.signal_type === "BUY" ? "primary" : "danger"
+                    }/20">${trade.signal_type}</span>
                 </td>
                 <td class="py-3">${trade.entry.toFixed(5)}</td>
                 <td class="py-3">${trade.exit.toFixed(5)}</td>
                 <td class="py-3 text-xs">${trade.size}</td>
                 <td class="py-3 pr-2 text-right ${pnlClass} font-bold">${sign} R ${trade.pnl.toFixed(
-      2
-    )}</td>
+                  2
+                )}</td>
                 <td class="py-3 pr-2 text-right">
                     <span class="text-${statusColor} text-[10px] uppercase border border-${statusColor}/30 px-2 py-0.5 rounded-full flex items-center justify-end gap-1 ml-auto w-fit">
                         <span class="material-symbols-outlined text-[10px]">${statusIcon}</span>
@@ -238,4 +191,17 @@ function updateRecentTradesTable(trades) {
         `;
     tbody.innerHTML += row;
   });
+}
+
+function updateTextStats(data) {
+  // Use safeSetText to handle formatting and logic
+  safeSetText("balance-display", data.balance);
+  safeSetText("equity-display", data.equity);
+  safeSetText("pnl-display", data.total_pnl);
+  safeSetText("wr-display", data.win_rate);
+
+  if (document.getElementById("wl-count-display")) {
+    document.getElementById("wl-count-display").innerText =
+      `${data.wins || 0} Wins / ${data.losses || 0} Losses`;
+  }
 }

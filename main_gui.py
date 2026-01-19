@@ -1,6 +1,11 @@
 import eel
 import sys
 import os
+import time
+import warnings
+
+# --- 1. Filter np.object Warning ---
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*np.object.*")
 
 # Ensure 'src' is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
@@ -12,27 +17,33 @@ from src.bot.gui_backend import (
     fetch_signal_updates,
     fetch_trade_history,
     force_close,
-    set_mode,
     get_user_settings,
+    set_mode,
     save_settings,
+    shutdown_bot,
 )
+from src.utils.logger import setup_logging
+
+setup_logging()
 
 
 def on_close(page, sockets):
     """
     Modified callback to prevent shutdown during page redirection.
     """
+    time.sleep(1)
+
     if not sockets:
         print("❌ Final window closed. Shutting down Nexubot...")
         sys.exit(0)
-    else:
-        pass
+        shutdown_bot()
+        # Force kill process to prevent hanging threads
+        os._exit(0)
 
 
 def start_app():
     # Point to the web folder
     eel.init("web")
-
     print("🚀 Starting Nexubot GUI...")
 
     # Start the app
@@ -45,7 +56,7 @@ def start_app():
             cmdline_args=["--disable-http-cache"],
         )
     except (SystemExit, KeyboardInterrupt):
-        pass  # Expected exit
+        pass
     except Exception as e:
         print(f"Critical Error: {e}")
         sys.exit(1)

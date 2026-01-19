@@ -127,8 +127,17 @@ class DataProvider:
     def _sync_get_rates(self, symbol: str, timeframe: int, limit: int) -> List[Dict]:
         """Fetches candles with Synchronization Check."""
         # 1. Select symbol in Market Watch to trigger sync
+        if not self.connected:
+            return []
+
         selected = mt5.symbol_select(symbol, True)
         if not selected:
+            # Check if terminal is actually dead before logging warning
+            term_info = mt5.terminal_info()
+            if term_info is None:
+                self.connected = False  # Terminal is gone
+                return []
+
             logger.warning(f"Symbol {symbol} not found in Market Watch.")
             return []
 
@@ -251,6 +260,21 @@ class DataProvider:
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
         """Returns full tick object (Bid/Ask)."""
         return await asyncio.to_thread(self._sync_get_tick_struct, symbol)
+
+    def get_ping(self) -> int:
+        """Returns the last known latency to the broker in ms."""
+        if not self.connected:
+            return -1
+        try:
+            # Use mt5.terminal_info() which is fast and local
+            info = mt5.terminal_info()
+            if info:
+                return info.ping_last // 1000  # Convert micros to ms if needed, or just return as is (usually micros)
+                # Actually ping_last is usually in microseconds. Let's return ms.
+                return int(info.ping_last / 1000)
+            return 0
+        except:
+            return -1
 
     async def get_symbol_info(self, symbol: str) -> Dict:
         """

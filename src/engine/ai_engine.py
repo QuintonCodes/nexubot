@@ -796,6 +796,15 @@ class AITradingEngine:
         # Apply Fakeout Penalty to Risk Multiplier
         nn_result["risk_mult"] *= fake_risk_penalty
 
+        final_signal["neural_info"] = {
+            "prediction": f"{(nn_result['prob']*100):.1f}% WIN PROB",
+            "sentiment": f"{htf_trend} STRUCT",
+            "volatility": f"{volatility_ratio:.2f}x AVG",
+            "context_bias": context_bias,
+            "model_version": "TF-XL v2.1",
+            "epochs": "50,000",
+        }
+
         # --- 11. Execution & Risk Sizing ---
         tick = await provider.get_current_tick(symbol)
         if not tick:
