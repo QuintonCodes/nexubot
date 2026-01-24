@@ -202,130 +202,6 @@
             </div>
           </div>
 
-          <!-- <div
-            class="bg-white dark:bg-panel-dark border border-red-500 dark:border-red-600 shadow-neon-red relative overflow-hidden group"
-          >
-            <div class="absolute top-0 right-0 p-2 opacity-50">
-              <span class="material-icons text-danger text-4xl">warning</span>
-            </div>
-
-            <div class="p-6">
-              <div class="flex items-center gap-3 mb-4">
-                <span
-                  class="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-red-400 opacity-75 left-6"
-                ></span>
-                <span
-                  class="relative inline-flex rounded-full h-3 w-3 bg-danger"
-                ></span>
-                <h2
-                  class="text-2xl md:text-3xl font-bold text-danger tracking-tight glitch-hover cursor-default"
-                >
-                  SELL SIGNAL DETECTED
-                </h2>
-                <span
-                  class="bg-danger/20 text-danger text-xs px-2 py-0.5 border border-danger/50 rounded-sm"
-                  >IMMEDIATE ACTION</span
-                >
-              </div>
-
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
-                <div class="space-y-4 text-sm">
-                  <div
-                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
-                  >
-                    <span class="text-gray-500">ASSET:</span>
-                    <span class="text-black dark:text-white font-bold text-lg"
-                      >ETHUSDm</span
-                    >
-                  </div>
-                  <div
-                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
-                  >
-                    <span class="text-gray-500">STRATEGY:</span>
-                    <span class="text-secondary">Crypto Ichimoku</span>
-                  </div>
-                  <div
-                    class="flex justify-between items-center border-b border-dashed border-gray-300 dark:border-gray-700 pb-1"
-                  >
-                    <span class="text-gray-500">CONFIDENCE:</span>
-                    <div class="flex items-center gap-2">
-                      <div
-                        class="w-24 h-2 bg-gray-800 rounded-full overflow-hidden"
-                      >
-                        <div
-                          class="h-full bg-secondary shadow-neon-cyan"
-                          style="width: 69.3%"
-                        ></div>
-                      </div>
-                      <span class="text-secondary font-bold">69.3%</span>
-                    </div>
-                  </div>
-                  <div
-                    class="flex justify-between border-b border-dashed border-gray-300 dark:border-gray-700 pb-1 pt-2"
-                  >
-                    <span class="text-gray-500">LOT SIZE:</span>
-                    <span class="text-warning font-bold">0.10 Lots</span>
-                  </div>
-                </div>
-                <div
-                  class="space-y-4 text-sm bg-gray-50 dark:bg-black/40 p-4 border border-gray-200 dark:border-gray-800"
-                >
-                  <div class="flex justify-between">
-                    <span class="text-gray-500">ENTRY PRICE:</span>
-                    <span class="text-black dark:text-white">3095.42</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-danger font-bold">STOP LOSS:</span>
-                    <span class="text-danger">3103.35</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-primary font-bold">TAKE PROFIT:</span>
-                    <span class="text-primary">3084.43</span>
-                  </div>
-                  <div
-                    class="mt-4 pt-4 border-t border-gray-700 grid grid-cols-2 gap-4"
-                  >
-                    <div>
-                      <div class="text-[10px] text-gray-500">MAX RISK (SL)</div>
-                      <div class="text-danger font-bold">-R13.14</div>
-                    </div>
-                    <div class="text-right">
-                      <div class="text-[10px] text-gray-500">
-                        EST PROFIT (TP)
-                      </div>
-                      <div class="text-primary font-bold">+R18.21</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div
-                class="mt-6 flex flex-col sm:flex-row gap-4 pt-4 border-t border-dashed border-gray-700"
-              >
-                <div
-                  class="flex-1 bg-black/50 p-2 border border-gray-700 text-xs text-gray-400 flex items-center"
-                >
-                  <span class="material-icons text-sm mr-2 animate-spin"
-                    >sync</span
-                  >
-                  Executing trade via MetaTrader 5 bridge...
-                </div>
-                <div class="flex gap-2">
-                  <button
-                    class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 border border-gray-600 text-sm uppercase transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    class="bg-danger hover:bg-red-600 text-white px-6 py-2 border border-danger shadow-neon-red text-sm font-bold uppercase transition-all"
-                  >
-                    Force Close
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div> -->
-
           <div
             class="bg-white dark:bg-panel-dark border border-gray-200 dark:border-border-dark p-6 relative"
           >
@@ -405,7 +281,7 @@
           </div>
 
           <div
-            class="bg-[#050505] border border-gray-800 p-4 text-xs overflow-hidden h-[300px] flex flex-col"
+            class="bg-background-dark border border-gray-800 p-4 text-xs overflow-hidden h-75 flex flex-col"
           >
             <div
               class="flex justify-between items-center mb-2 pb-2 border-b border-gray-800"
@@ -461,13 +337,5 @@
       </p>
       <p class="mt-1">WARNING: Trading involves substantial risk of loss.</p>
     </footer>
-
-    <script>
-      // Set footer year dynamically
-      (function () {
-        const el = document.getElementById("footer-year");
-        if (el) el.textContent = new Date().getFullYear();
-      })();
-    </script>
   </body>
 </html>
