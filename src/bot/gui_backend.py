@@ -1,29 +1,27 @@
 import asyncio
 import eel
 import math
-import MetaTrader5 as mt5
 import os
 import sys
 import time
 import threading
 import uuid
 from datetime import datetime, timedelta
-from sqlalchemy import and_, select, func
 
 from src.data.provider import DataProvider
-from src.database.manager import DatabaseManager, TradeResult
+from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
 from src.utils.logger import setup_logging
 from src.config import (
     CANDLE_LIMIT,
-    CRYPTO_SYMBOLS,
-    FOREX_SYMBOLS,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_RISK_PCT,
+    FALLBACK_CRYPTO,
+    FALLBACK_FOREX,
+    MAX_SIGNALS_PER_SCAN,
     SCAN_INTERVAL_CRYPTO,
     SCAN_INTERVAL_FOREX,
     TIMEFRAME,
-    MAX_SIGNALS_PER_SCAN,
-    MIN_CONFIDENCE,
-    RISK_PER_TRADE_PCT,
     VERSION,
 )
 
@@ -34,23 +32,6 @@ logger = setup_logging()
 bot_instance = None
 _background_loop = None
 _loop_thread = None
-
-
-def _safe_get_result(future, timeout=3.0):
-    try:
-        return future.result(timeout=timeout)
-    except (asyncio.TimeoutError, TimeoutError):
-        # Log warning but don't crash
-        return None
-    except Exception as e:
-        logger.error(f"Async Task Error: {e}")
-        return None
-
-
-def _start_background_loop(loop):
-    """Runs the asyncio loop forever in a separate thread."""
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
 
 
 def _get_persistent_loop():
@@ -79,14 +60,21 @@ def _read_recent_logs(limit=20):
         return []
 
 
-def shutdown_bot():
-    """Stops the running bot instance gracefully."""
-    global bot_instance
-    if bot_instance:
-        bot_instance.is_running = False
-        if bot_instance.provider:
-            # We can't await here easily, but we can signal the loop to stop
-            pass
+def _safe_get_result(future, timeout=3.0):
+    try:
+        return future.result(timeout=timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        # Log warning but don't crash
+        return None
+    except Exception as e:
+        logger.error(f"Async Task Error: {e}")
+        return None
+
+
+def _start_background_loop(loop):
+    """Runs the asyncio loop forever in a separate thread."""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
 
 class NexubotGUI:
@@ -94,11 +82,21 @@ class NexubotGUI:
         self.provider = DataProvider()
         self.db = DatabaseManager()
         self.ai_engine = AITradingEngine()
+
         self.is_running = False
         self.execution_mode = "SIGNAL_ONLY"
         self.session_start = time.time()
-        self.session_stats = {"wins": 0, "losses": 0, "total": 0, "pnl": 0.0}
+        self.session_id = f"SESSION_{int(time.time())}"
+        self.session_stats = {
+            "wins": 0,
+            "losses": 0,
+            "total": 0,
+            "pnl": 0.0,
+            "start": datetime.now(),
+        }
         self.active_signals = []
+        self.active_crypto_list = []
+        self.active_forex_list = []
         self.monitored_tasks = {}
         self.settings = {}
 
@@ -106,7 +104,7 @@ class NexubotGUI:
         """Pushes settings to the AI Engine instance."""
         self.ai_engine.update_config(self.settings)
 
-    def _calculate_offline_result(self, symbol: str, signal: dict, start_time: float, klines):
+    def _calculate_offline_result(self, symbol: str, signal: dict, start_time: float, klines: list):
         """Synchronous CPU-bound calculation logic for offline verification."""
         if not klines:
             return None, 0.0, False
@@ -244,44 +242,16 @@ class NexubotGUI:
                     self.verify_trade_realtime(symbol, signal, resume_start_time=start_time)
                 )
 
-    async def _execute_trade_on_mt5(self, signal: dict):
-        """Places the trade on MT5 if in FULL_AUTO mode."""
-        if not self.provider.connected:
-            return False
+    async def _refresh_market_watch_symbols(self):
+        """Fetches current Market Watch from Provider."""
+        data = await self.provider.get_dynamic_symbols()
+        self.active_crypto_list = data.get("crypto", [])
+        self.active_forex_list = data.get("forex", [])
 
-        symbol = signal["symbol"]
-        action = mt5.TRADE_ACTION_DEAL
-        type_order = mt5.ORDER_TYPE_BUY if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL
-
-        # Handle Limit Orders
-        if signal.get("order_type") == "LIMIT":
-            action = mt5.TRADE_ACTION_PENDING
-            type_order = mt5.ORDER_TYPE_BUY_LIMIT if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
-
-        request = {
-            "action": action,
-            "symbol": symbol,
-            "volume": signal["lot_size"],
-            "type": type_order,
-            "price": signal["price"],
-            "sl": signal["sl"],
-            "tp": signal["tp"],
-            "deviation": 10,
-            "magic": 123456,
-            "comment": f"Nexubot {signal['strategy']}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-
-        result = await asyncio.to_thread(mt5.order_send, request)
-
-        if result and result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.info(f"✅ AUTOMATION: Trade Placed on MT5 for {symbol} ({signal['lot_size']} lots)")
-            return True
-        else:
-            err = result.comment if result else "Unknown Error"
-            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err}")
-            return False
+        if not self.active_crypto_list and not self.active_forex_list:
+            # Fallback if MT5 returns nothing
+            self.active_crypto_list = list(FALLBACK_CRYPTO)
+            self.active_forex_list = list(FALLBACK_FOREX)
 
     def _update_signal_status(self, symbol, status):
         """Helper to update status text in UI list"""
@@ -317,38 +287,34 @@ class NexubotGUI:
 
         running_pnl = 0.0
 
-        if self.db.engine:
-            async with self.db.async_session() as session:
-                stmt = select(TradeResult).order_by(TradeResult.timestamp.asc())
-                result = await session.execute(stmt)
-                all_trades = result.scalars().all()
+        all_trades = await self.db.get_dashboard_chart_data()
 
-                for t in all_trades:
-                    total_pnl += t.pnl_zar
-                    if t.result == 1:
-                        wins += 1
-                    else:
-                        losses += 1
+        for t in all_trades:
+            total_pnl += t.pnl_zar
+            if t.result == 1:
+                wins += 1
+            else:
+                losses += 1
 
-                    # Chart Data Construction
-                    running_pnl += t.pnl_zar
-                    dt_obj = datetime.fromtimestamp(t.timestamp)
-                    chart_labels.append(dt_obj.strftime("%d %b"))
-                    chart_balance.append(round(running_pnl, 2))
+            # Chart Data Construction
+            running_pnl += t.pnl_zar
+            dt_obj = datetime.fromtimestamp(t.timestamp)
+            chart_labels.append(dt_obj.strftime("%d %b"))
+            chart_balance.append(round(running_pnl, 2))
 
-                for t in reversed(all_trades[-5:]):
-                    recent_trades_data.append(
-                        {
-                            "time": datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S"),
-                            "symbol": t.symbol,
-                            "signal_type": t.signal_type,
-                            "entry": float(t.entry_price),
-                            "exit": float(t.exit_price),
-                            "size": getattr(t, "size", 0.01),
-                            "pnl": float(t.pnl_zar),
-                            "result": int(t.result),
-                        }
-                    )
+        for t in reversed(all_trades[-5:]):
+            recent_trades_data.append(
+                {
+                    "time": datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S"),
+                    "symbol": t.symbol,
+                    "signal_type": t.signal_type,
+                    "entry": float(t.entry_price),
+                    "exit": float(t.exit_price),
+                    "size": getattr(t, "size", 0.01),
+                    "pnl": float(t.pnl_zar),
+                    "result": int(t.result),
+                }
+            )
 
         total_trades = wins + losses
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
@@ -397,115 +363,43 @@ class NexubotGUI:
 
     async def get_trade_history(self, filters=None):
         """Fetches filtered trade history and global lifetime stats."""
-        if not self.db.engine:
-            return {}
+        alltime_trades = self.db.get_alltime_trade_history(self.provider, filters)
 
-        page = 1
-        limit = 10
-        if filters:
-            page = filters.get("page", 1)
-            limit = filters.get("limit", 10)
+        total_trades = alltime_trades["total_trades"] or 0
+        lifetime_pnl = alltime_trades["lifetime_pnl"] or 0.0
+        total_wins = alltime_trades["total_wins"] or 0
+        lifetime_wr = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
 
-        async with self.db.async_session() as session:
-            # 1. Base Query
-            query = select(TradeResult).order_by(TradeResult.timestamp.desc())
-
-            # 2. Apply Filters
-            conditions = []
-            if filters:
-                if filters.get("startDate"):
-                    try:
-                        start_ts = datetime.strptime(filters["startDate"], "%Y-%m-%d").timestamp()
-                        conditions.append(TradeResult.timestamp >= start_ts)
-                    except:
-                        pass
-                if filters.get("endDate"):
-                    try:
-                        end_ts = datetime.strptime(filters["endDate"], "%Y-%m-%d").timestamp() + 86400
-                        conditions.append(TradeResult.timestamp <= end_ts)
-                    except:
-                        pass
-                if filters.get("range"):
-                    now = time.time()
-                    if filters["range"] == "24H":
-                        conditions.append(TradeResult.timestamp >= now - 86400)
-                    if filters["range"] == "7D":
-                        conditions.append(TradeResult.timestamp >= now - 604800)
-                    if filters["range"] == "30D":
-                        conditions.append(TradeResult.timestamp >= now - 2592000)
-
-                outcome = filters.get("outcome", "ALL")
-                if outcome == "WINS":
-                    conditions.append(TradeResult.result == 1)
-                elif outcome == "LOSSES":
-                    conditions.append(TradeResult.result == 0)
-
-                assets = filters.get("assets", [])
-                if assets and "ALL" not in assets:
-                    symbol_conditions = []
-                    if "CRYPTO" in assets:
-                        symbol_conditions.extend(CRYPTO_SYMBOLS)
-                    if "FOREX" in assets:
-                        symbol_conditions.extend(FOREX_SYMBOLS)
-                    if symbol_conditions:
-                        conditions.append(TradeResult.symbol.in_(symbol_conditions))
-
-            if conditions:
-                query = query.where(and_(*conditions))
-
-            # 3. Get Total Count (for Pagination)
-            count_query = select(func.count()).select_from(query.subquery())
-            total_result = await session.execute(count_query)
-            total_records = total_result.scalar()
-
-            # 4. Apply Pagination
-            query = query.offset((page - 1) * limit).limit(limit)
-
-            result = await session.execute(query)
-            trades = result.scalars().all()
-
-            # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
-            stats_query = select(
-                func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
+        table_data = []
+        for t in alltime_trades["trades"]:
+            table_data.append(
+                {
+                    "time": datetime.fromtimestamp(t.timestamp).strftime("%Y-%m-%d %H:%M"),
+                    "symbol": t.symbol,
+                    "signal_type": t.signal_type,
+                    "entry": float(t.entry_price),
+                    "exit": float(t.exit_price),
+                    "pnl": float(t.pnl_zar),
+                    "result": int(t.result),
+                    "confidence": float(t.confidence),
+                    "size": getattr(t, "size", 0.01),
+                }
             )
-            stats_res = await session.execute(stats_query)
-            total_trades, lifetime_pnl, total_wins = stats_res.one()
 
-            total_trades = total_trades or 0
-            lifetime_pnl = lifetime_pnl or 0.0
-            total_wins = total_wins or 0
-            lifetime_wr = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
-
-            table_data = []
-            for t in trades:
-                table_data.append(
-                    {
-                        "time": datetime.fromtimestamp(t.timestamp).strftime("%Y-%m-%d %H:%M"),
-                        "symbol": t.symbol,
-                        "signal_type": t.signal_type,
-                        "entry": float(t.entry_price),
-                        "exit": float(t.exit_price),
-                        "pnl": float(t.pnl_zar),
-                        "result": int(t.result),
-                        "confidence": float(t.confidence),
-                        "size": getattr(t, "size", 0.01),
-                    }
-                )
-
-            return {
-                "stats": {
-                    "balance": self.ai_engine.user_balance_zar,
-                    "lifetime_wr": lifetime_wr,
-                    "total_trades": total_trades or 0,
-                    "lifetime_pnl": lifetime_pnl or 0,
-                },
-                "history": table_data,
-                "pagination": {
-                    "current": page,
-                    "total_pages": math.ceil(total_records / limit),
-                    "total_records": total_records,
-                },
-            }
+        return {
+            "stats": {
+                "balance": self.ai_engine.user_balance_zar,
+                "lifetime_wr": lifetime_wr,
+                "total_trades": total_trades or 0,
+                "lifetime_pnl": lifetime_pnl or 0,
+            },
+            "history": table_data,
+            "pagination": {
+                "current": alltime_trades["page"],
+                "total_pages": math.ceil(alltime_trades["total_records"] / alltime_trades["limit"]),
+                "total_records": alltime_trades["total_records"],
+            },
+        }
 
     async def initialize_connection(self, login_id, server, password):
         """
@@ -556,15 +450,21 @@ class NexubotGUI:
     async def initialize_settings(self):
         """Load settings from DB or create defaults."""
         await self.db.init_database()
+        # Cleanup database
+        await self.db.cleanup_db()
         db_settings = await self.db.get_settings()
+
+        if not db_settings or not db_settings["login"]:
+            logger.warning("⚠️ No Login Details Found. Waiting for user input via GUI...")
+            return
 
         default_settings = {
             "login": "",
             "server": "MetaQuotes-Demo",
             "password": "",
             "lot_size": 0.10,
-            "risk": RISK_PER_TRADE_PCT,
-            "confidence": MIN_CONFIDENCE,
+            "risk": DEFAULT_RISK_PCT,
+            "confidence": DEFAULT_MIN_CONFIDENCE,
             "high_vol": False,
         }
 
@@ -658,7 +558,7 @@ class NexubotGUI:
                         self.active_signals.insert(0, signal)
 
                         if self.execution_mode == "FULL_AUTO":
-                            placed = await self._execute_trade_on_mt5(signal)
+                            placed = await self.provider.execute_trade_on_mt5(signal)
                             if placed:
                                 signal["status"] = "PLACED"
                         self.monitored_tasks[sym] = asyncio.create_task(self.verify_trade_realtime(sym, signal))
@@ -683,12 +583,19 @@ class NexubotGUI:
         """Background loop to scan markets."""
         logger.info("🚀 Scanner Loop Initiated...")
 
-        active_crypto = list(CRYPTO_SYMBOLS)
-        active_forex = list(FOREX_SYMBOLS)
+        active_crypto = []
+        active_forex = []
 
         last_crypto = 0
         last_forex = 0
         last_sort_time = 0
+
+        await self._refresh_market_watch_symbols()
+
+        if not self.active_crypto_list and not self.active_forex_list:
+            logger.warning("⚠️ Market Watch empty. Using Fallback Symbols.")
+            self.active_crypto_list = list(FALLBACK_CRYPTO)
+            self.active_forex_list = list(FALLBACK_FOREX)
 
         while self.is_running:
             # Fail-safe: Check if MT5 is actually alive
@@ -707,6 +614,8 @@ class NexubotGUI:
             # 2. Sort Pairs every 15 mins (Logic from console.py)
             if now - last_sort_time > 900:
                 logger.info("📊 Re-ranking pairs by volatility...")
+                await self._refresh_market_watch_symbols()
+
                 active_crypto = await self.sort_pairs(active_crypto)
                 active_forex = await self.sort_pairs(active_forex)
                 last_sort_time = now
@@ -715,11 +624,11 @@ class NexubotGUI:
             tasks = []
 
             if now - last_crypto > SCAN_INTERVAL_CRYPTO:
-                tasks.append(self.process_batch(active_crypto))
+                tasks.append(self.process_batch(self.active_crypto_list[:5]))
                 last_crypto = now
 
             if now - last_forex > SCAN_INTERVAL_FOREX:
-                tasks.append(self.process_batch(active_forex))
+                tasks.append(self.process_batch(self.active_forex_list[:10]))
                 last_forex = now
 
             if tasks:
@@ -740,7 +649,7 @@ class NexubotGUI:
             # Quick fetch
             k = await self.provider.fetch_klines(sym, TIMEFRAME, 100)
             if k:
-                df = self.ai_engine._prepare_data(k, heavy=False)
+                df = self.ai_engine.prepare_data(k, heavy=False)
                 if df is not None:
                     data_map[sym] = df
 
@@ -758,6 +667,9 @@ class NexubotGUI:
             task.cancel()
         self.monitored_tasks.clear()
         self.active_signals.clear()
+
+        await self.db.log_session(self.session_id, self.session_stats["start"].timestamp(), self.session_stats)
+        await self.db.close()
 
         # Close MT5 connection
         await self.provider.shutdown()
@@ -939,8 +851,6 @@ class NexubotGUI:
 
 
 # --- Expose Functions to JavaScript ---
-
-
 @eel.expose
 def attempt_login(login_id, server, password):
     """Called from login.html when user clicks 'Initialize Connection'"""
@@ -1079,6 +989,16 @@ def set_mode(is_auto):
     if bot_instance:
         mode = "FULL_AUTO" if is_auto else "SIGNAL_ONLY"
         bot_instance.set_execution_mode(mode)
+
+
+@eel.expose
+def shutdown_bot():
+    """Stops the running bot instance gracefully."""
+    global bot_instance
+    if bot_instance:
+        bot_instance.is_running = False
+        if bot_instance.provider:
+            pass
 
 
 @eel.expose

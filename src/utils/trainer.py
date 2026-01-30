@@ -1,8 +1,8 @@
 import os
-import time
 import logging
-from src.config import DATA_FILE, ENTRY_MODEL_FILE
+
 from src.engine.ml_engine import NeuralPredictor
+from src.config import DATA_FILE, ENTRY_MODEL_FILE
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.4.0"
+VERSION = "v1.5.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -24,22 +24,20 @@ MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe"
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ---------------------------------------------------------
-# MARKET SELECTION
+# MARKET SELECTION (Used if MT5 Market Watch is empty)
 # ---------------------------------------------------------
-CRYPTO_SYMBOLS: list[str] = [
+FALLBACK_CRYPTO: list[str] = [
     "BTCUSDm",
     "ETHUSDm",
     "BNBUSDm",
     "XRPUSDm",
     "SOLUSDm",
 ]
+FALLBACK_FOREX: list[str] = ["GBPJPYm", "USDJPYm", "EURUSDm", "AUDUSDm", "XAUUSDm"]
 
-# slow scan (credit conservation)
-FOREX_SYMBOLS: list[str] = ["GBPJPYm", "USDJPYm", "EURUSDm", "AUDUSDm", "XAUUSDm"]
-
-# Combined for internal use
-ALL_SYMBOLS = CRYPTO_SYMBOLS + FOREX_SYMBOLS
-HIGH_RISK_SYMBOLS: list[str] = ["XRPUSDm", "SOLUSDm", "XAUUSDm", "GBPJPYm"]
+# High Volatility assets (Gold, Indices, Volatile Crypto)
+# Used to gate trades based on the "High Volatility" toggle
+HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "NAS", "US30", "GER30", "JPY"]
 
 # ---------------------------------------------------------
 # SESSION & TIME FILTERS (SAST)
@@ -61,7 +59,7 @@ SESSION_CONFIG = {
 # ---------------------------------------------------------
 TIMEFRAME = "M15"
 CANDLE_LIMIT = 500
-MIN_CONFIDENCE = 65.0
+DEFAULT_MIN_CONFIDENCE = 75.0
 CHOP_THRESHOLD_TREND = 38.2
 CHOP_THRESHOLD_RANGE = 61.8
 
@@ -69,8 +67,8 @@ CHOP_THRESHOLD_RANGE = 61.8
 # RISK MANAGEMENT (ZAR ACCOUNT)
 # ---------------------------------------------------------
 DEFAULT_BALANCE_ZAR = 500.0
-RISK_PER_TRADE_PCT = 2.0
-MAX_LOT_SIZE = 0.5
+DEFAULT_RISK_PCT = 2.0
+DEFAULT_MAX_LOT = 0.1
 
 # Scanner Timing
 SCAN_INTERVAL_CRYPTO = 30
@@ -88,8 +86,6 @@ ENTRY_MODEL_FILE = "nexubot_entry.keras"
 EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
 DATA_FILE = "training_data.csv"
-LEGACY_ENTRY = "nexubot_entry.h5"
-LEGACY_EXIT = "nexubot_exit.h5"
 
 FEATURE_COLS = [
     "rsi",
@@ -128,7 +124,5 @@ def get_account_risk_caps(balance: float) -> float:
         return 4.0
     elif balance < 100000:
         return 3.0
-    elif balance < 1000000:
-        return 2.0
     else:
-        return 1.5
+        return 2.0

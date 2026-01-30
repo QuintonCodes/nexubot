@@ -17,8 +17,6 @@ from src.config import (
     ENTRY_MODEL_FILE,
     EXIT_MODEL_FILE,
     FEATURE_COLS,
-    LEGACY_ENTRY,
-    LEGACY_EXIT,
     SCALER_FILE,
 )
 
@@ -37,20 +35,7 @@ class NeuralPredictor:
         self.scaler = None
 
         if auto_load:
-            self._cleanup_legacy()
             self._load_artifacts()
-
-    def _cleanup_legacy(self):
-        """Removes old .h5 files to prevent confusion."""
-        try:
-            if os.path.exists(LEGACY_ENTRY):
-                os.remove(LEGACY_ENTRY)
-                logger.info("🗑️ Removed legacy entry model (.h5)")
-            if os.path.exists(LEGACY_EXIT):
-                os.remove(LEGACY_EXIT)
-                logger.info("🗑️ Removed legacy exit model (.h5)")
-        except Exception:
-            pass
 
     def _delete_artifacts(self):
         """Deletes existing model and scaler files."""

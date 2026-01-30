@@ -1,81 +1,67 @@
-import asyncio
+import eel
 import os
 import sys
+import time
 import warnings
 
-# Ensure the src directory is in the Python path
+# --- 1. Filter np.object Warning ---
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*np.object.*")
+
+# Ensure 'src' is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
-# Filter out the specific Keras/NumPy warning
-warnings.filterwarnings("ignore", category=FutureWarning, module="keras.src.export.tf2onnx_lib")
-
-# Import the Bot class from the refactored structure
-from src.bot.console import NexubotConsole
+from src.bot.gui_backend import (
+    attempt_login,
+    close_app,
+    fetch_dashboard_update,
+    fetch_signal_updates,
+    fetch_trade_history,
+    force_close,
+    get_user_settings,
+    save_settings,
+    set_mode,
+    shutdown_bot,
+    stop_and_reset,
+)
 from src.utils.logger import setup_logging
-from src.utils.backfill import backfill_data
-from src.config import DATA_FILE
 
-# Initialize logging
-logger = setup_logging()
+setup_logging()
 
 
-async def check_and_run_backfill():
+def on_close(page, sockets):
     """
-    Checks if training data exists. If not, runs backfill automatically.
+    Modified callback to prevent shutdown during page redirection.
     """
-    needs_backfill = False
+    time.sleep(1)
 
-    if not os.path.exists(DATA_FILE):
-        needs_backfill = True
-    else:
-        # Check if file is empty or too small (just header)
-        try:
-            with open(DATA_FILE, "r") as f:
-                lines = f.readlines()
-                if len(lines) < 50:
-                    needs_backfill = True
-        except Exception:
-            needs_backfill = True
-
-    if needs_backfill:
-        print("\n⚠️ No training data found (or file is empty).")
-        try:
-            await backfill_data()
-        except Exception as e:
-            print(f"❌ Backfill Failed: {e}")
-            logger.error(f"Backfill failed: {e}")
+    if not sockets:
+        print("❌ Final window closed. Shutting down Nexubot...")
+        sys.exit(0)
+        shutdown_bot()
+        # Force kill process to prevent hanging threads
+        os._exit(0)
 
 
-async def main():
-    """Main function to run the Nexubot application"""
-    # 1. Auto-Backfill Check
-    await check_and_run_backfill()
+def start_app():
+    # Point to the web folder
+    eel.init("web")
+    print("🚀 Starting Nexubot GUI...")
 
-    # 2. Start Bot
-    bot = None
+    # Start the app
     try:
-        bot = NexubotConsole()
-        await bot.start()
-    except KeyboardInterrupt:
-        logger.info("\nShutting down...")
-        print("\n👋 User requested shutdown.")
-    except asyncio.CancelledError:
-        logger.info("\nTasks cancelled. Shutting down...")
+        eel.start(
+            "index.html",
+            size=(1280, 720),
+            position=(100, 100),
+            close_callback=on_close,
+            cmdline_args=["--disable-http-cache"],
+        )
+    except (SystemExit, KeyboardInterrupt):
+        pass
     except Exception as e:
-        logger.exception(f"Fatal error in main loop: {e}")
-        print(f"❌ Fatal Error: {e}")
-
-    finally:
-        if bot:
-            await bot.stop()
-            print("✅ Nexubot stopped successfully!")
+        print(f"Critical Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # Catch the final interrupt if it bubbles up from asyncio.run
-        pass
+    start_app()

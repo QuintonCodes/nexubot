@@ -1,10 +1,9 @@
 import asyncio
 import logging
 import math
-import os
 import pandas as pd
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
@@ -18,13 +17,11 @@ from src.utils.trainer import ModelTrainer
 from src.config import (
     CHOP_THRESHOLD_TREND,
     CHOP_THRESHOLD_RANGE,
-    CRYPTO_SYMBOLS,
-    FOREX_SYMBOLS,
-    HIGH_RISK_SYMBOLS,
-    MAX_LOT_SIZE,
-    MIN_CONFIDENCE,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MAX_LOT,
+    DEFAULT_RISK_PCT,
+    HIGH_VOLATILITY_IDENTIFIERS,
     PAIR_SIGNAL_COOLDOWN,
-    RISK_PER_TRADE_PCT,
     SESSION_CONFIG,
     get_account_risk_caps,
 )
@@ -48,32 +45,15 @@ class AITradingEngine:
         self.active_features = {}
         self.db_manager = None
         self.htf_cache = {}
-        self.last_news_load_time = 0
         self.low_vol_candidates = {}
-        self.news_blocks = self._load_news_blocks()
         self.signal_history = {}
         self.user_balance_zar = 0.0
 
-        # --- DYNAMIC CONFIGURATION (Overridable) ---
-        self.risk_pct = RISK_PER_TRADE_PCT
-        self.max_lot = MAX_LOT_SIZE
-        self.min_confidence = MIN_CONFIDENCE
-        self.allow_high_volatility = False  # Default to False for safety
-
-    def update_config(self, settings: Dict):
-        """Updates engine parameters dynamically."""
-        if "risk" in settings:
-            self.risk_pct = float(settings["risk"])
-        if "lot_size" in settings:
-            self.max_lot = float(settings["lot_size"])
-        if "confidence" in settings:
-            self.min_confidence = float(settings["confidence"])
-        if "high_vol" in settings:
-            self.allow_high_volatility = bool(settings["high_vol"])
-
-        logger.info(
-            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}"
-        )
+        # Dynamic Configuration
+        self.risk_pct = DEFAULT_RISK_PCT
+        self.max_lot = DEFAULT_MAX_LOT
+        self.min_confidence = DEFAULT_MIN_CONFIDENCE
+        self.allow_high_volatility = False
 
     async def _adjust_confidence(
         self,
@@ -86,7 +66,7 @@ class AITradingEngine:
         """
         Calculates realistic confidence score.
         """
-        base_conf = min(signal["confidence"], MIN_CONFIDENCE)
+        base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
         # 1. Trend Alignment
         trend_bonus = 0
@@ -114,7 +94,7 @@ class AITradingEngine:
         # 4. Volatility Penalty
         vol_penalty = -10 if volatility_ratio > 1.5 else (-20 if volatility_ratio > 2.0 else 0)
 
-        # --- FINAL CALCULATION ---
+        # Final Calculation
         # Base (Strategy) + Trend + History + AI
         final_conf = base_conf + trend_bonus + history_factor + nn_factor + vol_penalty
 
@@ -133,8 +113,7 @@ class AITradingEngine:
         if self.user_balance_zar <= 0:
             return None
 
-        ask = tick.ask
-        bid = tick.bid
+        ask, bid = tick.ask, tick.bid
         point = info["point"]
         tick_value = info.get("trade_tick_value", 0)
         min_vol = info.get("min_vol", 0.01)
@@ -143,12 +122,10 @@ class AITradingEngine:
         digits = info.get("digits", 5)
         atr = float(curr["atr"])
 
-        # --- 1. SMART ENTRY LOGIC ---
+        # Entry Price Determination
         current_market_price = ask if signal["direction"] == "LONG" else bid
         order_type = signal.get("order_type", "MARKET")
         entry_price = signal.get("price", current_market_price)
-
-        # Determine Order Type
         if order_type == "MARKET":
             entry_price = current_market_price
 
@@ -159,7 +136,7 @@ class AITradingEngine:
             logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
             return None
 
-        # --- GHOST ORDER LOGIC ---
+        # Ghost Order Logic
         strategy_name = signal.get("strategy", "").lower()
         is_momentum = any(x in strategy_name for x in ["breakout", "flow", "ichimoku"])
 
@@ -173,16 +150,18 @@ class AITradingEngine:
                 else:
                     entry_price = current_market_price + ghost_pips
 
-        # --- 2. TP / SL CALCULATION ---
-        sl_multiplier = 0.75 if "XAU" in symbol else 1.0
+        # Dynamic TP / SL calculation
+        sl_multiplier = 1.0
+        if self._is_high_volatility_symbol(symbol):
+            sl_multiplier = 1.2
+
         sl_dist = atr * sl_multiplier
-        min_dist = point * 50
-        sl_dist = max(sl_dist, min_dist)
+        sl_dist = max(sl_dist, point * 50)
 
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
             suggested_dist = abs(signal["suggested_sl"] - entry_price)
-            if (atr * 0.5) < suggested_dist < (atr * 3.0):
+            if (atr * 0.5) < suggested_dist < (atr * 4.0):
                 sl_dist = suggested_dist
 
         # Probability calibration hook
@@ -190,8 +169,15 @@ class AITradingEngine:
         pred_exit_atr = float(nn_result.get("pred_exit_atr", 2.0))
         pred_exit_atr = max(0.8, min(pred_exit_atr, 6.0))
 
-        # conservative TP based on predicted exit ATR but always at least 1.2x SL
-        tp_dist = max(atr * pred_exit_atr, sl_dist * 1.2)
+        # Risk-Based Reward Scaling:
+        # If user risks more (higher risk %), we should aim for higher rewards to justify it.
+        tp_multiplier = pred_exit_atr
+        if self.risk_pct > 3.0:
+            tp_multiplier = max(tp_multiplier, 3.0)
+
+        # Conservative TP based on predicted exit ATR but always at least 1.2x SL
+        tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
+
         rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
         expected_ev = prob * rr - (1.0 - prob)
 
@@ -226,7 +212,7 @@ class AITradingEngine:
             sl_price = ref_price + sl_dist
             tp_price = ref_price - tp_dist
 
-        # --- 3. RISK SIZING ---
+        # Risk sizing
         risk_mult = nn_result.get("risk_mult", 1.0) * kelly_factor
         if signal.get("is_shadow", False):
             risk_mult = min(risk_mult, 0.1)
@@ -240,7 +226,6 @@ class AITradingEngine:
         # Lot Sizing
         lots = target_risk_zar / risk_per_lot
 
-        # Round lots to exchange vol_step safely using floor to avoid over-risk
         try:
             steps = math.floor(lots / vol_step)
             lots = steps * vol_step
@@ -251,10 +236,10 @@ class AITradingEngine:
 
         actual_risk_zar = risk_per_lot * lots
 
-        # --- SAFETY CAP ---
+        # Safety Cap
         max_allowed_pct = get_account_risk_caps(self.user_balance_zar)
-        if risk_mult > 1.0:
-            max_allowed_pct *= risk_mult
+        if self.allow_high_volatility:
+            max_allowed_pct *= 1.5
 
         # Absolute hard cap in ZAR
         max_allowed_zar = self.user_balance_zar * (max_allowed_pct / 100.0)
@@ -268,27 +253,10 @@ class AITradingEngine:
 
             # Final check after reduction
             lots = round(lots, 2)
-            if lots <= min_vol and actual_risk_zar > max_allowed_zar:
-                emergency_cap_pct = 0.35 if "XAU" in symbol else 0.1
-                max_emergency_risk = self.user_balance_zar * emergency_cap_pct
-                if actual_risk_zar < max_emergency_risk:
-                    # Allow trade but log warning
-                    self._log_once(
-                        f"high_risk_{symbol}",
-                        f"⚠️ High Risk Accepted for {symbol}: R{actual_risk_zar:.2f} ({actual_risk_zar/self.user_balance_zar*100:.1f}%)",
-                    )
-                    pass
-                else:
-                    self._log_once(
-                        f"risk_{symbol}",
-                        f"Skipping {symbol}: Min Lot Risk (R{actual_risk_zar:.2f}) > 8% Safety Cap",
-                        logging.DEBUG,
-                    )
-                    return None
-            elif actual_risk_zar > (max_allowed_zar * 1.1):
+            if lots <= min_vol and actual_risk_zar > max_allowed_zar * 1.2:
                 self._log_once(
                     f"risk_{symbol}",
-                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) > Cap (R{max_allowed_zar:.2f})",
+                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) > Cap (R{max_allowed_zar * 1.2:.2f})",
                     logging.DEBUG,
                 )
                 return None
@@ -308,7 +276,7 @@ class AITradingEngine:
                 "tick_value": tick_value,
                 "point": point,
                 "atr": atr,
-                "is_high_risk": symbol in HIGH_RISK_SYMBOLS,
+                "is_high_risk": self._is_high_volatility_symbol(symbol),
                 "order_type": order_type,
             }
         )
@@ -316,44 +284,29 @@ class AITradingEngine:
 
     def _check_low_vol_candidates(self, symbol: str, curr: pd.Series) -> Optional[Dict]:
         """Checks if a previously rejected 'Low Vol' trade is now valid (Late Bloomer)."""
-        if symbol not in self.low_vol_candidates:
-            return None
+        if symbol in self.low_vol_candidates:
 
-        cached = self.low_vol_candidates[symbol]
-        # Expire after 15 mins
-        if (time.time() - cached["time"]) > 900:
-            del self.low_vol_candidates[symbol]
-            return None
+            cached = self.low_vol_candidates[symbol]
+            # Expire after 15 mins
+            if (time.time() - cached["time"]) > 900:
+                del self.low_vol_candidates[symbol]
+                return None
 
-        # Logic: If Volume is now strong AND price is still near original entry
-        vol_is_strong = curr["volume"] > curr["vol_sma"]
-        price_near_entry = abs(curr["close"] - cached["entry"]) < (curr["atr"] * 0.5)
+            # Logic: If Volume is now strong AND price is still near original entry
+            vol_is_strong = curr["volume"] > curr["vol_sma"]
+            price_near_entry = abs(curr["close"] - cached["entry"]) < (curr["atr"] * 0.5)
 
-        if vol_is_strong and price_near_entry:
-            logger.info(f"🌱 Late Bloomer Activated: {symbol} volume spike detected!")
-            del self.low_vol_candidates[symbol]
-            return cached["signal"]
+            if vol_is_strong and price_near_entry:
+                logger.info(f"🌱 Late Bloomer Activated: {symbol} volume spike detected!")
+                del self.low_vol_candidates[symbol]
+                return cached["signal"]
 
         return None
 
-    def _check_news_update(self):
-        """Checks for updates to news_block.txt every 5 minutes."""
-        now = time.time()
-        if now - self.last_news_load_time < 300:
-            return
-
-        if os.path.exists("news_block.txt"):
-            mtime = os.path.getmtime("news_block.txt")
-            if mtime > self.last_news_load_time:
-                self.news_blocks = self._load_news_blocks()
-                self.last_news_load_time = mtime
-                logger.info("📅 News blocks updated dynamically.")
-        else:
-            self.last_news_load_time = now
-
     async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> Literal["BULL", "BEAR", "FLAT"]:
         """Fetches H4 EMA trend."""
-        htf_tf = "4h" if symbol in FOREX_SYMBOLS else "1h"
+        symbol_info = provider.get_symbol_type(symbol)
+        htf_tf = "4h" if symbol_info == "FOREX" else "1h"
 
         # Cache Check
         now = time.time()
@@ -378,13 +331,9 @@ class AITradingEngine:
 
     def _get_session_status(self) -> Dict:
         """Returns allowed strategy types based on SAST time."""
-        # 1. News Block Check
-        if self._is_news_blocked():
-            return {"allow_trade": False, "reason": "High Impact News"}
-
         now = datetime.now()
         hour = now.hour
-        weekday = now.weekday()  # 0=Mon, 6=Sun
+        weekday = now.weekday()
 
         # Monday Morning Block (First 2 hours)
         if weekday == 0 and hour < 2:
@@ -409,34 +358,6 @@ class AITradingEngine:
 
         return {"allow_trade": True, "types": allowed_types}
 
-    def _load_news_blocks(self) -> List[Dict]:
-        """
-        Parses news_block.txt for blocked time ranges.
-        """
-        blocks = []
-        if not os.path.exists("news_block.txt"):
-            return blocks
-        try:
-            with open("news_block.txt", "r") as f:
-                for line in f:
-                    if "->" in line and not line.strip().startswith("#"):
-                        parts = line.split("#")[0].strip().split("->")
-                        if len(parts) == 2:
-                            try:
-                                start = datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M")
-                                end = datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M")
-
-                                # Add 30-minute safety buffer
-                                start_buffer = start - timedelta(minutes=30)
-                                end_buffer = end + timedelta(minutes=30)
-
-                                blocks.append({"start": start_buffer, "end": end_buffer})
-                            except ValueError:
-                                logger.warning(f"Invalid date format in news_block.txt: {line.strip()}")
-        except Exception as e:
-            logger.error(f"Failed to load news blocks: {e}")
-        return blocks
-
     def _log_once(self, key: str, message: str, level=logging.INFO):
         """Prevents log spamming for the same event within 5 minutes."""
         now = time.time()
@@ -447,63 +368,45 @@ class AITradingEngine:
         self._log_throttle[key] = now
         logger.log(level, message)
 
-    def _is_news_blocked(self) -> bool:
-        """
-        Checks if current time is inside a news block window (including buffers).
-        """
-        now = datetime.now()
-        for block in self.news_blocks:
-            if block["start"] <= now <= block["end"]:
+    def _is_high_volatility_symbol(self, symbol: str) -> bool:
+        """Checks if symbol is considered High Volatility."""
+        return any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
+
+    def _is_on_cooldown(self, symbol: str) -> bool:
+        """Checks if a symbol is on cooldown from last signal."""
+        if symbol in self.signal_history:
+            elapsed = time.time() - self.signal_history[symbol]
+            if elapsed < PAIR_SIGNAL_COOLDOWN:
                 return True
         return False
 
-    def _prepare_data(self, klines: List[Dict], heavy: bool = True) -> Optional[pd.DataFrame]:
-        """Prepares DataFrame with Indicators for Analysis."""
-        try:
-            df = pd.DataFrame(klines)
-            if df.empty:
-                return None
-            df = df.sort_values("time").reset_index(drop=True)
-
-            analyzer = TechnicalAnalyzer()
-            return analyzer.calculate_indicators(df, heavy=heavy)
-        except Exception as e:
-            logger.error(f"Data prep error: {e}")
-            return None
-
-    async def analyze_market(self, symbol: str, klines: List[Dict], provider: DataProvider) -> Optional[Dict]:
+    async def analyze_market(self, symbol: str, klines: list, provider: DataProvider) -> Optional[Dict]:
         """
         Main Analysis with step-by-step pipeline
         """
-        # Dynamic High Vol Check
-        if symbol in HIGH_RISK_SYMBOLS and not self.allow_high_volatility:
-            # Silent skip
+        # 1. Dynamic High Volatility Check
+        is_volatile_pair = self._is_high_volatility_symbol(symbol)
+        if is_volatile_pair and not self.allow_high_volatility:
             return None
 
-        # --- 1. Cooldown & Active states ---
-        # Check simple memory-based flags first to avoid expensive calls
-        if self.is_on_cooldown(symbol) or symbol in self.active_features:
+        # 2. Cooldown Checks
+        if self._is_on_cooldown(symbol) or symbol in self.active_features:
             return None
 
-        # --- 2. Session & News Filter ---
-        # Check static time blocks (CPU only)
-        if self._is_news_blocked():
-            self._log_once(f"news_static_{symbol}", f"Skipping {symbol}: 🔴 Static News Block Active")
-            return None
-
+        # 3. Session Info & Live News
         session_info = self._get_session_status()
         if not session_info["allow_trade"]:
             self._log_once("session_block", f"Skipping analysis: {session_info['reason']}")
             return None
 
-        # Check live news (Requires API/Network)
+        # News Check
         is_news_blocked = await provider.check_live_news_block(symbol, [])
         if is_news_blocked:
             self._log_once(f"news_{symbol}", f"Skipping {symbol}: 🔴 Live High-Impact News Detected")
             return None
 
-        # --- 3. Data Preparation & Integrity ---
-        df = await asyncio.to_thread(self._prepare_data, klines, True)
+        # 4. Data Preparation
+        df = await asyncio.to_thread(self.prepare_data, klines, True)
         if df is None:
             return None
         curr = df.iloc[-1]
@@ -512,43 +415,34 @@ class AITradingEngine:
         if (time.time() - curr["time"]) > 1800:
             return None
 
-        # --- 4. Basic Volatility & Spread ---
         # ATR Check
         if curr["atr"] <= 0:
-            self._log_once(f"atr_low_{symbol}", f"⏳ Initializing {symbol}: ATR is 0 (Waiting for more data)")
             return None
 
         avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
 
         # Volatility Spike Check
         if curr["atr"] > (avg_atr * 3):
-            self._log_once(f"vol_{symbol}", f"Skipping {symbol}: Extreme Volatility (ATR Spike)")
             self.signal_history[symbol] = time.time() + 1800  # 30 min ban
             return None
 
-        # Spread Check (Network Call)
+        # 5. Spread Check
         symbol_info = await provider.get_symbol_info(symbol)
         if not symbol_info:
             return None
+        symbol_type = provider.get_symbol_type(symbol)
         point = symbol_info.get("point", 0.00001)
-
-        # Filter: Spread > 90% of 14-period ATR
         spread_info = await provider.get_spread(symbol)
-        spread_points = spread_info.get("spread", 0.0)
-        spread_price = spread_points * point
+        spread_price = spread_info.get("spread", 0.0) * point
 
         if spread_price > (curr["atr"] * 0.9):
-            self._log_once(
-                f"spread_{symbol}",
-                f"Skipping {symbol}: Spread {spread_points:.0f}pts ({spread_price:.5f}) > 0.5 ATR ({curr['atr']:.5f})",
-                logging.DEBUG,
-            )
             return None
 
+        # 6. Analysis & Strategy
         volatility_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
         htf_trend = await self._get_htf_trend(symbol, provider)
 
-        # --- 5. Recovery Check (Late Bloomers / Loss Cooldown) ---
+        # Recover "Late Bloomer" if applicable
         late_signal = self._check_low_vol_candidates(symbol, curr)
         final_signal_candidate = None
         is_late_recovery = False
@@ -566,15 +460,13 @@ class AITradingEngine:
 
             # Check Loss Cooldown (Database)
             try:
-                if self.db_manager:
-                    is_loss = await self.db_manager.check_recent_loss(symbol)
-                    if is_loss:
-                        self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
-                        return None
-            except Exception:
+                if self.db_manager and await self.db_manager.check_recent_loss(symbol):
+                    self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
+                    return None
+            except:
                 pass
 
-        # --- 6. Technical Analysis & Context ---
+        # 7. Technical Analysis and Context
         rsi = curr["rsi"]
         stoch_k = curr.get("stoch_k", 50)
         chop_idx = curr["chop_idx"]
@@ -626,12 +518,12 @@ class AITradingEngine:
             elif near_resistance and overbought_condition:
                 context_bias = "SHORT_RANGE"
 
-        # --- 7. Strategy Routing & Signal Generation ---
+        # 8. Strategy Routing & Signal Generation
         fake_risk_penalty = 1.0  # Default
 
         if not is_late_recovery:
             strat_signal = None
-            if symbol in FOREX_SYMBOLS:
+            if symbol_type == "FOREX":
                 # BB Reversion
                 if market_regime == "RANGE" and curr["bb_slope"] < (curr["atr"] * 0.1):
                     strat_signal = self.strategy_analyzer._fx_bb_reversion(curr)
@@ -654,7 +546,7 @@ class AITradingEngine:
             else:
                 strat_signal = self.strategy_analyzer.analyze_crypto(curr, df, patterns)
 
-            # --- 8. Confluence & Conflict Checks ---
+            # 9. Confluence & Conflict Checks
             if strat_signal and pattern_signal:
                 if strat_signal["direction"] == pattern_signal["direction"]:
                     strat_signal["confidence"] += 10
@@ -683,8 +575,7 @@ class AITradingEngine:
         if not final_signal_candidate:
             return None
 
-        # --- 9. Signal Vetting (Structure & Crypto) ---
-        # We skip deep vetting for Late Bloomers as they are already vetted survivors
+        # 10. Signal Vetting (Structure & Crypto)
         if not is_late_recovery:
             penalty_score = 0
             is_reversion = "reversion" in final_signal_candidate["strategy"].lower()
@@ -700,17 +591,39 @@ class AITradingEngine:
                     penalty_score += 15
 
             # Bitcoin Correlation Veto
-            if symbol in CRYPTO_SYMBOLS and symbol != "BTCUSDm":
-                if "BTCUSDm" not in self.htf_cache:
-                    await self._get_htf_trend("BTCUSDm", provider)
+            if symbol_type == "CRYPTO" and "BTC" not in symbol:
+                btc_symbol = None
 
-                btc_trend_data = self.htf_cache.get("BTCUSDm")
-                if btc_trend_data:
-                    btc_trend = btc_trend_data["trend"]
-                    if btc_trend == "BEAR" and final_signal_candidate["direction"] == "LONG":
-                        penalty_score += 20
-                    if btc_trend == "BULL" and final_signal_candidate["direction"] == "SHORT":
-                        penalty_score += 20
+                # 1. Attempt to find the specific BTC symbol for this broker
+                for k in self.htf_cache.keys():
+                    if "BTC" in k and "USD" in k:
+                        btc_symbol = k
+                        break
+
+                # 2. If not found in cache, construct a guess based on the current symbol suffix
+                if not btc_symbol:
+                    if len(symbol) >= 3:
+                        guess = "BTC" + symbol[3:]
+                        btc_symbol = guess
+
+                if btc_symbol:
+                    if btc_symbol not in self.htf_cache:
+                        await self._get_htf_trend(btc_symbol, provider)
+
+                    btc_trend_data = self.htf_cache.get(btc_symbol)
+                    if btc_trend_data:
+                        btc_trend = btc_trend_data["trend"]
+                        if btc_trend == "BEAR" and final_signal_candidate["direction"] == "LONG":
+                            penalty_score += 20
+                            self._log_once(
+                                f"veto_btc_{symbol}", f"⚠️ {symbol} Long penalized by Bearish Bitcoin ({btc_symbol})"
+                            )
+
+                        if btc_trend == "BULL" and final_signal_candidate["direction"] == "SHORT":
+                            penalty_score += 20
+                            self._log_once(
+                                f"veto_btc_{symbol}", f"⚠️ {symbol} Short penalized by Bullish Bitcoin ({btc_symbol})"
+                            )
 
             # Fakeout Detector
             breakout_detector = FakeBreakoutDetector()
@@ -728,13 +641,15 @@ class AITradingEngine:
                 else:
                     penalty_score += 25
             elif fake_analysis["risk_score"] >= 30:
-                fake_risk_penalty = 0.5
                 penalty_score += 10
 
             # Apply Penalties
             final_signal_candidate["confidence"] -= penalty_score
 
-        # --- 10. ML Prediction (Feature Extraction) ---
+        if final_signal_candidate["confidence"] < self.min_confidence:
+            return None
+
+        # 11. ML Prediction (Feature Extraction)
         now = datetime.now()
         recent_df = df.iloc[-60:]
         pivots = recent_df[recent_df["high"] == recent_df["high"].rolling(10, center=True).max()]["high"]
@@ -744,7 +659,7 @@ class AITradingEngine:
         range_len = curr["high"] - curr["low"]
         wick_ratio = (curr["high"] - curr["close"]) / range_len if range_len > 0 else 0.0
         dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
-        day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else now.weekday() / 6.0
+        day_norm_val = 0.0 if symbol_type == "CRYPTO" else now.weekday() / 6.0
 
         rolling_acc = 0.5  # Default neutral
         if self.db_manager:
@@ -790,7 +705,7 @@ class AITradingEngine:
         final_signal = await self._adjust_confidence(
             symbol, final_signal_candidate, nn_result["prob"], htf_trend, volatility_ratio
         )
-        if final_signal["confidence"] < MIN_CONFIDENCE and not is_shadow:
+        if final_signal["confidence"] < self.min_confidence and not is_shadow:
             return None
 
         # Apply Fakeout Penalty to Risk Multiplier
@@ -805,7 +720,7 @@ class AITradingEngine:
             "epochs": "50,000",
         }
 
-        # --- 11. Execution & Risk Sizing ---
+        # 12. Execution & Final Risk Sizing
         tick = await provider.get_current_tick(symbol)
         if not tick:
             return None
@@ -818,10 +733,19 @@ class AITradingEngine:
 
         return None
 
-    def is_on_cooldown(self, symbol: str) -> bool:
-        """Checks if a symbol is on cooldown from last signal."""
-        last_time = self.signal_history.get(symbol, 0)
-        return (time.time() - last_time) < PAIR_SIGNAL_COOLDOWN
+    def prepare_data(self, klines: list, heavy: bool = True) -> Optional[pd.DataFrame]:
+        """Prepares DataFrame with Indicators for Analysis."""
+        try:
+            df = pd.DataFrame(klines)
+            if df.empty:
+                return None
+            df = df.sort_values("time").reset_index(drop=True)
+
+            analyzer = TechnicalAnalyzer()
+            return analyzer.calculate_indicators(df, heavy=heavy)
+        except Exception as e:
+            logger.error(f"Data prep error: {e}")
+            return None
 
     def rank_symbols_by_volatility(self, symbols: List[str], data_map: Dict[str, pd.DataFrame]) -> List[str]:
         """
@@ -841,7 +765,9 @@ class AITradingEngine:
         return [s[0] for s in scored]
 
     def record_trade_outcome(self, symbol: str, won: bool, pnl: float, excursion: float = 0.0, is_shadow: bool = False):
-        """Called by Console after trade finishes."""
+        """Records a trade after it has been completed to update ML"""
+        logger.info(f"🏁 Trade Closed: {symbol} | PnL: {pnl} | Won: {won}")
+
         # Update Learning
         if is_shadow:
             logger.debug(f"👻 Shadow trade outcome ignored for training: {symbol}")
@@ -863,3 +789,18 @@ class AITradingEngine:
         """Sets user balance and database manager."""
         self.user_balance_zar = balance
         self.db_manager = db
+
+    def update_config(self, settings: dict):
+        """Updates engine parameters dynamically from GUI settings."""
+        if "risk" in settings:
+            self.risk_pct = float(settings["risk"])
+        if "lot_size" in settings:
+            self.max_lot = float(settings["lot_size"])
+        if "confidence" in settings:
+            self.min_confidence = float(settings["confidence"])
+        if "high_vol" in settings:
+            self.allow_high_volatility = bool(settings["high_vol"])
+
+        logger.info(
+            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}"
+        )

@@ -11,7 +11,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 from src.data.provider import DataProvider
 from src.analysis.indicators import TechnicalAnalyzer
 from src.engine.strategies import StrategyAnalyzer
-from src.config import ALL_SYMBOLS, CRYPTO_SYMBOLS, DATA_FILE, FOREX_SYMBOLS
+from src.config import FALLBACK_CRYPTO, DATA_FILE, FALLBACK_FOREX
 
 
 # Memory buffer for efficient writing
@@ -22,8 +22,30 @@ async def backfill_data():
     """Main backfill routine."""
     print("🚀 Starting Optimized Backfill...")
     provider = DataProvider()
-    if not await provider.initialize():
-        return
+
+    connected = await provider.initialize()
+
+    target_crypto = []
+    target_forex = []
+
+    if connected:
+        print("✅ Connected to MT5. Fetching User's Market Watch...")
+        dynamic_symbols = await provider.get_dynamic_symbols()
+
+        target_crypto = dynamic_symbols.get("crypto", [])
+        target_forex = dynamic_symbols.get("forex", [])
+
+        if not target_crypto and not target_forex:
+            print("⚠️ User Market Watch is empty. Using Fallback Lists.")
+
+    # Fallback Logic
+    if not target_crypto:
+        target_crypto = FALLBACK_CRYPTO
+    if not target_forex:
+        target_forex = FALLBACK_FOREX
+
+    all_symbols = target_crypto + target_forex
+    print(f"📊 Processing {len(all_symbols)} symbols: {all_symbols}")
     analyzer = StrategyAnalyzer()
 
     # Clear buffer
@@ -31,12 +53,11 @@ async def backfill_data():
 
     # Chunking for concurrency (Batch size 5)
     chunk_size = 5
-    for i in range(0, len(ALL_SYMBOLS), chunk_size):
-        chunk = ALL_SYMBOLS[i : i + chunk_size]
+    for i in range(0, len(all_symbols), chunk_size):
+        chunk = all_symbols[i : i + chunk_size]
         await asyncio.gather(*(process_symbol(sym, provider, analyzer) for sym in chunk))
 
     finalize_dataset()
-
     await provider.shutdown()
     print("🏁 Backfill Complete.")
 
@@ -114,7 +135,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
 
     # 2. Fetch Higher Timeframe (Trend)
     # Use H4 for Forex, H1 for Crypto
-    htf_tf = "4h" if symbol in FOREX_SYMBOLS else "1h"
+    htf_tf = "4h" if symbol in FALLBACK_FOREX else "1h"
     klines_htf = await provider.fetch_klines(symbol, htf_tf, 3000)
 
     if not klines_htf:
@@ -170,7 +191,8 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         dist_to_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
 
         curr_time = pd.to_datetime(curr["time"], unit="s")
-        day_norm_val = 0.0 if symbol in CRYPTO_SYMBOLS else curr_time.weekday() / 6.0
+        symbol_type = provider.get_symbol_type(symbol)
+        day_norm_val = 0.0 if symbol_type == "CRYPTO" or symbol in FALLBACK_CRYPTO else curr_time.weekday() / 6.0
 
         rolling_acc = 0.5  # Default neutral
 
@@ -203,7 +225,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
         # 2. Check Strategy
         signal = None
 
-        if symbol in FOREX_SYMBOLS:
+        if symbol_type == "FOREX" or symbol in FALLBACK_FOREX:
             signal = analyzer.analyze_forex(curr, df_merged.iloc[: i + 1], htf_trend_str, [])
         else:
             signal = analyzer.analyze_crypto(curr, df_merged.iloc[: i + 1], [])

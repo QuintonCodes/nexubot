@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
-from typing import Dict, List, Literal
+from typing import Dict, List
 
 
 class PatternRecognizer:
@@ -244,19 +244,17 @@ class PatternRecognizer:
         # 2. Continuation Patterns (Flags)
         patterns.extend(self._find_flags(df))
 
-        # 3. Consolidation Patterns (Triangles/Wedges) - NEW
+        # 3. Consolidation Patterns (Triangles/Wedges)
         patterns.extend(self._find_triangles_wedges(df))
 
         # Filter by Structure (The Step-by-Step Logic)
         filtered = []
         for p in patterns:
-            # If structure is BULL, we prefer LONG continuation or Reversal from Support
             if structure == "BULL":
                 if p["direction"] == "LONG":
                     p["confidence"] += 10  # Alignment bonus
                     filtered.append(p)
                 elif p["strategy"] == "Wedge" and p["direction"] == "SHORT":
-                    # Rising Wedge in Bull trend is valid reversal
                     filtered.append(p)
 
             elif structure == "BEAR":
@@ -264,7 +262,6 @@ class PatternRecognizer:
                     p["confidence"] += 10
                     filtered.append(p)
                 elif p["strategy"] == "Wedge" and p["direction"] == "LONG":
-                    # Falling Wedge in Bear trend is valid reversal
                     filtered.append(p)
             else:
                 # In Range, accept both
@@ -307,7 +304,6 @@ class PatternRecognizer:
         if lh and ll:
             return "BEAR"
         if (hh and ll) or (lh and hl):
-            # Broadening or compressing (Triangle/Range)
             return "RANGE"
 
         return "UNCLEAR"
@@ -356,9 +352,7 @@ class FakeBreakoutDetector:
             reasons.append("Range with Low Volume")
 
         # 5. Quick retracement after breakout (sign of trap)
-        # If a breakout is followed by a close back within previous range
         prev_range_high = df.iloc[-3]["high"] if len(df) >= 3 else prev["high"]
-        prev_range_low = df.iloc[-3]["low"] if len(df) >= 3 else prev["low"]
         if curr["high"] > prev_range_high and curr["close"] < prev_range_high:
             risk_score += 20
             reasons.append("Retrace After Breakout")

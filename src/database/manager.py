@@ -3,13 +3,16 @@ import logging
 import json
 import re
 import time
+from datetime import datetime
 from functools import wraps
-from sqlalchemy import select, desc, delete, text, func
+from sqlalchemy import and_, select, desc, delete, text, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
-from typing import List
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from typing import Dict, List
 
-from src.config import DATABASE_URL, LOSS_COOLDOWN_DURATION
+from src.data.provider import DataProvider
+from src.config import DATABASE_URL, FALLBACK_CRYPTO, FALLBACK_FOREX, LOSS_COOLDOWN_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,9 @@ def db_retry(retries=3, delay=1):
                             await asyncio.sleep(delay)
                             continue
                         logger.error(f"DB Error in {func.__name__}: {e}")
+                        break
+                    else:
+                        logger.error(f"DB Critical Error in {func.__name__}: {e}")
                         break
             # Return default empty values on failure
             if "get_total" in func.__name__ or "performance" in func.__name__:
@@ -165,6 +171,7 @@ class DatabaseManager:
         """Closes the database connection"""
         if self.engine:
             await self.engine.dispose()
+            logger.info("🔒 Database Connection Closed.")
 
     async def delete_active_trade(self, symbol: str):
         """Deletes an active trade from DB"""
@@ -193,19 +200,132 @@ class DatabaseManager:
             logger.error(f"Failed to fetch active trades: {e}")
             return []
 
+    async def get_alltime_trade_history(self, provider: DataProvider, filters=None) -> Dict:
+        """
+        Returns all time trading history with custom filter options
+        """
+        if not self.engine:
+            return {}
+
+        page = 1
+        limit = 10
+        if filters:
+            page = filters.get("page", 1)
+            limit = filters.get("limit", 10)
+
+        try:
+            async with self.async_session() as session:
+                # 1. Base Query
+                query = select(TradeResult).order_by(TradeResult.timestamp.desc())
+
+                # 2. Apply Filters
+                conditions = []
+                if filters:
+                    if filters.get("startDate"):
+                        try:
+                            start_ts = datetime.strptime(filters["startDate"], "%Y-%m-%d").timestamp()
+                            conditions.append(TradeResult.timestamp >= start_ts)
+                        except:
+                            pass
+                    if filters.get("endDate"):
+                        try:
+                            end_ts = datetime.strptime(filters["endDate"], "%Y-%m-%d").timestamp() + 86400
+                            conditions.append(TradeResult.timestamp <= end_ts)
+                        except:
+                            pass
+                    if filters.get("range"):
+                        now = time.time()
+                        if filters["range"] == "24H":
+                            conditions.append(TradeResult.timestamp >= now - 86400)
+                        if filters["range"] == "7D":
+                            conditions.append(TradeResult.timestamp >= now - 604800)
+                        if filters["range"] == "30D":
+                            conditions.append(TradeResult.timestamp >= now - 2592000)
+
+                    outcome = filters.get("outcome", "ALL")
+                    if outcome == "WINS":
+                        conditions.append(TradeResult.result == 1)
+                    elif outcome == "LOSSES":
+                        conditions.append(TradeResult.result == 0)
+
+                    assets = filters.get("assets", [])
+                    dynamic_symbols = await provider.get_dynamic_symbols()
+
+                    crypto_symbols = dynamic_symbols.get("crypto", FALLBACK_CRYPTO)
+                    forex_symbols = dynamic_symbols.get("crypto", FALLBACK_FOREX)
+
+                    if assets and "ALL" not in assets:
+                        symbol_conditions = []
+                        if "CRYPTO" in assets:
+                            symbol_conditions.extend(crypto_symbols)
+                        if "FOREX" in assets:
+                            symbol_conditions.extend(forex_symbols)
+                        if symbol_conditions:
+                            conditions.append(TradeResult.symbol.in_(symbol_conditions))
+
+                if conditions:
+                    query = query.where(and_(*conditions))
+
+                # 3. Get Total Count (for Pagination)
+            count_query = select(func.count()).select_from(query.subquery())
+            total_result = await session.execute(count_query)
+            total_records = total_result.scalar()
+
+            # 4. Apply Pagination
+            query = query.offset((page - 1) * limit).limit(limit)
+
+            result = await session.execute(query)
+            trades = result.scalars().all()
+
+            # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
+            stats_query = select(
+                func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
+            )
+            stats_res = await session.execute(stats_query)
+            total_trades, lifetime_pnl, total_wins = stats_res.one()
+
+            return {
+                "trades": trades,
+                "page": page,
+                "limit": limit,
+                "total_records": total_records,
+                "total_trades": total_trades,
+                "lifetime_pnl": lifetime_pnl,
+                "total_wins": total_wins,
+            }
+        except Exception as e:
+            logger.error(f"Failed to fetch trade history from DB: {e}")
+            return {}
+
+    async def get_dashboard_chart_data(self) -> Dict:
+        """Returns chart data for GUI dashboard chart"""
+        if not self.engine:
+            return {}
+
+        try:
+            async with self.db.async_session() as session:
+                stmt = select(TradeResult).order_by(TradeResult.timestamp.asc())
+                result = await session.execute(stmt)
+                all_trades = result.scalars().all()
+
+                return all_trades
+        except Exception as e:
+            logger.error(f"Failed to fetch chart data from DB: {e}")
+            return {}
+
     async def get_pair_performance(self, symbol: str) -> float:
         """
         Returns win rate for a specific pair.
         Used to adjust confidence if a pair is historically profitable.
         """
+        if not self.engine:
+            return 0.5
+
         # 1. Check Memory Cache (Valid for 10 minutes)
         if symbol in self._performance_cache:
             val, timestamp = self._performance_cache[symbol]
             if time.time() - timestamp < 600:
                 return val
-
-        if not self.engine:
-            return 0.5
 
         try:
             async with self.async_session() as session:
@@ -224,10 +344,11 @@ class DatabaseManager:
             return 0.5
 
     @db_retry()
-    async def get_settings(self) -> dict:
+    async def get_settings(self) -> Dict:
         """Fetches user settings from DB"""
         if not self.engine:
             return {}
+
         try:
             async with self.async_session() as session:
                 stmt = select(UserSettings).where(UserSettings.id == 1)
@@ -353,9 +474,16 @@ class DatabaseManager:
 
         try:
             async with self.async_session() as session:
-                await session.execute(delete(ActiveTrade).where(ActiveTrade.symbol == symbol))
-                trade = ActiveTrade(symbol=symbol, signal_json=json.dumps(signal), start_time=time.time())
-                session.add(trade)
+                stmt = pg_insert(ActiveTrade).values(
+                    symbol=symbol, signal_json=json.dumps(signal), start_time=time.time()
+                )
+
+                # If symbol exists, update the signal info and time
+                do_update_stmt = stmt.on_conflict_do_update(
+                    index_elements=["symbol"], set_=dict(signal_json=json.dumps(signal), start_time=time.time())
+                )
+
+                await session.execute(do_update_stmt)
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed to save active trade {symbol}: {e}")
@@ -364,6 +492,7 @@ class DatabaseManager:
         """Upserts user settings"""
         if not self.engine:
             return
+
         try:
             async with self.async_session() as session:
                 stmt = select(UserSettings).where(UserSettings.id == 1)
@@ -374,12 +503,9 @@ class DatabaseManager:
                     obj = UserSettings(id=1)
                     session.add(obj)
 
-                if "login" in data:
-                    obj.login = data["login"]
-                if "server" in data:
-                    obj.server = data["server"]
-                if "password" in data:
-                    obj.password = data["password"]
+                for key in ["login", "password", "server"]:
+                    if key in data:
+                        setattr(obj, key, data[key])
                 if "lot_size" in data:
                     obj.lot_size = float(data["lot_size"])
                 if "risk" in data:
