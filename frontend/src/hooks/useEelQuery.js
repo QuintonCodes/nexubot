@@ -6,8 +6,8 @@ export function useDashboardData() {
   return useQuery({
     queryKey: ["dashboard"],
     queryFn: () => callEel("fetch_dashboard_update"),
-    // Dashboard updates every 2 seconds
     refetchInterval: 2000,
+    staleTime: 0,
     placeholderData: {
       balance: 0,
       equity: 0,
@@ -28,6 +28,7 @@ export function useSignalData() {
     queryKey: ["signals"],
     queryFn: () => callEel("fetch_signal_updates"),
     refetchInterval: 1000,
+    staleTime: 0,
     refetchIntervalInBackground: true,
     placeholderData: {
       account: { balance: 0, equity: 0 },
@@ -41,7 +42,6 @@ export function useSignalData() {
       },
       signals: [],
       logs: [],
-      mode: "SIGNAL_ONLY",
     },
   });
 }
@@ -50,7 +50,8 @@ export function useHistoryData(filterParams) {
   return useQuery({
     queryKey: ["history", filterParams], // Refetch when filters/page change
     queryFn: () => callEel("fetch_trade_history", filterParams),
-    keepPreviousData: true, // Keep showing old data while fetching new page
+    keepPreviousData: true,
+    staleTime: 5000,
     placeholderData: {
       stats: { balance: 0, lifetime_wr: 0, total_trades: 0, lifetime_pnl: 0 },
       history: [],
@@ -63,8 +64,8 @@ export function useSettingsData() {
   return useQuery({
     queryKey: ["settings"],
     queryFn: () => callEel("get_user_settings"),
-    // Don't refetch automatically, only on mount or invalidation
     refetchOnWindowFocus: false,
+    staleTime: Infinity,
     placeholderData: {
       login: "",
       server: "",
@@ -79,8 +80,12 @@ export function useSettingsData() {
 }
 
 export function useSaveSettings() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (newSettings) => callEel("save_settings", newSettings),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
   });
 }
 

@@ -81,7 +81,10 @@ class TechnicalAnalyzer:
         df["hh_n"] = df["high"].rolling(window=ci_period).max()
         df["ll_n"] = df["low"].rolling(window=ci_period).min()
         range_n = (df["hh_n"] - df["ll_n"]).replace(0, 0.00001)
-        df["chop_idx"] = 100 * np.log10(df["tr_sum"] / range_n) / np.log10(ci_period)
+
+        chop_input = df["tr_sum"] / range_n
+        chop_input = chop_input.replace(0, 1)
+        df["chop_idx"] = 100 * np.log10(chop_input) / np.log10(ci_period)
 
         # --- MACD ---
         ema_12 = df["close"].ewm(span=12, adjust=False).mean()

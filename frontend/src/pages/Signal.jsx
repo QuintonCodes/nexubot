@@ -15,7 +15,7 @@ import { useForceClose, useSignalData } from "../hooks/useEelQuery";
 
 function Signal() {
   // 1. Data from Hook
-  const { data } = useSignalData();
+  const { data, isLoading } = useSignalData();
   const { mutate: forceClose } = useForceClose();
 
   // 2. Local UI State
@@ -41,6 +41,27 @@ function Signal() {
     }
   };
 
+  const fmtPnL = (val) => {
+    if (val === undefined || val === null || Math.abs(val) < 0.005) {
+      return <span className="text-white">R 0.00</span>;
+    }
+    const isWin = val > 0;
+    return (
+      <span className={isWin ? "text-primary" : "text-danger"}>
+        R {isWin ? "+" : ""}
+        {val.toFixed(2)}
+      </span>
+    );
+  };
+
+  if (isLoading || !data) {
+    return (
+      <div className="flex items-center justify-center h-full text-primary font-mono animate-pulse">
+        CONNECTING TO FEED...
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       {/* Top Stats Bar */}
@@ -48,26 +69,26 @@ function Signal() {
         {[
           {
             label: "Account Balance",
-            val: `R ${data.account.balance.toFixed(2)}`,
+            val: `R ${(Math.abs(data?.account?.balance || 0) < 0.005 ? 0 : data.account.balance).toFixed(2)}`,
             color: "text-white",
             icon: <MdAccountBalanceWallet className="text-gray-600 text-xl" />,
           },
           {
             label: "Win Rate",
-            val: `${data.stats.lifetime_wr.toFixed(1)}%`,
+            val: `${(data?.stats?.lifetime_wr || 0).toFixed(1)}%`,
             color: "text-secondary",
             icon: <MdEmojiEvents className="text-secondary/50 text-xl" />,
           },
           {
             label: "Active Trades",
-            val: data.stats.active_count,
+            val: data?.stats?.active_count || 0,
             color: "text-secondary",
             icon: <MdTrendingUp className="text-secondary/50 text-xl" />,
           },
           {
             label: "Session PnL",
-            val: `R ${data.stats.session_pnl > 0 ? "+" : "-"}${data.stats.session_pnl.toFixed(2)}`,
-            color: `${data.stats.session_pnl > 0 ? "text-primary" : "text-danger"}`,
+            val: fmtPnL(data?.stats?.session_pnl),
+            color: `${(data?.stats?.session_pnl || 0) > 0 ? "text-primary" : "text-danger"}`,
             icon: <MdShowChart className="text-primary/50 text-xl" />,
           },
         ].map((stat, i) => (
@@ -422,10 +443,18 @@ function Signal() {
               <div>
                 <span class="text-gray-500">Session PnL: </span>
                 <span
-                  class={`${data?.stats.session_pnl > 0 ? "text-primary" : "text-danger"}`}
+                  class={`${
+                    Math.abs(data?.stats.session_pnl || 0) < 0.01
+                      ? "text-white" // Neutral color for 0
+                      : data?.stats.session_pnl > 0
+                        ? "text-primary"
+                        : "text-danger"
+                  }`}
                 >
-                  R {data?.stats.session_pnl > 0 ? "+" : "-"}
-                  {data?.stats.session_pnl}
+                  {/* Logic to format R 0.00 clean */}
+                  {Math.abs(data?.stats.session_pnl || 0) < 0.01
+                    ? "R 0.00"
+                    : `R ${data?.stats.session_pnl > 0 ? "+" : ""}${data?.stats.session_pnl?.toFixed(2)}`}
                 </span>
               </div>
             </div>

@@ -36,10 +36,7 @@ def on_close(page, sockets):
 
     if not sockets:
         print("❌ Final window closed. Shutting down Nexubot...")
-        sys.exit(0)
         shutdown_bot()
-        # Force kill process to prevent hanging threads
-        os._exit(0)
 
 
 def start_app():
@@ -54,12 +51,12 @@ def start_app():
             size=(1280, 720),
             position=(100, 100),
             close_callback=on_close,
-            cmdline_args=["--disable-http-cache"],
+            cmdline_args=["--disable-http-cache", "--disable-plugins", "--no-experiments"],
         )
     except (SystemExit, KeyboardInterrupt):
         pass
     except Exception as e:
-        print(f"Critical Error: {e}")
+        print(f"Eel Error: {e}")
         sys.exit(1)
 
 

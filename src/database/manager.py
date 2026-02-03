@@ -297,13 +297,13 @@ class DatabaseManager:
             logger.error(f"Failed to fetch trade history from DB: {e}")
             return {}
 
-    async def get_dashboard_chart_data(self) -> Dict:
+    async def get_dashboard_chart_data(self) -> List:
         """Returns chart data for GUI dashboard chart"""
         if not self.engine:
-            return {}
+            return []
 
         try:
-            async with self.db.async_session() as session:
+            async with self.async_session() as session:
                 stmt = select(TradeResult).order_by(TradeResult.timestamp.asc())
                 result = await session.execute(stmt)
                 all_trades = result.scalars().all()
@@ -311,7 +311,7 @@ class DatabaseManager:
                 return all_trades
         except Exception as e:
             logger.error(f"Failed to fetch chart data from DB: {e}")
-            return {}
+            return []
 
     async def get_pair_performance(self, symbol: str) -> float:
         """

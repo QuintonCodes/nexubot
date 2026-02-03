@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { MdHub } from "react-icons/md";
 import { Link, useLocation } from "react-router-dom";
 
+import { callEel } from "./lib/eel";
+
 export default function MainLayout({ children }) {
   const location = useLocation();
-
   const [latency, setLatency] = useState("--");
 
   // Latency check on mount (simulated from login.js)
@@ -16,9 +17,9 @@ export default function MainLayout({ children }) {
   }, []);
 
   const handleStop = async () => {
-    if (confirm("Stop Engine and Logout?")) {
-      // await callEel("stop_and_reset");
-      window.location.href = "/"; // Force reload to login
+    if (confirm("Stop Engine, Save Session and Exit?")) {
+      await callEel("shutdown_bot");
+      window.close();
     }
   };
 

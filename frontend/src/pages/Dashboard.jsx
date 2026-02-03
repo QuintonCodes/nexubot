@@ -1,5 +1,5 @@
 import Chart from "chart.js/auto";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MdAccountBalance,
   MdAccountBalanceWallet,
@@ -17,10 +17,13 @@ import { useDashboardData } from "../hooks/useEelQuery";
 import { callEel } from "../lib/eel";
 
 function Dashboard() {
-  const { data } = useDashboardData();
+  const { data, isLoading } = useDashboardData();
 
-  const isAutoMode = data?.mode === "FULL_AUTO";
-  const loadingMode = !data?.mode;
+  const [localModeOverride, setLocalModeOverride] = useState(null);
+
+  // Derive the final display value: Local state takes priority, then server data
+  const isAutoMode =
+    localModeOverride !== null ? localModeOverride : data?.mode === "FULL_AUTO";
 
   // --- Chart Refs ---
   const chartRef = useRef(null);
@@ -28,7 +31,8 @@ function Dashboard() {
 
   // Update Chart when data changes
   useEffect(() => {
-    if (!chartRef.current || !data) return;
+    if (!chartRef.current || !data || !data.chart_labels || !data.chart_data)
+      return;
 
     // Initialize Chart if not exists
     if (!chartInstance.current) {
@@ -91,10 +95,10 @@ function Dashboard() {
     }
 
     // Update Chart Data
-    if (data.chart_data.length > 0) {
+    if (data.chart_data?.length > 0) {
       const chart = chartInstance.current;
-      const currentLen = chart.data.labels.length;
-      const newDataLen = data.chart_labels.length;
+      const currentLen = chart.data.labels?.length || 0;
+      const newDataLen = data.chart_labels?.length || 0;
 
       // Only update if data changed (simple length/last-value check)
       if (currentLen !== newDataLen) {
@@ -107,21 +111,42 @@ function Dashboard() {
 
   const handleModeToggle = async (e) => {
     const newState = e.target.checked;
+    setLocalModeOverride(newState);
+
     try {
       await callEel("set_mode", newState);
     } catch (error) {
+      setLocalModeOverride(null);
       console.error("Mode toggle error", error);
     }
   };
 
+  const fmtPnL = (val) => {
+    if (val === undefined || val === null || Math.abs(val) < 0.005) {
+      return <span className="text-white">R 0.00</span>;
+    }
+    const isWin = val > 0;
+    return (
+      <span className={isWin ? "text-primary" : "text-danger"}>
+        R {isWin ? "+" : ""}
+        {val.toFixed(2)}
+      </span>
+    );
+  };
+
   // Helper for currency formatting
   const fmtCurrency = (val) => {
-    if (val === data.total_pnl) {
-      return `R ${data.total_pnl > 0 ? "+" : "-"}${val?.toFixed(2)}`;
-    } else {
-      return `R ${val?.toFixed(2)}`;
-    }
+    const safeVal = Math.abs(val) < 0.005 ? 0 : val;
+    return `R ${(safeVal || 0).toFixed(2)}`;
   };
+
+  if (isLoading || !data) {
+    return (
+      <div className="flex items-center justify-center h-full text-primary font-mono animate-pulse">
+        INITIALIZING DASHBOARD...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -157,7 +182,7 @@ function Dashboard() {
             <div
               className={`text-2xl font-bold tracking-tight ${data.total_pnl >= 0 ? "text-primary" : "text-danger"}`}
             >
-              {fmtCurrency(data.total_pnl)}
+              {fmtPnL(data.total_pnl)}
             </div>
             <div className="text-[10px] text-gray-500 mt-1">
               All Time Performance
@@ -175,10 +200,10 @@ function Dashboard() {
               Win Rate
             </div>
             <div className="text-2xl font-bold text-secondary tracking-tight">
-              {data.win_rate?.toFixed(1)}%
+              {(data.win_rate || 0).toFixed(1)}%
             </div>
             <div className="text-[10px] text-gray-500 mt-1">
-              {data.wins} Wins / {data.losses} Losses
+              {data.wins || 0} Wins / {data.losses || 0} Losses
             </div>
           </div>
           <div className="h-10 w-10 rounded bg-secondary/10 flex items-center justify-center border border-secondary/20">
@@ -239,7 +264,6 @@ function Dashboard() {
                 id="mode-toggle"
                 checked={isAutoMode}
                 onChange={handleModeToggle}
-                disabled={loadingMode}
                 className="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-gray-700 appearance-none cursor-pointer transition-all duration-300 left-0 checked:left-[calc(100%-1.5rem)] checked:border-primary"
               />
               <label
@@ -338,7 +362,6 @@ function Dashboard() {
               {data.recent_trades?.map((trade, idx) => {
                 const isWin = trade.result === 1;
                 const pnlClass = isWin ? "text-primary" : "text-danger";
-                const sign = trade.pnl >= 0 ? "+" : "-";
                 const statusColor = isWin ? "primary" : "danger";
                 const Icon = isWin ? MdCheck : MdClose;
 
@@ -366,7 +389,7 @@ function Dashboard() {
                     <td
                       className={`py-3 pr-2 text-right ${pnlClass} font-bold`}
                     >
-                      {sign} R {Math.abs(trade.pnl).toFixed(2)}
+                      {fmtPnL(trade.pnl)}
                     </td>
                     <td className="py-3 pr-2 text-right">
                       <span
@@ -379,7 +402,7 @@ function Dashboard() {
                   </tr>
                 );
               })}
-              {data.recent_trades.length === 0 && (
+              {(!data.recent_trades || data.recent_trades.length === 0) && (
                 <tr>
                   <td
                     colSpan="8"

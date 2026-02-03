@@ -50,6 +50,7 @@ def _read_recent_logs(limit=20):
     log_file = "nexubot.log"
     if not os.path.exists(log_file):
         return []
+
     try:
         with open(log_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -64,7 +65,6 @@ def _safe_get_result(future, timeout=3.0):
     try:
         return future.result(timeout=timeout)
     except (asyncio.TimeoutError, TimeoutError):
-        # Log warning but don't crash
         return None
     except Exception as e:
         logger.error(f"Async Task Error: {e}")
@@ -99,6 +99,8 @@ class NexubotGUI:
         self.active_forex_list = []
         self.monitored_tasks = {}
         self.settings = {}
+
+        self._scanner_task = None
 
     def _apply_settings_to_engine(self):
         """Pushes settings to the AI Engine instance."""
@@ -274,64 +276,85 @@ class NexubotGUI:
         2. Database Stats (Win Rate, Total PnL)
         3. Chart Data (Equity Curve simulation)
         """
-        # 1. Live Account Info
-        acct = await self.provider.get_account_summary()
+        safe_response = {
+            "balance": 0.0,
+            "equity": 0.0,
+            "total_pnl": 0.0,
+            "win_rate": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "chart_labels": [],
+            "chart_data": [],
+            "mode": self.execution_mode,
+            "recent_trades": [],
+            "timestamp": time.time(),
+        }
 
-        # 2. Database Stats
-        total_pnl = 0.0
-        wins = 0
-        losses = 0
-        chart_labels = []
-        chart_balance = []
-        recent_trades_data = []
+        try:
+            # 1. Live Account Info
+            acct = await self.provider.get_account_summary()
+            if acct:
+                safe_response["balance"] = acct.get("balance", 0.0)
+                safe_response["equity"] = acct.get("equity", 0.0)
 
-        running_pnl = 0.0
+            # 2. Database Stats
+            total_pnl = 0.0
+            wins = 0
+            losses = 0
+            chart_labels = []
+            chart_balance = []
+            recent_trades_data = []
 
-        all_trades = await self.db.get_dashboard_chart_data()
+            running_pnl = 0.0
 
-        for t in all_trades:
-            total_pnl += t.pnl_zar
-            if t.result == 1:
-                wins += 1
-            else:
-                losses += 1
+            all_trades = await self.db.get_dashboard_chart_data()
 
-            # Chart Data Construction
-            running_pnl += t.pnl_zar
-            dt_obj = datetime.fromtimestamp(t.timestamp)
-            chart_labels.append(dt_obj.strftime("%d %b"))
-            chart_balance.append(round(running_pnl, 2))
+            for t in all_trades:
+                total_pnl += t.pnl_zar
+                if t.result == 1:
+                    wins += 1
+                else:
+                    losses += 1
 
-        for t in reversed(all_trades[-5:]):
-            recent_trades_data.append(
+                # Chart Data Construction
+                running_pnl += t.pnl_zar
+                dt_obj = datetime.fromtimestamp(t.timestamp)
+                chart_labels.append(dt_obj.strftime("%d %b"))
+                chart_balance.append(round(running_pnl, 2))
+
+            for t in reversed(all_trades[-5:]):
+                recent_trades_data.append(
+                    {
+                        "time": datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S"),
+                        "symbol": t.symbol,
+                        "signal_type": t.signal_type,
+                        "entry": float(t.entry_price),
+                        "exit": float(t.exit_price),
+                        "size": getattr(t, "size", 0.01),
+                        "pnl": float(t.pnl_zar),
+                        "result": int(t.result),
+                    }
+                )
+
+            total_trades = wins + losses
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+
+            safe_response.update(
                 {
-                    "time": datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S"),
-                    "symbol": t.symbol,
-                    "signal_type": t.signal_type,
-                    "entry": float(t.entry_price),
-                    "exit": float(t.exit_price),
-                    "size": getattr(t, "size", 0.01),
-                    "pnl": float(t.pnl_zar),
-                    "result": int(t.result),
+                    "total_pnl": total_pnl,
+                    "win_rate": win_rate,
+                    "wins": wins,
+                    "losses": losses,
+                    "chart_labels": chart_labels[-20:],
+                    "chart_data": chart_balance[-20:],
+                    "recent_trades": recent_trades_data,
                 }
             )
 
-        total_trades = wins + losses
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-
-        return {
-            "balance": acct["balance"],
-            "equity": acct["equity"],
-            "total_pnl": total_pnl,
-            "win_rate": win_rate,
-            "wins": wins,
-            "losses": losses,
-            "chart_labels": chart_labels[-20:],
-            "chart_data": chart_balance[-20:],
-            "mode": self.execution_mode,
-            "recent_trades": recent_trades_data,
-            "timestamp": time.time(),
-        }
+            return safe_response
+        except Exception as e:
+            logger.error(f"Dashboard Data Error: {e}")
+            return safe_response
 
     async def get_latency(self):
         """Returns the connection latency (ping) to the broker server."""
@@ -339,15 +362,31 @@ class NexubotGUI:
 
     async def get_signal_page_data(self):
         """Aggregates all data needed for the Signal Page."""
-        acct = await self.provider.get_account_summary()
-        # Calculate Lifetime WR
-        lifetime_wr = await self.db.get_total_historical_win_rate()
-        # Session Time
-        elapsed = timedelta(seconds=int(time.time() - self.session_start))
-
-        return {
-            "account": {"balance": acct.get("balance", 0.0), "equity": acct.get("equity", 0.0)},
+        safe_response = {
+            "account": {"balance": 0.0, "equity": 0.0},
             "stats": {
+                "lifetime_wr": 0.0,
+                "active_count": 0,
+                "session_pnl": 0.0,
+                "session_wins": 0,
+                "session_losses": 0,
+                "session_total": 0,
+                "time_running": "0:00:00",
+            },
+            "signals": [],
+            "logs": [],
+            "mode": self.execution_mode,
+        }
+
+        try:
+            acct = await self.provider.get_account_summary()
+            if acct:
+                safe_response["account"] = acct
+
+            lifetime_wr = await self.db.get_total_historical_win_rate()
+            elapsed = timedelta(seconds=int(time.time() - self.session_start))
+
+            safe_response["stats"] = {
                 "lifetime_wr": lifetime_wr,
                 "active_count": len(self.active_signals),
                 "session_pnl": self.session_stats["pnl"],
@@ -355,49 +394,64 @@ class NexubotGUI:
                 "session_losses": self.session_stats["losses"],
                 "session_total": self.session_stats["total"],
                 "time_running": str(elapsed),
-            },
-            "signals": self.active_signals,
-            "logs": _read_recent_logs(30),
-            "mode": self.execution_mode,
-        }
+            }
+            safe_response["signals"] = self.active_signals
+            safe_response["logs"] = _read_recent_logs(30)
+
+            return safe_response
+        except Exception as e:
+            logger.error(f"Signal Data Error: {e}")
+            return safe_response
 
     async def get_trade_history(self, filters=None):
         """Fetches filtered trade history and global lifetime stats."""
-        alltime_trades = self.db.get_alltime_trade_history(self.provider, filters)
+        alltime_trades = await self.db.get_alltime_trade_history(self.provider, filters)
+        if not alltime_trades:
+            alltime_trades = {}
 
-        total_trades = alltime_trades["total_trades"] or 0
-        lifetime_pnl = alltime_trades["lifetime_pnl"] or 0.0
-        total_wins = alltime_trades["total_wins"] or 0
+        stats = {
+            "balance": self.ai_engine.user_balance_zar or 0.0,
+            "lifetime_wr": 0.0,
+            "total_trades": 0,
+            "lifetime_pnl": 0.0,
+        }
+
+        total_trades = alltime_trades.get("total_trades", 0)
+        lifetime_pnl = alltime_trades.get("lifetime_pnl", 0.0)
+        total_wins = alltime_trades.get("total_wins", 0)
         lifetime_wr = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
 
+        stats["total_trades"] = total_trades or 0
+        stats["lifetime_pnl"] = lifetime_pnl or 0.0
+        stats["lifetime_wr"] = lifetime_wr
+
         table_data = []
-        for t in alltime_trades["trades"]:
-            table_data.append(
-                {
-                    "time": datetime.fromtimestamp(t.timestamp).strftime("%Y-%m-%d %H:%M"),
-                    "symbol": t.symbol,
-                    "signal_type": t.signal_type,
-                    "entry": float(t.entry_price),
-                    "exit": float(t.exit_price),
-                    "pnl": float(t.pnl_zar),
-                    "result": int(t.result),
-                    "confidence": float(t.confidence),
-                    "size": getattr(t, "size", 0.01),
-                }
-            )
+        raw_trades = alltime_trades.get("trades", [])
+        if raw_trades:
+            for t in raw_trades:
+                table_data.append(
+                    {
+                        "time": datetime.fromtimestamp(t.timestamp).strftime("%Y-%m-%d %H:%M"),
+                        "symbol": t.symbol,
+                        "signal_type": t.signal_type,
+                        "entry": float(t.entry_price),
+                        "exit": float(t.exit_price),
+                        "pnl": float(t.pnl_zar),
+                        "result": int(t.result),
+                        "confidence": float(t.confidence),
+                        "size": getattr(t, "size", 0.01),
+                    }
+                )
 
         return {
-            "stats": {
-                "balance": self.ai_engine.user_balance_zar,
-                "lifetime_wr": lifetime_wr,
-                "total_trades": total_trades or 0,
-                "lifetime_pnl": lifetime_pnl or 0,
-            },
+            "stats": stats,
             "history": table_data,
             "pagination": {
-                "current": alltime_trades["page"],
-                "total_pages": math.ceil(alltime_trades["total_records"] / alltime_trades["limit"]),
-                "total_records": alltime_trades["total_records"],
+                "current": alltime_trades.get("page", 1),
+                "total_pages": (
+                    math.ceil(total_trades / alltime_trades.get("limit", 10)) if alltime_trades.get("limit") else 1
+                ),
+                "total_records": total_trades,
             },
         }
 
@@ -406,7 +460,11 @@ class NexubotGUI:
         Attempt to connect to MT5 using credentials from the GUI.
         """
         # --- Prevent Duplicate Connection ---
-        if self.is_running and self.provider.connected:
+        if self.provider.connected:
+            logger.info("✅ Already connected to MT5.")
+            self.is_running = True
+            if not self._scanner_task or self._scanner_task.done():
+                self._scanner_task = asyncio.create_task(self.scanner_loop())
             return {"success": True, "message": "Already Connected"}
 
         try:
@@ -420,14 +478,20 @@ class NexubotGUI:
         self.provider._server = server
 
         logger.info(f"🖥️ Connecting to {server}...")
-        try:
-            connected = await asyncio.wait_for(self.provider.initialize(), timeout=30)
-        except asyncio.TimeoutError:
-            return {"success": False, "message": "MT5 Launch Timeout"}
-        except Exception as e:
-            return {"success": False, "message": f"Driver Error: {str(e)}"}
 
-        if connected:
+        for attempt in range(2):
+            try:
+                connected = await asyncio.wait_for(self.provider.initialize(), timeout=30)
+                if connected:
+                    break
+                await asyncio.sleep(1)  # Wait 1s before retry
+            except asyncio.TimeoutError:
+                if attempt == 1:
+                    return {"success": False, "message": "MT5 Launch Timeout"}
+            except Exception as e:
+                logger.error(f"Connection Error: {e}")
+
+        if self.provider.connected:
             self.is_running = True
             await self.initialize_settings()
 
@@ -437,20 +501,18 @@ class NexubotGUI:
             await self.db.save_settings(new_settings)
 
             self.ai_engine.set_context(500.0, self.db)
-
-            # Check Offline/Interrupted Trades
             await self._check_offline_trades()
 
-            # START THE SCANNER LOOP
-            asyncio.create_task(self.scanner_loop())
+            # 3. Double-Loop Prevention
+            if not self._scanner_task or self._scanner_task.done():
+                self._scanner_task = asyncio.create_task(self.scanner_loop())
+
             return {"success": True, "message": "Connection Established"}
         else:
             return {"success": False, "message": "MT5 Connection Failed. Check Credentials."}
 
     async def initialize_settings(self):
-        """Load settings from DB or create defaults."""
         await self.db.init_database()
-        # Cleanup database
         await self.db.cleanup_db()
         db_settings = await self.db.get_settings()
 
@@ -468,63 +530,10 @@ class NexubotGUI:
             "high_vol": False,
         }
 
-        # Merge DB settings into defaults
-        default_settings.update({k: v for k, v in db_settings.items() if v is not None})
+        if db_settings:
+            default_settings.update({k: v for k, v in db_settings.items() if v is not None})
         self.settings = default_settings
         self._apply_settings_to_engine()
-
-    async def monitor_trade(self, symbol, signal):
-        """
-        Simplified monitoring to track outcome active signals.
-        Removes signal from UI when closed.
-        """
-        # Duration 4 hours
-        end_time = time.time() + 14400
-        entry = signal["price"]
-        sl = signal["sl"]
-        tp = signal["tp"]
-        is_long = signal["direction"] == "LONG"
-
-        while time.time() < end_time and self.is_running:
-            tick = await self.provider.get_current_tick(symbol)
-            if tick:
-                price = tick.bid if is_long else tick.ask
-
-                # Check Outcome
-                hit_sl = price <= sl if is_long else price >= sl
-                hit_tp = price >= tp if is_long else price <= tp
-
-                if hit_sl or hit_tp:
-                    pnl = signal["risk_zar"] * -1 if hit_sl else signal["profit_zar"]
-
-                    # Update Session Stats
-                    self.session_stats["total"] += 1
-                    if hit_tp:
-                        self.session_stats["wins"] += 1
-                    else:
-                        self.session_stats["losses"] += 1
-                    self.session_stats["pnl"] += pnl
-
-                    # Log to DB
-                    await self.db.log_trade(
-                        {
-                            "id": f"{symbol}_{int(time.time())}",
-                            "symbol": symbol,
-                            "signal": signal["signal"],
-                            "confidence": signal["confidence"],
-                            "entry": entry,
-                            "exit": sl if hit_sl else tp,
-                            "won": hit_tp,
-                            "pnl": pnl,
-                            "strategy": signal["strategy"],
-                        }
-                    )
-
-                    # Remove from UI list
-                    self.active_signals = [s for s in self.active_signals if s["symbol"] != symbol]
-                    break
-
-            await asyncio.sleep(1)
 
     async def process_batch(self, symbols: list):
         """Processes a list of symbols concurrently."""
@@ -553,7 +562,6 @@ class NexubotGUI:
                     is_shadow = signal.get("is_shadow", False)
 
                     if not is_shadow:
-                        # Add to UI
                         signals_found += 1
                         self.active_signals.insert(0, signal)
 
@@ -563,19 +571,17 @@ class NexubotGUI:
                                 signal["status"] = "PLACED"
                         self.monitored_tasks[sym] = asyncio.create_task(self.verify_trade_realtime(sym, signal))
                     else:
-                        # Shadow tracking (no UI)
                         asyncio.create_task(self.verify_trade_realtime(sym, signal))
 
     async def restart_system(self):
         """Stops scanner, re-inits DB/Provider with new settings."""
         logger.info("♻️ Restarting System...")
         self.is_running = False
-        await asyncio.sleep(1)  # Let loops die
+        if self._scanner_task:
+            self._scanner_task.cancel()
 
-        # Apply settings
+        await asyncio.sleep(1)
         self._apply_settings_to_engine()
-
-        # Re-login (using saved settings)
         await self.initialize_connection(self.settings["login"], self.settings["server"], self.settings["password"])
         return True
 
@@ -585,56 +591,60 @@ class NexubotGUI:
 
         active_crypto = []
         active_forex = []
-
         last_crypto = 0
         last_forex = 0
         last_sort_time = 0
 
         await self._refresh_market_watch_symbols()
 
-        if not self.active_crypto_list and not self.active_forex_list:
-            logger.warning("⚠️ Market Watch empty. Using Fallback Symbols.")
-            self.active_crypto_list = list(FALLBACK_CRYPTO)
-            self.active_forex_list = list(FALLBACK_FOREX)
-
         while self.is_running:
-            # Fail-safe: Check if MT5 is actually alive
-            if not self.provider.connected:
-                logger.warning("⚠️ MT5 Disconnected. Pausing scanner...")
+            try:
+                # Fail-safe: Check if MT5 is actually alive
+                if not self.provider.connected:
+                    logger.warning("⚠️ MT5 Disconnected. Pausing scanner...")
+                    await asyncio.sleep(5)
+                    continue
+
+                # 1. Update Balance context
+                acct = await self.provider.get_account_summary()
+                if acct:
+                    self.ai_engine.set_context(acct["balance"], self.db)
+
+                now = time.time()
+
+                # 2. Sort Pairs every 15 mins (Logic from console.py)
+                if now - last_sort_time > 900:
+                    logger.info("📊 Re-ranking pairs by volatility...")
+                    await self._refresh_market_watch_symbols()
+
+                    active_crypto = await self.sort_pairs(active_crypto)
+                    active_forex = await self.sort_pairs(active_forex)
+                    last_sort_time = now
+
+                # 3. Batch Process (Paralle Scanning)
+                tasks = []
+
+                if now - last_crypto > SCAN_INTERVAL_CRYPTO:
+                    tasks.append(self.process_batch(self.active_crypto_list[:5]))
+                    last_crypto = now
+
+                if now - last_forex > SCAN_INTERVAL_FOREX:
+                    tasks.append(self.process_batch(self.active_forex_list[:10]))
+                    last_forex = now
+
+                if tasks:
+                    await asyncio.gather(*tasks)
+
+                await asyncio.sleep(1)
+
+            except RuntimeError as e:
+                if "shutdown" in str(e) or "closed" in str(e):
+                    logger.info("🛑 Scanner loop stopping due to shutdown.")
+                    break
+                logger.error(f"Scanner Runtime Error: {e}")
+            except Exception as e:
+                logger.error(f"Scanner Loop Error: {e}")
                 await asyncio.sleep(5)
-                continue
-
-            # 1. Update Balance context
-            acct = await self.provider.get_account_summary()
-            if acct:
-                self.ai_engine.set_context(acct["balance"], self.db)
-
-            now = time.time()
-
-            # 2. Sort Pairs every 15 mins (Logic from console.py)
-            if now - last_sort_time > 900:
-                logger.info("📊 Re-ranking pairs by volatility...")
-                await self._refresh_market_watch_symbols()
-
-                active_crypto = await self.sort_pairs(active_crypto)
-                active_forex = await self.sort_pairs(active_forex)
-                last_sort_time = now
-
-            # 3. Batch Process (Paralle Scanning)
-            tasks = []
-
-            if now - last_crypto > SCAN_INTERVAL_CRYPTO:
-                tasks.append(self.process_batch(self.active_crypto_list[:5]))
-                last_crypto = now
-
-            if now - last_forex > SCAN_INTERVAL_FOREX:
-                tasks.append(self.process_batch(self.active_forex_list[:10]))
-                last_forex = now
-
-            if tasks:
-                await asyncio.gather(*tasks)
-
-            await asyncio.sleep(1)
 
     def set_execution_mode(self, mode_str):
         """Sets the bot state (SIGNAL_ONLY vs FULL_AUTO)"""
@@ -658,9 +668,12 @@ class NexubotGUI:
         return result
 
     async def stop_session(self):
-        """Stops the bot operations but keeps the app open (for logout)."""
-        logger.info("🛑 Stopping Engine & Logging Out...")
+        """Stops the bot operations & closes resources."""
+        logger.info("🛑 Stopping Engine & Saving Session...")
         self.is_running = False
+
+        if self._scanner_task:
+            self._scanner_task.cancel()
 
         # Cancel monitoring tasks
         for task in self.monitored_tasks.values():
@@ -670,8 +683,6 @@ class NexubotGUI:
 
         await self.db.log_session(self.session_id, self.session_stats["start"].timestamp(), self.session_stats)
         await self.db.close()
-
-        # Close MT5 connection
         await self.provider.shutdown()
         return True
 
@@ -708,11 +719,10 @@ class NexubotGUI:
         outcome = "TIMEOUT"
         final_pnl = 0.0
         max_favorable_dist = 0.0
-        won = final_pnl > 0
+        won = False
 
         try:
             while (time.time() - start_time) < duration and self.is_running:
-                # Get Tick for Spread Logic
                 tick = await self.provider.get_current_tick(symbol)
                 if not tick:
                     await asyncio.sleep(interval)
@@ -742,16 +752,13 @@ class NexubotGUI:
                         continue
 
                 # --- 2. TRADE MONITORING (FILLED) ---
-                # Determine Exit Prices
                 curr_price = current_bid if is_long else current_ask
 
-                # Check SL/TP
                 hit_sl = curr_price <= sl if is_long else curr_price >= sl
                 hit_tp = curr_price >= tp if is_long else curr_price <= tp
 
                 if hit_sl:
                     outcome = "LOSS (SL Hit)"
-                    # Accurate PnL Calc based on points moved
                     points_lost = (sl - entry) / point if is_long else (entry - sl) / point
                     final_pnl = points_lost * tick_value * lot_size
                     break
@@ -807,7 +814,8 @@ class NexubotGUI:
                         close_p = tick.bid if is_long else tick.ask
                         points_diff = (close_p - entry) / point if is_long else (entry - close_p) / point
                         final_pnl = points_diff * tick_value * lot_size
-                        outcome = "WIN (Floating)" if final_pnl > 0 else "LOSS (Floating)"
+                        won = final_pnl > 0
+                        outcome = "WIN (Floating)" if won else "LOSS (Floating)"
 
                 if outcome == "CANCELLED":
                     logger.info(f"🚫 {symbol} Order Cancelled")
@@ -848,6 +856,9 @@ class NexubotGUI:
 
         except Exception as e:
             logger.error(f"Error verifying {symbol}: {e}")
+        finally:
+            if not is_shadow:
+                asyncio.create_task(self.db.delete_active_trade(symbol))
 
 
 # --- Expose Functions to JavaScript ---
@@ -855,14 +866,12 @@ class NexubotGUI:
 def attempt_login(login_id, server, password):
     """Called from login.html when user clicks 'Initialize Connection'"""
     global bot_instance
-
     if not bot_instance:
         bot_instance = NexubotGUI()
 
     loop = _get_persistent_loop()
-
     future = asyncio.run_coroutine_threadsafe(bot_instance.initialize_connection(login_id, server, password), loop)
-    return _safe_get_result(future, timeout=10.0)
+    return _safe_get_result(future, timeout=45.0)
 
 
 @eel.expose
@@ -876,42 +885,75 @@ def close_app():
 def fetch_dashboard_update():
     """Called by JS interval to get live data"""
     global bot_instance
+    default_data = {
+        "balance": 0.0,
+        "equity": 0.0,
+        "total_pnl": 0.0,
+        "win_rate": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "recent_trades": [],
+        "chart_labels": [],
+        "chart_data": [],
+        "mode": "SIGNAL_ONLY",
+    }
     if not bot_instance:
-        return {}
+        return default_data
 
     loop = _get_persistent_loop()
 
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.get_dashboard_data(), loop)
-        res = _safe_get_result(future, timeout=3.0) or {}
+        res = _safe_get_result(future, timeout=3.0)
+
+        final_data = res if res else default_data.copy()
 
         if bot_instance and bot_instance.provider:
-            res["latency"] = bot_instance.provider.get_ping()
-        return res
+            final_data["latency"] = bot_instance.provider.get_ping()
+
+        return final_data
     except Exception as e:
         logger.error(f"Dashboard Update Failed: {e}")
-        return {}
+        return default_data
 
 
 @eel.expose
 def fetch_signal_updates():
     """Polled by signal.html"""
     global bot_instance
+    default_data = {
+        "account": {"balance": 0, "equity": 0},
+        "stats": {
+            "lifetime_wr": 0,
+            "active_count": 0,
+            "session_pnl": 0,
+            "session_wins": 0,
+            "session_losses": 0,
+            "session_total": 0,
+            "time_running": "--",
+        },
+        "signals": [],
+        "logs": [],
+        "mode": "SIGNAL_ONLY",
+    }
     if not bot_instance:
-        return {}
+        return default_data
 
     loop = _get_persistent_loop()
 
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.get_signal_page_data(), loop)
-        res = _safe_get_result(future, timeout=3.0) or {}
+        res = _safe_get_result(future, timeout=3.0)
+
+        final_data = res if res else default_data.copy()
 
         if bot_instance and bot_instance.provider:
-            res["latency"] = bot_instance.provider.get_ping()
-        return res
+            final_data["latency"] = bot_instance.provider.get_ping()
+
+        return final_data
     except Exception as e:
         logger.error(f"Signal Update Failed: {e}")
-        return {}
+        return default_data
 
 
 @eel.expose
@@ -920,21 +962,29 @@ def fetch_trade_history(filters=None):
     Fetches filtered trade history and global lifetime stats.
     """
     global bot_instance
+    default_res = {
+        "stats": {"balance": 0.0, "lifetime_wr": 0.0, "total_trades": 0, "lifetime_pnl": 0.0},
+        "history": [],
+        "pagination": {"current": 1, "total_pages": 1, "total_records": 0},
+    }
     if not bot_instance:
-        return {}
+        return default_res
 
     loop = _get_persistent_loop()
 
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.get_trade_history(filters), loop)
-        res = _safe_get_result(future, timeout=3.0) or {}
+        res = _safe_get_result(future, timeout=3.0)
+
+        final_data = res if res else default_res.copy()
 
         if bot_instance and bot_instance.provider:
-            res["latency"] = bot_instance.provider.get_ping()
-        return res
+            final_data["latency"] = bot_instance.provider.get_ping()
+
+        return final_data
     except Exception as e:
         logger.error(f"History Fetch Error: {e}")
-        return {}
+        return default_res
 
 
 @eel.expose
@@ -977,9 +1027,10 @@ def save_settings(data):
     async def _save_and_restart():
         await bot_instance.db.save_settings(data)
         await bot_instance.restart_system()
+        return True
 
-    asyncio.run_coroutine_threadsafe(_save_and_restart(), loop)
-    return True
+    future = asyncio.run_coroutine_threadsafe(_save_and_restart(), loop)
+    return _safe_get_result(future, timeout=10.0)
 
 
 @eel.expose
@@ -996,9 +1047,13 @@ def shutdown_bot():
     """Stops the running bot instance gracefully."""
     global bot_instance
     if bot_instance:
-        bot_instance.is_running = False
-        if bot_instance.provider:
-            pass
+        loop = _get_persistent_loop()
+        # Clean shutdown of DB and MT5
+        future = asyncio.run_coroutine_threadsafe(bot_instance.stop_session(), loop)
+        _safe_get_result(future, timeout=5.0)
+
+    # Kill the process
+    os._exit(0)
 
 
 @eel.expose

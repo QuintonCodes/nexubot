@@ -34,7 +34,19 @@ export default function History() {
   });
 
   const { data, isFetching } = useHistoryData(queryFilters);
-  const { stats, history, pagination } = data;
+
+  const stats = data?.stats || {
+    balance: 0,
+    lifetime_wr: 0,
+    total_trades: 0,
+    lifetime_pnl: 0,
+  };
+  const history = data?.history || [];
+  const pagination = data?.pagination || {
+    current: 1,
+    total_pages: 1,
+    total_records: 0,
+  };
 
   // --- Handlers ---
   const handleRangeBtn = (range) => {
@@ -73,82 +85,122 @@ export default function History() {
     });
   };
 
+  const handleDateChange = (e) => {
+    const { name, value } = e.target;
+    setDateRange((prev) => {
+      const newRange = { ...prev, [name]: value };
+      setSelectedRangeBtn("");
+      // Only trigger query update if both dates are present or empty
+      if (newRange.start && newRange.end) {
+        setQueryFilters((q) => ({
+          ...q,
+          range: null,
+          startDate: newRange.start,
+          endDate: newRange.end,
+          page: 1,
+        }));
+      }
+      return newRange;
+    });
+  };
+
   const handlePageChange = (newPage) => {
     if (newPage >= 1 && newPage <= pagination.total_pages) {
       setQueryFilters((prev) => ({ ...prev, page: newPage }));
     }
   };
 
+  const handleOutcomeChange = (e) => {
+    const val = e.target.value;
+    setOutcomeFilter(val);
+    let apiVal = "ALL";
+    if (val === "Wins Only") apiVal = "WINS";
+    if (val === "Losses Only") apiVal = "LOSSES";
+    setQueryFilters((prev) => ({ ...prev, outcome: apiVal, page: 1 }));
+  };
+
+  const handleAssetToggle = (type) => {
+    setAssetFilter((prev) => {
+      const newState = { ...prev, [type]: !prev[type] };
+      const assets = [];
+      if (newState.forex) assets.push("FOREX");
+      if (newState.crypto) assets.push("CRYPTO");
+      setQueryFilters((q) => ({
+        ...q,
+        assets: assets.length > 0 ? assets : [],
+        page: 1,
+      }));
+      return newState;
+    });
+  };
+
   const fmtCurrency = (val) => {
-    if (val === stats.lifetime_pnl) {
-      return `R ${stats.lifetime_pnl > 0 ? "+" : "-"}${val?.toFixed(2) ?? "0.00"}`;
-    } else {
-      return `R ${val?.toFixed(2) ?? "0.00"}`;
+    const safeVal = Math.abs(val) < 0.005 ? 0 : val;
+    return `R ${(safeVal || 0).toFixed(2)}`;
+  };
+
+  const fmtPnL = (val) => {
+    if (val === undefined || val === null || Math.abs(val) < 0.005) {
+      return <span className="text-white">R 0.00</span>;
     }
+    const isWin = val > 0;
+    return (
+      <span className={isWin ? "text-primary" : "text-danger"}>
+        R {isWin ? "+" : ""}
+        {val.toFixed(2)}
+      </span>
+    );
   };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       {/* Top Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {/* Balance */}
-        <div className="bg-panel-dark border border-border-dark p-4 flex items-center justify-between shadow-md group hover:border-primary/50 transition-colors">
-          <div>
-            <div className="text-[10px] uppercase text-gray-500 tracking-wider mb-1 group-hover:text-primary transition-colors">
-              Account Balance
+        {[
+          {
+            label: "Current Balance",
+            val: fmtCurrency(stats.balance),
+            icon: <MdAccountBalanceWallet />,
+          },
+          {
+            label: "Win Rate",
+            val: `${(stats.lifetime_wr || 0).toFixed(1)}%`,
+            icon: <MdEmojiEvents className="text-secondary" />,
+          },
+          {
+            label: "Total Trades",
+            val: stats.total_trades || 0,
+            icon: <MdHistory />,
+          },
+          {
+            label: "Net PnL",
+            val: fmtPnL(stats.lifetime_pnl),
+            icon: (
+              <MdShowChart
+                className={
+                  (stats.lifetime_pnl || 0) >= 0
+                    ? "text-primary"
+                    : "text-danger"
+                }
+              />
+            ),
+          },
+        ].map((item, i) => (
+          <div
+            key={i}
+            className="bg-panel-dark border border-border-dark p-4 flex justify-between items-center"
+          >
+            <div>
+              <div className="text-[10px] uppercase text-gray-500 tracking-wider mb-1">
+                {item.label}
+              </div>
+              <div className="text-xl font-bold text-white">{item.val}</div>
             </div>
-            <div className="text-2xl font-bold text-white tracking-tight">
-              {fmtCurrency(stats.balance)}
-            </div>
-            <div className="text-[10px] text-primary mt-1 flex items-center gap-1">
-              <MdAccountBalance /> MT5 LIVE
-            </div>
-          </div>
-          <div className="h-10 w-10 rounded bg-gray-800 flex items-center justify-center">
-            <MdAccountBalanceWallet className="text-gray-500" />
-          </div>
-        </div>
-
-        {/* Win Rate */}
-        <div className="bg-panel-dark border border-border-dark p-4 flex items-center justify-between shadow-md">
-          <div>
-            <div className="text-[10px] uppercase text-gray-500 tracking-wider mb-1">
-              Win Rate (Lifetime)
-            </div>
-            <div className="text-xl font-bold text-primary">
-              {stats.lifetime_wr?.toFixed(1)}%
-            </div>
-          </div>
-          <MdEmojiEvents className="text-primary/50 text-2xl" />
-        </div>
-
-        {/* Total Trades */}
-        <div className="bg-panel-dark border border-border-dark p-4 flex items-center justify-between shadow-md">
-          <div>
-            <div className="text-[10px] uppercase text-gray-500 tracking-wider mb-1">
-              Total Trades
-            </div>
-            <div className="text-xl font-bold text-secondary">
-              {stats.total_trades}
-            </div>
-          </div>
-          <MdHistory className="text-secondary/50 text-2xl" />
-        </div>
-
-        {/* Session PnL */}
-        <div className="bg-panel-dark border border-border-dark p-4 flex items-center justify-between shadow-md">
-          <div>
-            <div className="text-[10px] uppercase text-gray-500 tracking-wider mb-1">
-              Lifetime PnL
-            </div>
-            <div
-              className={`text-xl font-bold ${stats.lifetime_pnl >= 0 ? "text-primary" : "text-danger"}`}
-            >
-              {fmtCurrency(stats.lifetime_pnl)}
+            <div className="text-2xl text-gray-600 bg-gray-900 p-2 rounded">
+              {item.icon}
             </div>
           </div>
-          <MdShowChart className="text-primary/50 text-2xl" />
-        </div>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -173,22 +225,20 @@ export default function History() {
                     <MdCalendarToday className="absolute left-3 top-2.5 text-gray-600" />
                     <input
                       type="date"
+                      name="start"
                       className="w-full bg-black border border-gray-800 text-gray-300 text-xs py-2 pl-9 pr-2 focus:border-primary outline-none"
                       value={dateRange.start}
-                      onChange={(e) =>
-                        setDateRange({ ...dateRange, start: e.target.value })
-                      }
+                      onChange={handleDateChange}
                     />
                   </div>
                   <div className="relative">
                     <MdEvent className="absolute left-3 top-2.5 text-gray-600" />
                     <input
                       type="date"
+                      name="end"
                       className="w-full bg-black border border-gray-800 text-gray-300 text-xs py-2 pl-9 pr-2 focus:border-primary outline-none"
                       value={dateRange.end}
-                      onChange={(e) =>
-                        setDateRange({ ...dateRange, end: e.target.value })
-                      }
+                      onChange={handleDateChange}
                     />
                   </div>
                 </div>
@@ -229,12 +279,7 @@ export default function History() {
                         type="checkbox"
                         className="form-checkbox bg-black border-gray-700 text-primary rounded-sm focus:ring-0 focus:ring-offset-0"
                         checked={assetFilter[asset.id]}
-                        onChange={(e) =>
-                          setAssetFilter({
-                            ...assetFilter,
-                            [asset.id]: e.target.checked,
-                          })
-                        }
+                        onChange={() => handleAssetToggle(asset.id)}
                       />
                       <span className="text-sm text-gray-400 group-hover:text-white transition-colors">
                         {asset.label}
@@ -252,7 +297,7 @@ export default function History() {
                 <select
                   className="w-full bg-black border border-gray-800 text-gray-300 text-xs py-2 px-3 focus:border-primary outline-none"
                   value={outcomeFilter}
-                  onChange={(e) => setOutcomeFilter(e.target.value)}
+                  onChange={handleOutcomeChange}
                 >
                   <option>All Outcomes</option>
                   <option>Wins Only</option>
@@ -312,7 +357,25 @@ export default function History() {
                   </tr>
                 </thead>
                 <tbody className="text-sm">
-                  {history.length > 0 ? (
+                  {isFetching ? (
+                    <tr>
+                      <td
+                        colSpan="5"
+                        className="text-center py-8 text-gray-500 animate-pulse"
+                      >
+                        Loading Trade History...
+                      </td>
+                    </tr>
+                  ) : history.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan="5"
+                        className="text-center py-8 text-gray-500 italic"
+                      >
+                        No records found matching filters.
+                      </td>
+                    </tr>
+                  ) : (
                     history.map((t, idx) => {
                       const isWin = t.result === 1;
                       const colorClass = isWin ? "text-primary" : "text-danger";
@@ -353,10 +416,7 @@ export default function History() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
-                            <div className={`font-bold ${colorClass}`}>
-                              {t.pnl >= 0 ? "+" : "-"} R{" "}
-                              {Math.abs(t.pnl).toFixed(2)}
-                            </div>
+                            {fmtPnL(t.pnl)}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <div className="flex items-center justify-center gap-2">
@@ -374,15 +434,6 @@ export default function History() {
                         </tr>
                       );
                     })
-                  ) : (
-                    <tr>
-                      <td
-                        colSpan="5"
-                        className="text-center py-8 text-gray-500 italic"
-                      >
-                        No records found matching filters.
-                      </td>
-                    </tr>
                   )}
                 </tbody>
               </table>
