@@ -16,30 +16,43 @@ class StrategyAnalyzer:
         """
         # Pattern Override (High Priority)
         for p in patterns:
-            if p["pattern"] in ["Head & Shoulders", "Double Top", "Double Bottom"]:
+            if p["pattern"] in [
+                "Head & Shoulders",
+                "Inverse H&S",
+                "Double Top",
+                "Double Bottom",
+                "Elliot Wave 3 Setup",
+            ]:
                 # Filter: Only trade patterns in direction of HTF Trend
                 if (htf_trend == "BULL" and p["direction"] == "LONG") or (
                     htf_trend == "BEAR" and p["direction"] == "SHORT"
                 ):
                     p["strategy"] = f"FX Pattern {p['pattern']}"
                     return p
+                # Reversal Exceptions (Counter-trend allowed if strong pattern)
+                if p["pattern"] in ["Inverse H&S", "Double Bottom"] and p["direction"] == "LONG":
+                    p["strategy"] = f"FX Reversal {p['pattern']}"
+                    return p
+                if p["pattern"] in ["Head & Shoulders", "Double Top"] and p["direction"] == "SHORT":
+                    p["strategy"] = f"FX Reversal {p['pattern']}"
+                    return p
 
-        # 2. Strategy: The "Golden Pullback" (Trend Following)
+        # 1. Strategy: The "Golden Pullback" (Trend Following)
         res = self._fx_golden_pullback(curr, htf_trend)
         if res:
             return res
 
-        # 3. Strategy: Bollinger Mean Reversion (Ranging Markets)
+        # 2. Strategy: Bollinger Mean Reversion (Ranging Markets)
         res = self._fx_bb_reversion(curr)
         if res:
             return res
 
-        # 4. Strategy: Fair Value Gap (3-Candle + Limit)
+        # 3. Strategy: Fair Value Gap (3-Candle + Limit)
         res = self._fx_fvg_entry(curr, df)
         if res:
             return res
 
-        # 5. Strategy: Volatility Breakout (London/NY Open Logic)
+        # 4. Strategy: Volatility Breakout (London/NY Open Logic)
         res = self._fx_volatility_breakout(curr, df)
         if res:
             return res
@@ -51,36 +64,88 @@ class StrategyAnalyzer:
         Crypto Strategy Router.
         Prioritizes Momentum > Volatility > Trend.
         """
-        # 1. Pattern: Flags (High Win-rate in Crypto)
+        # Pattern: Flags & Wedges (High Win-rate in Crypto)
         for p in patterns:
-            if p["pattern"] in ["Bull Flag", "Bear Flag"]:
-                p["strategy"] = "Crypto Flag Breakout"
+            if p["pattern"] in ["Bull Flag", "Bear Flag", "Falling Wedge", "Rising Wedge", "Elliot Wave 3 Setup"]:
+                p["strategy"] = f"Crypto {p['pattern']}"
                 return p
 
-        # 2. Strategy: Ichimoku Cloud Breakout (Pure Momentum)
+        # 1. Strategy: Ichimoku Cloud Breakout (Pure Momentum)
         res = self._crypto_ichimoku_breakout(curr)
         if res:
             return res
 
-        # 3. Strategy: EMA Trend Flow (The "Wave")
+        # 2. Strategy: EMA Trend Flow (The "Wave")
         res = self._crypto_ema_trend_flow(curr)
         if res:
             return res
 
-        # 4. Strategy: VWAP Rejection (Session Reset)
+        # 3. Strategy: VWAP Rejection (Session Reset)
         res = self._crypto_vwap_rejection(curr)
         if res:
             return res
 
-        # 5. Strategy: Liquidity Grab (V-Shape Reversal)
+        # 4. Strategy: Liquidity Grab (V-Shape Reversal)
         res = self._crypto_liquidity_grab(curr, df)
+        if res:
+            return res
+
+        # 5. Fallback: Wave Swing (Elliot logic without strict pattern)
+        res = self._common_wave_entry(curr, df)
         if res:
             return res
 
         return None
 
     # ==========================================
-    # FOREX STRATEGIES (5 Solid Implementations)
+    # COMMON STRATEGIES
+    # ==========================================
+
+    def _common_wave_entry(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Simplified Wave Swing entry for when a specific pattern isn't fully formed but structure is good.
+        """
+        if len(df) < 20:
+            return None
+
+        # Detect simple Higher High + Higher Low sequence for Longs
+        # Using simple EMA alignment as proxy for wave direction
+
+        e9 = curr.get("ema_9", curr["close"])
+        e20 = curr.get("ema_20", curr["close"])
+        e50 = curr.get("ema_50", curr["close"])
+
+        # Bullish Wave
+        if e9 > e20 > e50 and curr["rsi"] > 50 and curr["rsi"] < 70:
+            # Check for recent small pullback (High - Close > 0.5 * ATR) - buying the dip
+            high_20 = df["high"].tail(10).max()
+            if (high_20 - curr["close"]) > (curr["atr"] * 0.5):
+                return {
+                    "strategy": "Wave Flow",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 75.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": curr["low"] - curr["atr"],
+                }
+
+        # Bearish Wave
+        if e9 < e20 < e50 and curr["rsi"] < 50 and curr["rsi"] > 30:
+            low_20 = df["low"].tail(10).min()
+            if (curr["close"] - low_20) > (curr["atr"] * 0.5):
+                return {
+                    "strategy": "Wave Flow",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 75.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": curr["high"] + curr["atr"],
+                }
+
+        return None
+
+    # ==========================================
+    # FOREX STRATEGIES (4 Solid Implementations)
     # ==========================================
 
     def _fx_golden_pullback(self, curr: pd.Series, htf_trend: Literal["BULL", "BEAR", "FLAT"]) -> Optional[Dict]:

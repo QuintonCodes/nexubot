@@ -113,7 +113,14 @@ class DatabaseManager:
             connection_string = connection_string.split("?")[0]
 
         self.engine = create_async_engine(
-            connection_string, echo=False, pool_pre_ping=True, connect_args={"ssl": "require"}
+            connection_string,
+            echo=False,
+            pool_pre_ping=True,
+            connect_args={"ssl": "require"},
+            pool_size=20,  # Increased for concurrent batch scanning
+            max_overflow=10,  # Allow burst connections
+            pool_recycle=1800,  # Recycle connections every 30 mins
+            pool_timeout=30,
         )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -426,13 +433,16 @@ class DatabaseManager:
         try:
             async with self.async_session() as session:
                 win_rate = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
+
+                pnl_val = stats.get("pnl", stats.get("pnl_zar", 0.0))
+
                 analytics = SessionAnalytics(
                     session_id=session_id,
                     start_time=start_time,
                     end_time=time.time(),
                     total_trades=stats["total"],
                     win_rate=win_rate,
-                    net_pnl_zar=stats["pnl_zar"],
+                    net_pnl_zar=pnl_val,
                 )
                 session.add(analytics)
                 await session.commit()

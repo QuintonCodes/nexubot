@@ -11,7 +11,9 @@ from datetime import datetime, timedelta
 from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
+from src.utils.backfill import backfill_data
 from src.utils.logger import setup_logging
+from src.utils.trainer import ModelTrainer
 from src.config import (
     CANDLE_LIMIT,
     DEFAULT_MIN_CONFIDENCE,
@@ -85,6 +87,8 @@ class NexubotGUI:
 
         self.is_running = False
         self.execution_mode = "SIGNAL_ONLY"
+        self.system_status = "IDLE"  # IDLE, BACKFILLING, TRAINING
+
         self.session_start = time.time()
         self.session_id = f"SESSION_{int(time.time())}"
         self.session_stats = {
@@ -286,6 +290,7 @@ class NexubotGUI:
             "chart_labels": [],
             "chart_data": [],
             "mode": self.execution_mode,
+            "system_status": self.system_status,
             "recent_trades": [],
             "timestamp": time.time(),
         }
@@ -537,6 +542,9 @@ class NexubotGUI:
 
     async def process_batch(self, symbols: list):
         """Processes a list of symbols concurrently."""
+        if self.system_status != "IDLE":
+            return
+
         signals_found = 0
 
         for sym in symbols:
@@ -582,6 +590,8 @@ class NexubotGUI:
 
         await asyncio.sleep(1)
         self._apply_settings_to_engine()
+        self.ai_engine.nn_brain = asyncio.to_thread(lambda: self.ai_engine.nn_brain.__init__(auto_load=True))
+
         await self.initialize_connection(self.settings["login"], self.settings["server"], self.settings["password"])
         return True
 
@@ -599,6 +609,11 @@ class NexubotGUI:
 
         while self.is_running:
             try:
+                # If training, pause scanning
+                if self.system_status != "IDLE":
+                    await asyncio.sleep(2)
+                    continue
+
                 # Fail-safe: Check if MT5 is actually alive
                 if not self.provider.connected:
                     logger.warning("⚠️ MT5 Disconnected. Pausing scanner...")
@@ -621,7 +636,7 @@ class NexubotGUI:
                     active_forex = await self.sort_pairs(active_forex)
                     last_sort_time = now
 
-                # 3. Batch Process (Paralle Scanning)
+                # 3. Batch Process (Parallel Scanning)
                 tasks = []
 
                 if now - last_crypto > SCAN_INTERVAL_CRYPTO:
@@ -685,6 +700,43 @@ class NexubotGUI:
         await self.db.close()
         await self.provider.shutdown()
         return True
+
+    async def trigger_manual_training(self, symbol=None):
+        """
+        Orchestrates the entire training lifecycle:
+        1. Backfill Data (Full or Partial)
+        2. Train Model
+        3. Reload Engine
+        """
+        if self.system_status != "IDLE":
+            logger.warning("⚠️ Training already in progress.")
+            return False
+
+        try:
+            self.system_status = "BACKFILLING"
+            logger.info(f"🔄 Starting Manual Training Cycle. Target: {symbol if symbol else 'ALL'}")
+
+            # 1. Backfill
+            target = [symbol] if symbol else None
+            await backfill_data(target_symbols=target)
+
+            # 2. Train
+            self.system_status = "TRAINING"
+            logger.info("🧠 Backfill Complete. Starting Neural Training...")
+
+            # Run training in thread to avoid blocking main loop
+            await asyncio.to_thread(ModelTrainer.train_if_needed, force=True)
+
+            # 3. Restart to apply
+            logger.info("✅ Training Complete. Reloading Systems...")
+            await self.restart_system()
+
+            self.system_status = "IDLE"
+            return True
+        except Exception as e:
+            logger.error(f"Training Cycle Failed: {e}")
+            self.system_status = "IDLE"
+            return False
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
@@ -829,7 +881,7 @@ class NexubotGUI:
                     else:
                         self.session_stats["losses"] += 1
                     self.session_stats["total"] += 1
-                    self.session_stats["pnl_zar"] += final_pnl
+                    self.session_stats["pnl"] += final_pnl
 
                     unique_id = f"{symbol}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
                     await self.db.log_trade(
@@ -896,6 +948,7 @@ def fetch_dashboard_update():
         "chart_labels": [],
         "chart_data": [],
         "mode": "SIGNAL_ONLY",
+        "system_status": "IDLE",
     }
     if not bot_instance:
         return default_data
@@ -1064,4 +1117,15 @@ def stop_and_reset():
         loop = _get_persistent_loop()
         future = asyncio.run_coroutine_threadsafe(bot_instance.stop_session(), loop)
         return _safe_get_result(future, timeout=3.0)
+    return True
+
+
+@eel.expose
+def trigger_training(symbol=None):
+    """Triggered from Frontend to start backfill/training."""
+    global bot_instance
+    if not bot_instance:
+        return False
+    loop = _get_persistent_loop()
+    future = asyncio.run_coroutine_threadsafe(bot_instance.trigger_manual_training(symbol), loop)
     return True

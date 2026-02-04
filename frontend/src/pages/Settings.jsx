@@ -1,16 +1,21 @@
 import { useState } from "react";
 import {
   MdBadge,
+  MdCloudDownload,
   MdDns,
   MdLink,
   MdPsychology,
+  MdRefresh,
   MdSettingsSuggest,
   MdShield,
+  MdStorage,
   MdSync,
   MdVpnKey,
 } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
+
 import { useSaveSettings, useSettingsData } from "../hooks/useEelQuery";
+import { callEel } from "../lib/eel";
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -55,6 +60,9 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
     confidence: initialData.confidence ?? 75,
   });
 
+  const [trainSymbol, setTrainSymbol] = useState("");
+  const [trainingTriggered, setTrainingTriggered] = useState(false);
+
   const handleChange = (e) => {
     const { id, value, type, checked } = e.target;
     setForm((prev) => ({
@@ -75,6 +83,27 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
         alert("Failed to save settings.");
       },
     });
+  };
+
+  const handleManualTrain = async (symbol = null) => {
+    if (
+      confirm(
+        symbol
+          ? `Refresh data for ${symbol}?`
+          : "Refresh ALL data and retrain? This may take time.",
+      )
+    ) {
+      setTrainingTriggered(true);
+      try {
+        await callEel("trigger_training", symbol);
+        alert("Training process started in background.");
+      } catch (e) {
+        console.error(e);
+        alert("Failed to trigger training.");
+      } finally {
+        setTimeout(() => setTrainingTriggered(false), 2000);
+      }
+    }
   };
 
   // Helper for Neural Meta info
@@ -226,6 +255,64 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
                 <div className="border-l-2 border-warning bg-gray-900/50 p-3 text-[10px] text-gray-400">
                   WARNING: High volatility scaling may increase drawdown during
                   news events.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* NEW: Data & Model Management Panel */}
+        <div className="bg-panel-dark relative border border-gray-800 p-1">
+          <div className="border border-gray-800/50 bg-background-dark/50 p-6">
+            <h3 className="mb-6 flex items-center gap-2 text-lg font-bold text-white">
+              <MdStorage className="text-sm text-purple-400" /> DATA & MODEL
+              MANAGEMENT
+            </h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {/* Left: Global Operations */}
+              <div className="space-y-4">
+                <div className="text-sm text-gray-400">
+                  Perform a full backfill on all symbols in your Market Watch,
+                  clean the dataset, and retrain the Neural Network.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleManualTrain(null)}
+                  disabled={trainingTriggered}
+                  className="flex w-full items-center justify-center gap-2 bg-purple-500/10 border border-purple-500/50 hover:bg-purple-500/20 text-purple-300 py-3 px-4 uppercase text-xs font-bold tracking-wider transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {trainingTriggered ? (
+                    <MdSync className="animate-spin" />
+                  ) : (
+                    <MdCloudDownload />
+                  )}
+                  Refresh All Data & Retrain
+                </button>
+              </div>
+
+              {/* Right: Single Symbol */}
+              <div className="space-y-4 border-l border-gray-800 pl-8">
+                <div className="text-sm text-gray-400">
+                  Partial update: Refresh data for a specific symbol only (e.g.,
+                  BTCUSD).
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={trainSymbol}
+                    onChange={(e) => setTrainSymbol(e.target.value)}
+                    placeholder="SYMBOL (e.g. EURUSD)"
+                    className="w-full bg-black border border-gray-700 px-3 text-sm text-white placeholder-gray-600 focus:border-purple-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleManualTrain(trainSymbol)}
+                    disabled={!trainSymbol || trainingTriggered}
+                    className="bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white px-4 py-2 uppercase text-xs font-bold transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    <MdRefresh className="text-lg" />
+                  </button>
                 </div>
               </div>
             </div>

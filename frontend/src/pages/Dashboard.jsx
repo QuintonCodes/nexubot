@@ -8,6 +8,7 @@ import {
   MdClose,
   MdEmojiEvents,
   MdHistory,
+  MdHourglassTop,
   MdSettingsSuggest,
   MdShowChart,
 } from "react-icons/md";
@@ -18,12 +19,15 @@ import { callEel } from "../lib/eel";
 
 function Dashboard() {
   const { data, isLoading } = useDashboardData();
-
   const [localModeOverride, setLocalModeOverride] = useState(null);
 
   // Derive the final display value: Local state takes priority, then server data
   const isAutoMode =
     localModeOverride !== null ? localModeOverride : data?.mode === "FULL_AUTO";
+
+  // Check System Status
+  const systemStatus = data?.system_status || "IDLE";
+  const isBusy = systemStatus !== "IDLE";
 
   // --- Chart Refs ---
   const chartRef = useRef(null);
@@ -151,6 +155,17 @@ function Dashboard() {
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       {/* Top Stats Grid */}
+
+      {/* SYSTEM BUSY BANNER */}
+      {isBusy && (
+        <div className="w-full bg-purple-900/30 border border-purple-500/50 p-4 rounded-sm flex items-center justify-center gap-4 animate-pulse">
+          <MdHourglassTop className="text-purple-400 text-2xl animate-spin" />
+          <div className="text-purple-100 font-bold tracking-widest">
+            SYSTEM IS {systemStatus}... TRADING PAUSED.
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Balance Card */}
         <div className="bg-panel-dark border border-border-dark p-4 flex items-center justify-between shadow-[0_0_10px_rgba(0,0,0,0.3)] hover:border-primary/50 transition-colors group">

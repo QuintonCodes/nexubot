@@ -132,7 +132,7 @@ class AITradingEngine:
         # Calculate Chase Distance (in ATR multiples)
         signal_close_price = curr["close"]
         chase_dist = abs(current_market_price - signal_close_price)
-        if chase_dist > (atr * 0.5):
+        if chase_dist > (atr * 0.4):
             logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
             return None
 
@@ -152,8 +152,8 @@ class AITradingEngine:
 
         # Dynamic TP / SL calculation
         sl_multiplier = 1.0
-        if self._is_high_volatility_symbol(symbol):
-            sl_multiplier = 1.2
+        if self._is_high_volatility_symbol(symbol) or atr > (curr["close"] * 0.005):
+            sl_multiplier = 1.4
 
         sl_dist = atr * sl_multiplier
         sl_dist = max(sl_dist, point * 50)
@@ -161,7 +161,7 @@ class AITradingEngine:
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
             suggested_dist = abs(signal["suggested_sl"] - entry_price)
-            if (atr * 0.5) < suggested_dist < (atr * 4.0):
+            if (atr * 0.3) < suggested_dist < (atr * 5.0):
                 sl_dist = suggested_dist
 
         # Probability calibration hook
@@ -196,7 +196,7 @@ class AITradingEngine:
                 return None
 
         # Enforce minimum acceptable RR for low-prob trades
-        if rr < 1.2 and prob < 0.65:
+        if rr < 1.1 and prob < 0.70:
             self._log_once(
                 f"rr_bad_{symbol}", f"Skipping {symbol}: Low RR {rr:.2f} with low prob {prob:.2f}", logging.DEBUG
             )

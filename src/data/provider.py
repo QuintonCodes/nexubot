@@ -11,6 +11,9 @@ from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 logger = logging.getLogger(__name__)
 
+# Markets to ignore
+IGNORED_CURRENCIES = ["RUB", "TRY", "ZAR", "MXN", "CNH", "HKD", "SGD", "NOK", "SEK", "PLN", "DKK", "HUF"]
+
 
 class DataProvider:
     """
@@ -141,12 +144,25 @@ class DataProvider:
         categorized = {"crypto": [], "forex": []}
 
         for s in symbols:
+            # 1. Ensure symbol is not disabled by broker
+            if s.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                continue
+
+            # 2. Ensure symbol is actually visible/selected
+            if not s.visible:
+                continue
+
+            name = s.name.upper()
+
+            # Filter Exotics
+            if any(ign in name for ign in IGNORED_CURRENCIES):
+                continue
+
             category = self.get_symbol_type(s.name)
 
             if category == "CRYPTO":
                 categorized["crypto"].append(s.name)
             else:
-                # Treat Indices/Metals/Forex as 'Forex' for strategy purposes
                 categorized["forex"].append(s.name)
 
         return categorized
@@ -226,6 +242,7 @@ class DataProvider:
             "trade_tick_value": info.trade_tick_value,
             "currency_profit": info.currency_profit,
             "currency_base": info.currency_base,
+            "filling_mode": info.filling_mode,
         }
 
     async def check_live_news_block(self, symbol: str, currencies: List[str]) -> bool:
@@ -265,6 +282,18 @@ class DataProvider:
             action = mt5.TRADE_ACTION_PENDING
             type_order = mt5.ORDER_TYPE_BUY_LIMIT if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
 
+        symbol_info = mt5.symbol_info(symbol)
+        fill_mode = mt5.ORDER_FILLING_FOK  # Default for safety
+        if symbol_info:
+            # Check bits: 1=IOC, 2=FOK
+            # If IOC allowed (bit 1), prefer IOC for market execution to avoid rejection
+            if (symbol_info.filling_mode & mt5.SYMBOL_FILLING_IOC) != 0:
+                fill_mode = mt5.ORDER_FILLING_IOC
+            elif (symbol_info.filling_mode & mt5.SYMBOL_FILLING_FOK) != 0:
+                fill_mode = mt5.ORDER_FILLING_FOK
+            else:
+                fill_mode = 0  # Default return
+
         request = {
             "action": action,
             "symbol": symbol,
@@ -273,11 +302,11 @@ class DataProvider:
             "price": signal["price"],
             "sl": signal["sl"],
             "tp": signal["tp"],
-            "deviation": 10,
+            "deviation": 20,
             "magic": 123456,
             "comment": f"Nexubot {signal['strategy']}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": fill_mode,
         }
 
         result = await asyncio.to_thread(mt5.order_send, request)
@@ -287,7 +316,7 @@ class DataProvider:
             return True
         else:
             err = result.comment if result else "Unknown Error"
-            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err}")
+            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err} | Retcode: {result.retcode if result else 'N/A'}")
             return False
 
     async def initialize(self) -> bool:

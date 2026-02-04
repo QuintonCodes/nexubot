@@ -10,103 +10,79 @@ class PatternRecognizer:
     Features: Pivots, Structure, Classic Patterns (H&S, Flags, Triangles).
     """
 
-    def _find_reversals(self, df: pd.DataFrame) -> List[Dict]:
+    def _find_elliot_wave_setup(self, df: pd.DataFrame) -> List[Dict]:
+        """
+        Detects potential Wave 3 setups by identifying Wave 1 Impulse + Wave 2 Retracement (50-61.8%).
+        """
         patterns = []
-        local = df.iloc[-60:].copy()
-        curr_price = local.iloc[-1]["close"]
+        if len(df) < 50:
+            return patterns
 
-        highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=3)[0]
-        lows_idx = argrelextrema(local["low"].values, np.less_equal, order=3)[0]
+        # Need reliable pivots
+        local = df.iloc[-50:].copy()
+        highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=5)[0]
+        lows_idx = argrelextrema(local["low"].values, np.less_equal, order=5)[0]
 
-        highs = local.iloc[highs_idx].dropna()
-        lows = local.iloc[lows_idx].dropna()
-        last_pos = len(local) - 1
+        if len(highs_idx) < 2 or len(lows_idx) < 2:
+            return patterns
 
-        # helper: safe recency check (positions, not index labels)
-        def is_recent(row_pos, max_age=15):
-            return (last_pos - row_pos) <= max_age
+        curr = local.iloc[-1]
 
-        # --- DOUBLE TOP (Bearish) ---
-        if len(highs) >= 2:
-            h1 = highs.iloc[-2]
-            h2 = highs.iloc[-1]
-            pos_h2 = highs.index.get_loc(h2.name)
-            # ensure recency and similar peak heights
-            if is_recent(pos_h2, max_age=15) and abs(h1["high"] - h2["high"]) / h1["high"] < 0.002:
-                # Tolerance 0.15% (Slightly looser for faster detection)
-                mask = (local.index > h1.name) & (local.index < h2.name)
-                if mask.any():
-                    neckline = local.loc[mask, "low"].min()
-                    # require reasonable dip between peaks and volume confirmation
-                    dip_size = max(h1["high"], h2["high"]) - neckline
-                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
-                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
-                        dist_to_break = (curr_price - neckline) / curr_price
-                        if curr_price < neckline or (dist_to_break < 0.0015 and vol_ok):
-                            patterns.append(
-                                {
-                                    "pattern": "Double Top",
-                                    "signal": "SELL",
-                                    "direction": "SHORT",
-                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
-                                    "order_type": "STOP",
-                                    "price": neckline,
-                                }
-                            )
+        # Bullish Wave 3 Setup: Low -> High (Wave 1) -> Higher Low (Wave 2)
+        # Check last major low and high
+        l1 = local.iloc[lows_idx[-2]]
+        h1 = local.iloc[highs_idx[-1]]
+        l2 = local.iloc[lows_idx[-1]]  # Potential Wave 2 bottom
 
-        # --- DOUBLE BOTTOM (Bullish) ---
-        if len(lows) >= 2:
-            l1 = lows.iloc[-2]
-            l2 = lows.iloc[-1]
-            pos_l2 = lows.index.get_loc(l2.name)
-            if is_recent(pos_l2, max_age=15) and abs(l1["low"] - l2["low"]) / l1["low"] < 0.002:
-                mask = (local.index > l1.name) & (local.index < l2.name)
-                if mask.any():
-                    neckline = local.loc[mask, "high"].max()
-                    dip_size = neckline - min(l1["low"], l2["low"])
-                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
-                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
-                        dist_to_break = (neckline - curr_price) / neckline
-                        if curr_price > neckline or (dist_to_break < 0.0015 and vol_ok):
-                            patterns.append(
-                                {
-                                    "pattern": "Double Bottom",
-                                    "signal": "BUY",
-                                    "direction": "LONG",
-                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
-                                    "order_type": "STOP",
-                                    "price": neckline,
-                                }
-                            )
+        if l1.name < h1.name < l2.name:
+            # Check Impulse Strength
+            wave_1_height = h1["high"] - l1["low"]
+            if wave_1_height > (curr["atr"] * 3):
+                # Check Retracement Depth (Golden Zone)
+                retracement = h1["high"] - l2["low"]
+                ratio = retracement / wave_1_height
 
-        # --- HEAD AND SHOULDERS (Bearish) ---
-        if len(highs) >= 3:
-            l_sh = highs.iloc[-3]
-            head = highs.iloc[-2]
-            r_sh = highs.iloc[-1]
+                if 0.382 <= ratio <= 0.786:
+                    # Check if we are reversing up from l2
+                    if curr["close"] > l2["high"] and curr["rsi"] > 50:
+                        patterns.append(
+                            {
+                                "pattern": "Elliot Wave 3 Setup",
+                                "strategy": "Wave Swing",
+                                "signal": "BUY",
+                                "direction": "LONG",
+                                "confidence": 84.0,
+                                "order_type": "MARKET",
+                                "price": curr["close"],
+                                "suggested_sl": l2["low"],
+                            }
+                        )
 
-            # head must be clearly higher than shoulders and shoulders roughly equal
-            shoulder_tol = 0.02
-            if head["high"] > l_sh["high"] and head["high"] > r_sh["high"]:
-                if abs(l_sh["high"] - r_sh["high"]) / l_sh["high"] < shoulder_tol:
-                    # neckline: lower of the troughs between L->H and H->R
-                    neckline_1 = local.loc[l_sh.name : head.name, "low"].min()
-                    neckline_2 = local.loc[head.name : r_sh.name, "low"].min()
-                    neckline = min(neckline_1, neckline_2)
-                    # require meaningful head-to-neck gap and recent structure
-                    if (head["high"] - neckline) > (local.iloc[-1]["atr"] * 0.8):
-                        if curr_price < neckline:
-                            vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
-                            patterns.append(
-                                {
-                                    "pattern": "Head & Shoulders",
-                                    "signal": "SELL",
-                                    "direction": "SHORT",
-                                    "confidence": 85.0 + (5.0 if vol_ok else 0.0),
-                                    "order_type": "STOP",
-                                    "price": neckline,
-                                }
-                            )
+        # Bearish Wave 3 Setup: High -> Low (Wave 1) -> Lower High (Wave 2)
+        h1_bear = local.iloc[highs_idx[-2]]
+        l1_bear = local.iloc[lows_idx[-1]]
+        h2_bear = local.iloc[highs_idx[-1]]
+
+        if h1_bear.name < l1_bear.name < h2_bear.name:
+            wave_1_height = h1_bear["high"] - l1_bear["low"]
+            if wave_1_height > (curr["atr"] * 3):
+                retracement = h2_bear["high"] - l1_bear["low"]
+                ratio = retracement / wave_1_height
+
+                if 0.382 <= ratio <= 0.786:
+                    if curr["close"] < h2_bear["low"] and curr["rsi"] < 50:
+                        patterns.append(
+                            {
+                                "pattern": "Elliot Wave 3 Setup",
+                                "strategy": "Wave Swing",
+                                "signal": "SELL",
+                                "direction": "SHORT",
+                                "confidence": 84.0,
+                                "order_type": "MARKET",
+                                "price": curr["close"],
+                                "suggested_sl": h2_bear["high"],
+                            }
+                        )
 
         return patterns
 
@@ -155,6 +131,128 @@ class PatternRecognizer:
 
         return patterns
 
+    def _find_reversals(self, df: pd.DataFrame) -> List[Dict]:
+        patterns = []
+        local = df.iloc[-60:].copy()
+        curr_price = local.iloc[-1]["close"]
+
+        highs_idx = argrelextrema(local["high"].values, np.greater_equal, order=3)[0]
+        lows_idx = argrelextrema(local["low"].values, np.less_equal, order=3)[0]
+
+        highs = local.iloc[highs_idx].dropna()
+        lows = local.iloc[lows_idx].dropna()
+        last_pos = len(local) - 1
+
+        # helper: safe recency check (positions, not index labels)
+        def is_recent(row_pos, max_age=15):
+            return (last_pos - row_pos) <= max_age
+
+        # --- DOUBLE TOP (Bearish) ---
+        if len(highs) >= 2:
+            h1 = highs.iloc[-2]
+            h2 = highs.iloc[-1]
+            pos_h2 = highs.index.get_loc(h2.name)
+            # ensure recency and similar peak heights
+            if is_recent(pos_h2, max_age=15) and abs(h1["high"] - h2["high"]) / h1["high"] < 0.002:
+                mask = (local.index > h1.name) & (local.index < h2.name)
+                if mask.any():
+                    neckline = local.loc[mask, "low"].min()
+                    dip_size = max(h1["high"], h2["high"]) - neckline
+                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
+                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
+                        dist_to_break = (curr_price - neckline) / curr_price
+                        if curr_price < neckline or (dist_to_break < 0.0015 and vol_ok):
+                            patterns.append(
+                                {
+                                    "pattern": "Double Top",
+                                    "signal": "SELL",
+                                    "direction": "SHORT",
+                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
+
+        # --- DOUBLE BOTTOM (Bullish) ---
+        if len(lows) >= 2:
+            l1 = lows.iloc[-2]
+            l2 = lows.iloc[-1]
+            pos_l2 = lows.index.get_loc(l2.name)
+            if is_recent(pos_l2, max_age=15) and abs(l1["low"] - l2["low"]) / l1["low"] < 0.002:
+                mask = (local.index > l1.name) & (local.index < l2.name)
+                if mask.any():
+                    neckline = local.loc[mask, "high"].max()
+                    dip_size = neckline - min(l1["low"], l2["low"])
+                    if dip_size > (local.iloc[-1]["atr"] * 0.5):
+                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
+                        dist_to_break = (neckline - curr_price) / neckline
+                        if curr_price > neckline or (dist_to_break < 0.0015 and vol_ok):
+                            patterns.append(
+                                {
+                                    "pattern": "Double Bottom",
+                                    "signal": "BUY",
+                                    "direction": "LONG",
+                                    "confidence": 83.0 + (5.0 if vol_ok else 0.0),
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
+
+        # --- HEAD AND SHOULDERS (Bearish) ---
+        if len(highs) >= 3:
+            l_sh = highs.iloc[-3]
+            head = highs.iloc[-2]
+            r_sh = highs.iloc[-1]
+
+            shoulder_tol = 0.02
+            if head["high"] > l_sh["high"] and head["high"] > r_sh["high"]:
+                if abs(l_sh["high"] - r_sh["high"]) / l_sh["high"] < shoulder_tol:
+                    neckline_1 = local.loc[l_sh.name : head.name, "low"].min()
+                    neckline_2 = local.loc[head.name : r_sh.name, "low"].min()
+                    neckline = min(neckline_1, neckline_2)
+                    if (head["high"] - neckline) > (local.iloc[-1]["atr"] * 0.8):
+                        if curr_price < neckline:
+                            vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
+                            patterns.append(
+                                {
+                                    "pattern": "Head & Shoulders",
+                                    "signal": "SELL",
+                                    "direction": "SHORT",
+                                    "confidence": 85.0 + (5.0 if vol_ok else 0.0),
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
+
+        # --- INVERSE HEAD AND SHOULDERS (Bullish) ---
+        if len(lows) >= 3:
+            l_sh = lows.iloc[-3]
+            head = lows.iloc[-2]
+            r_sh = lows.iloc[-1]
+
+            shoulder_tol = 0.02
+            if head["low"] < l_sh["low"] and head["low"] < r_sh["low"]:
+                if abs(l_sh["low"] - r_sh["low"]) / abs(l_sh["low"]) < shoulder_tol:
+                    neckline_1 = local.loc[l_sh.name : head.name, "high"].max()
+                    neckline_2 = local.loc[head.name : r_sh.name, "high"].max()
+                    neckline = max(neckline_1, neckline_2)
+
+                    if (neckline - head["low"]) > (local.iloc[-1]["atr"] * 0.8):
+                        vol_ok = local.iloc[-1]["volume"] > local.iloc[-1]["vol_sma"]
+                        if curr_price > neckline:
+                            patterns.append(
+                                {
+                                    "pattern": "Inverse H&S",
+                                    "signal": "BUY",
+                                    "direction": "LONG",
+                                    "confidence": 85.0 + (5.0 if vol_ok else 0.0),
+                                    "order_type": "STOP",
+                                    "price": neckline,
+                                }
+                            )
+
+        return patterns
+
     def _find_triangles_wedges(self, df: pd.DataFrame) -> List[Dict]:
         """
         Detects Ascending/Descending Triangles and Wedges.
@@ -180,7 +278,6 @@ class PatternRecognizer:
 
         # Ascending Triangle (Flat Highs, Rising Lows)
         if abs(slope_highs) < 0.5 and slope_lows > 0.5:
-            # Resistance Breakout
             resistance = np.mean(highs)
             if curr["close"] > resistance and vol_ok:
                 patterns.append(
@@ -197,7 +294,6 @@ class PatternRecognizer:
 
         # Descending Triangle (Flat Lows, Falling Highs)
         if abs(slope_lows) < 0.5 and slope_highs < -0.5:
-            # Support Breakdown
             support = np.mean(lows)
             if curr["close"] < support and vol_ok:
                 patterns.append(
@@ -213,8 +309,7 @@ class PatternRecognizer:
                 )
 
         # Falling Wedge (Lower Highs, Lower Lows, converging)
-        if slope_highs < -0.5 and slope_lows < -0.2 and slope_highs < slope_lows:
-            # Bullish Reversal
+        if slope_highs < -0.2 and slope_lows < -0.2 and slope_highs < slope_lows:
             if curr["close"] > recent["ema_50"].iloc[-1]:  # Simple trend break check
                 patterns.append(
                     {
@@ -223,6 +318,21 @@ class PatternRecognizer:
                         "signal": "BUY",
                         "direction": "LONG",
                         "confidence": 85.0,
+                        "order_type": "MARKET",
+                        "price": curr["close"],
+                    }
+                )
+
+        # Rising Wedge (Higher Highs, Higher Lows, converging)
+        if slope_highs > 0.2 and slope_lows > 0.2 and slope_lows > slope_highs:
+            if curr["close"] < recent["ema_50"].iloc[-1]:
+                patterns.append(
+                    {
+                        "pattern": "Rising Wedge",
+                        "strategy": "Wedge",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 85.0 + (5.0 if vol_ok else 0.0),
                         "order_type": "MARKET",
                         "price": curr["close"],
                     }
@@ -247,6 +357,9 @@ class PatternRecognizer:
         # 3. Consolidation Patterns (Triangles/Wedges)
         patterns.extend(self._find_triangles_wedges(df))
 
+        # 4. Structure/Wave Patterns
+        patterns.extend(self._find_elliot_wave_setup(df))
+
         # Filter by Structure (The Step-by-Step Logic)
         filtered = []
         for p in patterns:
@@ -254,14 +367,14 @@ class PatternRecognizer:
                 if p["direction"] == "LONG":
                     p["confidence"] += 10  # Alignment bonus
                     filtered.append(p)
-                elif p["strategy"] == "Wedge" and p["direction"] == "SHORT":
+                elif "Wedge" in p["strategy"] and p["direction"] == "SHORT":
                     filtered.append(p)
 
             elif structure == "BEAR":
                 if p["direction"] == "SHORT":
                     p["confidence"] += 10
                     filtered.append(p)
-                elif p["strategy"] == "Wedge" and p["direction"] == "LONG":
+                elif "Wedge" in p["strategy"] and p["direction"] == "LONG":
                     filtered.append(p)
             else:
                 # In Range, accept both

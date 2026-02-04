@@ -22,6 +22,7 @@ from src.bot.gui_backend import (
     set_mode,
     shutdown_bot,
     stop_and_reset,
+    trigger_training,
 )
 from src.utils.logger import setup_logging
 

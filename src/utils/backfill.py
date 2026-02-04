@@ -3,7 +3,7 @@ import numpy as np
 import os
 import pandas as pd
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Adjust path to root
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
@@ -18,34 +18,38 @@ from src.config import FALLBACK_CRYPTO, DATA_FILE, FALLBACK_FOREX
 BACKFILL_BUFFER: List[Dict] = []
 
 
-async def backfill_data():
+async def backfill_data(target_symbols: Optional[List[str]] = None):
     """Main backfill routine."""
     print("🚀 Starting Optimized Backfill...")
     provider = DataProvider()
 
     connected = await provider.initialize()
 
-    target_crypto = []
-    target_forex = []
+    all_symbols = []
+    if target_symbols:
+        all_symbols = target_symbols
+        print(f"🎯 Partial Backfill Mode: Targeting {len(all_symbols)} symbols")
 
-    if connected:
-        print("✅ Connected to MT5. Fetching User's Market Watch...")
-        dynamic_symbols = await provider.get_dynamic_symbols()
+    else:
+        target_crypto = []
+        target_forex = []
 
-        target_crypto = dynamic_symbols.get("crypto", [])
-        target_forex = dynamic_symbols.get("forex", [])
+        if connected:
+            print("✅ Connected to MT5. Fetching User's Market Watch...")
+            dynamic_symbols = await provider.get_dynamic_symbols()
 
-        if not target_crypto and not target_forex:
-            print("⚠️ User Market Watch is empty. Using Fallback Lists.")
+            target_crypto = dynamic_symbols.get("crypto", [])
+            target_forex = dynamic_symbols.get("forex", [])
 
-    # Fallback Logic
-    if not target_crypto:
-        target_crypto = FALLBACK_CRYPTO
-    if not target_forex:
-        target_forex = FALLBACK_FOREX
+        # Fallback Logic
+        if not target_crypto:
+            target_crypto = FALLBACK_CRYPTO
+        if not target_forex:
+            target_forex = FALLBACK_FOREX
 
-    all_symbols = target_crypto + target_forex
-    print(f"📊 Processing {len(all_symbols)} symbols: {all_symbols}")
+        all_symbols = target_crypto + target_forex
+
+    print(f"📊 Processing {len(all_symbols)} symbols...")
     analyzer = StrategyAnalyzer()
 
     # Clear buffer
@@ -75,29 +79,33 @@ def finalize_dataset():
     """
     print("🧹 Finalizing and cleaning dataset...")
 
-    # Load existing data if any
-    existing_df = pd.DataFrame()
+    # Create DF from new buffer
+    new_df = pd.DataFrame(BACKFILL_BUFFER)
+    existing_df = None
+    full_df = None
+
+    if new_df.empty:
+        print("⚠️ No new data found during backfill.")
+        return
+
+    # Load existing data
     if os.path.exists(DATA_FILE):
         try:
             existing_df = pd.read_csv(DATA_FILE, on_bad_lines="skip")
-        except Exception:
-            pass
+            full_df = pd.concat([existing_df, new_df], ignore_index=True)
+        except Exception as e:
+            print(f"⚠️ Error reading existing CSV, starting fresh: {e}")
+            full_df = new_df
+    else:
+        full_df = new_df
 
-    # Create DF from new buffer
-    new_df = pd.DataFrame(BACKFILL_BUFFER)
+    # 1. Deduplicate
+    # Sort by time so we keep the newest version of a specific timestamp/symbol combo if duplicates exist
+    if "timestamp" in full_df.columns:
+        full_df = full_df.sort_values("timestamp")
 
-    if new_df.empty:
-        print("⚠️ No new data buffered.")
-        return
-
-    # Merge
-    full_df = pd.concat([existing_df, new_df], ignore_index=True)
-
-    if full_df.empty:
-        return
-
-    # 1. Remove Duplicates
-    # Assuming columns match, we drop exact duplicates
+    # Drop duplicates based on Symbol + Time (assuming specific feature serves as proxy for time or row uniqueness)
+    # Since features don't strictly have a timestamp column in this scope, we deduplicate by identical rows
     full_df.drop_duplicates(inplace=True)
 
     # 3. Dynamic Capping (Last 50000 rows)
@@ -107,7 +115,7 @@ def finalize_dataset():
 
     # 4. Overwrite File
     full_df.to_csv(DATA_FILE, index=False, mode="w")
-    print(f"💾 Saved {len(full_df)} rows to {DATA_FILE}")
+    print(f"💾 Database Updated: {len(full_df)} records saved to {DATA_FILE}")
 
 
 def log_backfill_data(features: dict, won: bool, pnl: float, excursion: float):
@@ -166,15 +174,15 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
     df_m15 = df_m15.sort_values("time")
     df_merged = pd.merge_asof(df_m15, df_htf_clean, on="time", direction="backward")
 
-    if len(df_merged) > 500:
-        df_merged = df_merged.iloc[500:].reset_index(drop=True)
+    if len(df_merged) > 100:
+        df_merged = df_merged.iloc[2000:].reset_index(drop=True)
     else:
         return 0
 
     processed = 0
     df_merged["avg_atr"] = df_merged["atr"].rolling(24).mean()
 
-    for i in range(50, len(df_merged) - 20):
+    for i in range(50, len(df_merged) - 16):
         if processed >= 1000:  # Limit samples per symbol
             break
 
@@ -192,7 +200,7 @@ async def process_symbol(symbol, provider: DataProvider, analyzer: StrategyAnaly
 
         curr_time = pd.to_datetime(curr["time"], unit="s")
         symbol_type = provider.get_symbol_type(symbol)
-        day_norm_val = 0.0 if symbol_type == "CRYPTO" or symbol in FALLBACK_CRYPTO else curr_time.weekday() / 6.0
+        day_norm_val = 0.0 if symbol_type == "CRYPTO" else curr_time.weekday() / 6.0
 
         rolling_acc = 0.5  # Default neutral
 
