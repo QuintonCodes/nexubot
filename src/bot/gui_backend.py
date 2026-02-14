@@ -588,6 +588,10 @@ class NexubotGUI:
         if self._scanner_task:
             self._scanner_task.cancel()
 
+        if self.provider.connected:
+            await self.provider.shutdown()
+            self.provider.connected = False
+
         await asyncio.sleep(1)
         self._apply_settings_to_engine()
         self.ai_engine.nn_brain = asyncio.to_thread(lambda: self.ai_engine.nn_brain.__init__(auto_load=True))

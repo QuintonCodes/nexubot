@@ -6,9 +6,10 @@ import time
 from datetime import datetime
 from functools import wraps
 from sqlalchemy import and_, select, desc, delete, text, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.pool import NullPool
 from typing import Dict, List
 
 from src.data.provider import DataProvider
@@ -115,12 +116,8 @@ class DatabaseManager:
         self.engine = create_async_engine(
             connection_string,
             echo=False,
-            pool_pre_ping=True,
+            poolclass=NullPool,
             connect_args={"ssl": "require"},
-            pool_size=20,  # Increased for concurrent batch scanning
-            max_overflow=10,  # Allow burst connections
-            pool_recycle=1800,  # Recycle connections every 30 mins
-            pool_timeout=30,
         )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 

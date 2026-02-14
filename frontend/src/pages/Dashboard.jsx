@@ -144,7 +144,7 @@ function Dashboard() {
     return `R ${(safeVal || 0).toFixed(2)}`;
   };
 
-  if (isLoading || !data) {
+  if (isLoading && !data) {
     return (
       <div className="flex items-center justify-center h-full text-primary font-mono animate-pulse">
         INITIALIZING DASHBOARD...

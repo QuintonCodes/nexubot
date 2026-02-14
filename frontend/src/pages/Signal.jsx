@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   MdAccountBalanceWallet,
   MdCheckCircle,
@@ -20,6 +20,10 @@ function Signal() {
 
   // 2. Local UI State
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+
+  const logsEndRef = useRef(null);
+  const logsContainerRef = useRef(null);
 
   const signals = data?.signals || [];
   const activeSignal = signals.length > 0 ? signals[currentIndex] : null;
@@ -54,7 +58,22 @@ function Signal() {
     );
   };
 
-  if (isLoading || !data) {
+  const handleScroll = () => {
+    if (!logsContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current;
+    // If user is within 50px of the bottom, enable auto-scroll. Otherwise disable it.
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
+    setShouldAutoScroll(isNearBottom);
+  };
+
+  useLayoutEffect(() => {
+    if (shouldAutoScroll && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop =
+        logsContainerRef.current.scrollHeight;
+    }
+  }, [data?.logs, shouldAutoScroll]);
+
+  if (isLoading && !data) {
     return (
       <div className="flex items-center justify-center h-full text-primary font-mono animate-pulse">
         CONNECTING TO FEED...
@@ -414,7 +433,11 @@ function Signal() {
               <span className="text-gray-500">SYSTEM LOG</span>
               <span className="w-2 h-2 rounded-full bg-primary animate-ping"></span>
             </div>
-            <div className="overflow-y-auto space-y-1.5 flex-1 pr-1 custom-scrollbar">
+            <div
+              ref={logsContainerRef}
+              onScroll={handleScroll}
+              className="overflow-y-auto space-y-1.5 flex-1 pr-1 custom-scrollbar"
+            >
               {data.logs?.map((line, idx) => {
                 let color = "text-gray-400";
                 if (line.includes("ERROR")) color = "text-danger";
@@ -427,7 +450,21 @@ function Signal() {
                   </div>
                 );
               })}
+              <div ref={logsEndRef} />
             </div>
+
+            {!shouldAutoScroll && (
+              <button
+                onClick={() => {
+                  setShouldAutoScroll(true);
+                  logsContainerRef.current.scrollTop =
+                    logsContainerRef.current.scrollHeight;
+                }}
+                className="text-[10px] text-primary mt-1 text-right w-full hover:underline"
+              >
+                ⬇ Resume Auto-Scroll
+              </button>
+            )}
           </div>
         </div>
       </div>
