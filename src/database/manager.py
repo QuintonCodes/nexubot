@@ -9,7 +9,6 @@ from sqlalchemy import and_, select, desc, delete, text, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.pool import NullPool
 from typing import Dict, List
 
 from src.data.provider import DataProvider
@@ -96,6 +95,7 @@ class UserSettings(Base):
     risk: Mapped[float] = mapped_column(default=2.0)
     confidence: Mapped[int] = mapped_column(default=75)
     high_vol: Mapped[bool] = mapped_column(default=False)
+    execution_mode: Mapped[str] = mapped_column(default="SIGNAL_ONLY")
 
 
 # --- MANAGER ---
@@ -116,7 +116,6 @@ class DatabaseManager:
         self.engine = create_async_engine(
             connection_string,
             echo=False,
-            poolclass=NullPool,
             connect_args={"ssl": "require"},
         )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
@@ -253,17 +252,17 @@ class DatabaseManager:
                         conditions.append(TradeResult.result == 0)
 
                     assets = filters.get("assets", [])
-                    dynamic_symbols = await provider.get_dynamic_symbols()
-
-                    crypto_symbols = dynamic_symbols.get("crypto", FALLBACK_CRYPTO)
-                    forex_symbols = dynamic_symbols.get("crypto", FALLBACK_FOREX)
-
                     if assets and "ALL" not in assets:
+                        dynamic_symbols = await provider.get_dynamic_symbols()
+
+                        crypto = dynamic_symbols.get("crypto", FALLBACK_CRYPTO)
+                        forex = dynamic_symbols.get("crypto", FALLBACK_FOREX)
+
                         symbol_conditions = []
                         if "CRYPTO" in assets:
-                            symbol_conditions.extend(crypto_symbols)
+                            symbol_conditions.extend(crypto)
                         if "FOREX" in assets:
-                            symbol_conditions.extend(forex_symbols)
+                            symbol_conditions.extend(forex)
                         if symbol_conditions:
                             conditions.append(TradeResult.symbol.in_(symbol_conditions))
 
@@ -272,50 +271,57 @@ class DatabaseManager:
 
                 # 3. Get Total Count (for Pagination)
             count_query = select(func.count()).select_from(query.subquery())
-            total_result = await session.execute(count_query)
-            total_records = total_result.scalar()
+            total_records = (await session.execute(count_query)).scalar()
 
             # 4. Apply Pagination
             query = query.offset((page - 1) * limit).limit(limit)
-
-            result = await session.execute(query)
-            trades = result.scalars().all()
+            trades = (await session.execute(query)).scalars().all()
 
             # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
             stats_query = select(
                 func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
             )
-            stats_res = await session.execute(stats_query)
-            total_trades, lifetime_pnl, total_wins = stats_res.one()
+            total_trades, lifetime_pnl, total_wins = (await session.execute(stats_query)).one()
 
             return {
                 "trades": trades,
                 "page": page,
                 "limit": limit,
-                "total_records": total_records,
-                "total_trades": total_trades,
-                "lifetime_pnl": lifetime_pnl,
-                "total_wins": total_wins,
+                "total_records": total_records or 0,
+                "total_trades": total_trades or 0,
+                "lifetime_pnl": lifetime_pnl or 0.0,
+                "total_wins": total_wins or 0,
             }
         except Exception as e:
             logger.error(f"Failed to fetch trade history from DB: {e}")
             return {}
 
-    async def get_dashboard_chart_data(self) -> List:
-        """Returns chart data for GUI dashboard chart"""
+    @db_retry()
+    async def get_dashboard_stats(self) -> Dict:
+        """Efficiently fetches aggregated stats for the dashboard."""
         if not self.engine:
-            return []
+            return {"total_pnl": 0.0, "wins": 0, "losses": 0}
 
         try:
             async with self.async_session() as session:
-                stmt = select(TradeResult).order_by(TradeResult.timestamp.asc())
+                # Aggregate PnL and Win/Loss counts in one query
+                stmt = select(
+                    func.sum(TradeResult.pnl_zar),
+                    func.sum(TradeResult.result),  # Sum of 1s (Wins)
+                    func.count(TradeResult.id),  # Total trades
+                )
                 result = await session.execute(stmt)
-                all_trades = result.scalars().all()
+                total_pnl, wins, total_count = result.one()
 
-                return all_trades
+                total_pnl = total_pnl or 0.0
+                wins = wins or 0
+                total_count = total_count or 0
+                losses = total_count - wins
+
+                return {"total_pnl": total_pnl, "wins": wins, "losses": losses}
         except Exception as e:
-            logger.error(f"Failed to fetch chart data from DB: {e}")
-            return []
+            logger.error(f"Dashboard Stats Error: {e}")
+            return {"total_pnl": 0.0, "wins": 0, "losses": 0}
 
     async def get_pair_performance(self, symbol: str) -> float:
         """
@@ -348,6 +354,21 @@ class DatabaseManager:
             return 0.5
 
     @db_retry()
+    async def get_recent_trades(self, limit=5) -> List[TradeResult]:
+        """Fetches only the last N trades for dashboard display."""
+        if not self.engine:
+            return []
+
+        try:
+            async with self.async_session() as session:
+                stmt = select(TradeResult).order_by(TradeResult.timestamp.desc()).limit(limit)
+                result = await session.execute(stmt)
+                return result.scalars().all()
+        except Exception as e:
+            logger.error(f"Recent Trades Error: {e}")
+            return []
+
+    @db_retry()
     async def get_settings(self) -> Dict:
         """Fetches user settings from DB"""
         if not self.engine:
@@ -367,6 +388,7 @@ class DatabaseManager:
                         "risk": settings.risk,
                         "confidence": settings.confidence,
                         "high_vol": settings.high_vol,
+                        "execution_mode": settings.execution_mode,
                     }
                 return {}
         except Exception as e:
@@ -417,8 +439,17 @@ class DatabaseManager:
                     async with self.engine.begin() as conn:
                         await conn.execute(text("ALTER TABLE trade_results ADD COLUMN size FLOAT DEFAULT 0.01"))
 
+                try:
+                    await session.execute(text("SELECT execution_mode FROM user_settings LIMIT 1"))
+                except:
+                    logger.info("🔧 Migrating DB: Adding 'execution_mode' column...")
+                    await session.rollback()
+                    async with self.engine.begin() as conn:
+                        await conn.execute(
+                            text("ALTER TABLE user_settings ADD COLUMN execution_mode VARCHAR DEFAULT 'SIGNAL_ONLY'")
+                        )
+
             logger.info("✅ DB Connected")
-            return
         except Exception as e:
             logger.warning(f"⚠️ DB Connection failed: {e}")
 
@@ -430,16 +461,13 @@ class DatabaseManager:
         try:
             async with self.async_session() as session:
                 win_rate = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
-
-                pnl_val = stats.get("pnl", stats.get("pnl_zar", 0.0))
-
                 analytics = SessionAnalytics(
                     session_id=session_id,
                     start_time=start_time,
                     end_time=time.time(),
                     total_trades=stats["total"],
                     win_rate=win_rate,
-                    net_pnl_zar=pnl_val,
+                    net_pnl_zar=stats.get("pnl", stats.get("pnl_zar", 0.0)),
                 )
                 session.add(analytics)
                 await session.commit()
@@ -510,7 +538,7 @@ class DatabaseManager:
                     obj = UserSettings(id=1)
                     session.add(obj)
 
-                for key in ["login", "password", "server"]:
+                for key in ["login", "password", "server", "execution_mode"]:
                     if key in data:
                         setattr(obj, key, data[key])
                 if "lot_size" in data:

@@ -80,7 +80,7 @@ export function useDashboardData() {
       }
       return res;
     },
-    refetchInterval: 5000,
+    refetchInterval: 1000,
     refetchIntervalInBackground: true,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
@@ -93,7 +93,6 @@ export function useDashboardData() {
     }
   }, [query.data]);
 
-  // This guarantees 'data' is NEVER undefined, preventing the "TypeError" crash.
   const safeData = query.data || globalDashboardCache || DEFAULT_DASHBOARD_DATA;
 
   return { ...query, data: safeData };
@@ -137,7 +136,10 @@ export function useHistoryData(filterParams) {
       return res;
     },
     staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
     refetchOnWindowFocus: false,
+    retry: false,
   });
 
   return { ...query, data: query.data || DEFAULT_HISTORY_DATA };

@@ -38,7 +38,6 @@ class AITradingEngine:
     def __init__(self):
         self.strategy_analyzer = StrategyAnalyzer()
 
-        ModelTrainer.train_if_needed()
         self.nn_brain = NeuralPredictor()
 
         self._log_throttle = {}
@@ -733,6 +732,20 @@ class AITradingEngine:
 
         return None
 
+    async def initialize(self):
+        """
+        Async initialization to prevent blocking the GUI thread.
+        Runs training check and loads models.
+        """
+        logger.info("🧠 AI Engine Initializing...")
+
+        # Run training in a separate thread to ensure non-blocking behavior
+        await asyncio.to_thread(ModelTrainer.train_if_needed)
+
+        # Reload brain if updated
+        self.nn_brain = NeuralPredictor()
+        logger.info("🧠 AI Engine Ready.")
+
     def prepare_data(self, klines: list, heavy: bool = True) -> Optional[pd.DataFrame]:
         """Prepares DataFrame with Indicators for Analysis."""
         try:
@@ -801,6 +814,8 @@ class AITradingEngine:
         if "high_vol" in settings:
             self.allow_high_volatility = bool(settings["high_vol"])
 
+        mode = settings.get("execution_mode", "SIGNAL_ONLY")
+
         logger.info(
-            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}"
+            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}, Mode={mode}"
         )

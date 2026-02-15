@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
-from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,14 @@ class DataProvider:
         if not self.connected:
             return {}
 
+        # Fallbacks from Config (Prioritized)
+        priority_crypto = set(FALLBACK_CRYPTO)
+        priority_forex = set(FALLBACK_FOREX)
+
+        # Also allow major pairs explicitly
+        major_forex_bases = ["EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD", "XAUUSD", "XAGUSD"]
+        major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
+
         # Get only selected symbols (Market Watch)
         symbols = mt5.symbols_get(selected=True)
         if not symbols:
@@ -144,26 +152,31 @@ class DataProvider:
         categorized = {"crypto": [], "forex": []}
 
         for s in symbols:
-            # 1. Ensure symbol is not disabled by broker
-            if s.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
-                continue
-
-            # 2. Ensure symbol is actually visible/selected
-            if not s.visible:
-                continue
-
             name = s.name.upper()
-
-            # Filter Exotics
+            # 1. Ignore Trash
+            if s.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED or not s.visible:
+                continue
             if any(ign in name for ign in IGNORED_CURRENCIES):
                 continue
 
-            category = self.get_symbol_type(s.name)
+            # 2. Strict Filtering Logic
+            is_priority = (name in priority_crypto) or (name in priority_forex)
+            is_major = any(m in name for m in major_forex_bases) or any(m in name for m in major_crypto_bases)
 
+            # Only add if it's in our Priority List or is a Major Pair
+            if not (is_priority or is_major):
+                continue
+
+            category = self.get_symbol_type(s.name)
             if category == "CRYPTO":
                 categorized["crypto"].append(s.name)
             else:
                 categorized["forex"].append(s.name)
+
+        # Fallback if empty (Force default list)
+        if not categorized["crypto"] and not categorized["forex"]:
+            categorized["crypto"] = list(priority_crypto)
+            categorized["forex"] = list(priority_forex)
 
         return categorized
 
@@ -285,8 +298,6 @@ class DataProvider:
         symbol_info = mt5.symbol_info(symbol)
         fill_mode = mt5.ORDER_FILLING_FOK  # Default for safety
         if symbol_info:
-            # Check bits: 1=IOC, 2=FOK
-            # If IOC allowed (bit 1), prefer IOC for market execution to avoid rejection
             if (symbol_info.filling_mode & mt5.SYMBOL_FILLING_IOC) != 0:
                 fill_mode = mt5.ORDER_FILLING_IOC
             elif (symbol_info.filling_mode & mt5.SYMBOL_FILLING_FOK) != 0:

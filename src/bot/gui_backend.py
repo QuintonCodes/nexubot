@@ -105,10 +105,14 @@ class NexubotGUI:
         self.settings = {}
 
         self._scanner_task = None
+        self._db_initialized = False
+        self._db_lock = None
 
     def _apply_settings_to_engine(self):
         """Pushes settings to the AI Engine instance."""
-        self.ai_engine.update_config(self.settings)
+        settings_with_mode = self.settings.copy()
+        settings_with_mode["execution_mode"] = self.execution_mode
+        self.ai_engine.update_config(settings_with_mode)
 
     def _calculate_offline_result(self, symbol: str, signal: dict, start_time: float, klines: list):
         """Synchronous CPU-bound calculation logic for offline verification."""
@@ -255,7 +259,6 @@ class NexubotGUI:
         self.active_forex_list = data.get("forex", [])
 
         if not self.active_crypto_list and not self.active_forex_list:
-            # Fallback if MT5 returns nothing
             self.active_crypto_list = list(FALLBACK_CRYPTO)
             self.active_forex_list = list(FALLBACK_FOREX)
 
@@ -268,7 +271,6 @@ class NexubotGUI:
 
     async def force_close_trade(self, symbol):
         """Manually closes an active signal/trade."""
-        # Remove from active list
         self.active_signals = [s for s in self.active_signals if s["symbol"] != symbol]
         logger.info(f"🛑 Trade {symbol} Force Closed by User.")
         return True
@@ -302,32 +304,44 @@ class NexubotGUI:
                 safe_response["balance"] = acct.get("balance", 0.0)
                 safe_response["equity"] = acct.get("equity", 0.0)
 
-            # 2. Database Stats
-            total_pnl = 0.0
-            wins = 0
-            losses = 0
-            chart_labels = []
-            chart_balance = []
+            # 2. Fetch Stats & Recent Trades (Limit 20 for chart reconstruction)
+            stats, recent_trades = await asyncio.gather(self.db.get_dashboard_stats(), self.db.get_recent_trades(20))
+
+            # 3. Process Stats
+            total_trades = stats["wins"] + stats["losses"]
+            win_rate = (stats["wins"] / total_trades * 100) if total_trades > 0 else 0.0
+            total_pnl = stats["total_pnl"]
+
+            # 4. Smart Chart Reconstruction (Backwards from Total PnL)
+            # This avoids fetching thousands of rows for the equity curve
+            chart_points = []
+
+            # Start with current Total PnL as the last point
+            current_curve_val = total_pnl
+
+            # Iterate backwards through recent trades to build the curve history
+            # Sort trades by time desc (newest first)
+            sorted_trades = sorted(recent_trades, key=lambda x: x.timestamp, reverse=True)
+
+            for t in sorted_trades:
+                chart_points.append(
+                    {
+                        "label": datetime.fromtimestamp(t.timestamp).strftime("%d %b"),
+                        "value": round(current_curve_val, 2),
+                    }
+                )
+                # Subtract this trade's PnL to get the value BEFORE this trade happened
+                current_curve_val -= t.pnl_zar
+
+            # Reverse back to chronological order for the chart (Oldest -> Newest)
+            chart_points.reverse()
+
+            chart_labels = [p["label"] for p in chart_points]
+            chart_data = [p["value"] for p in chart_points]
+
+            # 5. Process Recent Trades
             recent_trades_data = []
-
-            running_pnl = 0.0
-
-            all_trades = await self.db.get_dashboard_chart_data()
-
-            for t in all_trades:
-                total_pnl += t.pnl_zar
-                if t.result == 1:
-                    wins += 1
-                else:
-                    losses += 1
-
-                # Chart Data Construction
-                running_pnl += t.pnl_zar
-                dt_obj = datetime.fromtimestamp(t.timestamp)
-                chart_labels.append(dt_obj.strftime("%d %b"))
-                chart_balance.append(round(running_pnl, 2))
-
-            for t in reversed(all_trades[-5:]):
+            for t in sorted_trades[:5]:
                 recent_trades_data.append(
                     {
                         "time": datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S"),
@@ -341,17 +355,14 @@ class NexubotGUI:
                     }
                 )
 
-            total_trades = wins + losses
-            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-
             safe_response.update(
                 {
                     "total_pnl": total_pnl,
                     "win_rate": win_rate,
-                    "wins": wins,
-                    "losses": losses,
-                    "chart_labels": chart_labels[-20:],
-                    "chart_data": chart_balance[-20:],
+                    "wins": stats["wins"],
+                    "losses": stats["losses"],
+                    "chart_labels": chart_labels,
+                    "chart_data": chart_data,
                     "recent_trades": recent_trades_data,
                 }
             )
@@ -484,25 +495,19 @@ class NexubotGUI:
 
         logger.info(f"🖥️ Connecting to {server}...")
 
-        for attempt in range(2):
-            try:
-                connected = await asyncio.wait_for(self.provider.initialize(), timeout=30)
-                if connected:
-                    break
-                await asyncio.sleep(1)  # Wait 1s before retry
-            except asyncio.TimeoutError:
-                if attempt == 1:
-                    return {"success": False, "message": "MT5 Launch Timeout"}
-            except Exception as e:
-                logger.error(f"Connection Error: {e}")
+        connected = await self.provider.initialize()
 
-        if self.provider.connected:
+        if connected:
             self.is_running = True
             await self.initialize_settings()
 
+            asyncio.create_task(self.ai_engine.initialize())
+
             # Save valid credentials to DB
             new_settings = self.settings.copy()
-            new_settings.update({"login": login_id, "server": server, "password": password})
+            new_settings.update(
+                {"login": login_id, "server": server, "password": password, "execution_mode": self.execution_mode}
+            )
             await self.db.save_settings(new_settings)
 
             self.ai_engine.set_context(500.0, self.db)
@@ -517,28 +522,33 @@ class NexubotGUI:
             return {"success": False, "message": "MT5 Connection Failed. Check Credentials."}
 
     async def initialize_settings(self):
-        await self.db.init_database()
-        await self.db.cleanup_db()
-        db_settings = await self.db.get_settings()
+        """Loads settings. Safe to call multiple times."""
+        if self._db_lock is None:
+            self._db_lock = asyncio.Lock()
 
-        if not db_settings or not db_settings["login"]:
-            logger.warning("⚠️ No Login Details Found. Waiting for user input via GUI...")
-            return
+        async with self._db_lock:
+            if not self._db_initialized:
+                await self.db.init_database()
+                await self.db.cleanup_db()
+                self._db_initialized = True
 
-        default_settings = {
-            "login": "",
-            "server": "MetaQuotes-Demo",
-            "password": "",
-            "lot_size": 0.10,
-            "risk": DEFAULT_RISK_PCT,
-            "confidence": DEFAULT_MIN_CONFIDENCE,
-            "high_vol": False,
-        }
+            db_settings = await self.db.get_settings()
 
-        if db_settings:
-            default_settings.update({k: v for k, v in db_settings.items() if v is not None})
-        self.settings = default_settings
-        self._apply_settings_to_engine()
+            default_settings = {
+                "login": "",
+                "server": "MetaQuotes-Demo",
+                "password": "",
+                "lot_size": 0.10,
+                "risk": DEFAULT_RISK_PCT,
+                "confidence": DEFAULT_MIN_CONFIDENCE,
+                "high_vol": False,
+            }
+
+            if db_settings:
+                default_settings.update({k: v for k, v in db_settings.items() if v is not None})
+            self.settings = default_settings
+            self.execution_mode = self.settings.get("execution_mode", "SIGNAL_ONLY")
+            self._apply_settings_to_engine()
 
     async def process_batch(self, symbols: list):
         """Processes a list of symbols concurrently."""
@@ -591,9 +601,9 @@ class NexubotGUI:
         if self.provider.connected:
             await self.provider.shutdown()
             self.provider.connected = False
+            await asyncio.sleep(2)
 
-        await asyncio.sleep(1)
-        self._apply_settings_to_engine()
+        await self.initialize_settings()
         self.ai_engine.nn_brain = asyncio.to_thread(lambda: self.ai_engine.nn_brain.__init__(auto_load=True))
 
         await self.initialize_connection(self.settings["login"], self.settings["server"], self.settings["password"])
@@ -668,7 +678,10 @@ class NexubotGUI:
     def set_execution_mode(self, mode_str):
         """Sets the bot state (SIGNAL_ONLY vs FULL_AUTO)"""
         self.execution_mode = mode_str
-        print(f"⚙️ Execution Mode Changed: {self.execution_mode}")
+        logger.info(f"⚙️ Execution Mode Changed: {self.execution_mode}")
+
+        loop = _get_persistent_loop()
+        asyncio.run_coroutine_threadsafe(self.db.save_settings({"execution_mode": mode_str}), loop)
         return True
 
     async def sort_pairs(self, symbols: list) -> list:
@@ -817,11 +830,13 @@ class NexubotGUI:
                     outcome = "LOSS (SL Hit)"
                     points_lost = (sl - entry) / point if is_long else (entry - sl) / point
                     final_pnl = points_lost * tick_value * lot_size
+                    won = False
                     break
                 elif hit_tp:
                     outcome = "WIN (TP Hit)"
                     points_won = (tp - entry) / point if is_long else (entry - tp) / point
                     final_pnl = points_won * tick_value * lot_size
+                    won = True
                     break
 
                 # Update Max Excursion
@@ -933,7 +948,6 @@ def attempt_login(login_id, server, password):
 @eel.expose
 def close_app():
     """Cleanup when window closes"""
-    print("Saving session and closing...")
     sys.exit(0)
 
 
@@ -1031,7 +1045,7 @@ def fetch_trade_history(filters=None):
 
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.get_trade_history(filters), loop)
-        res = _safe_get_result(future, timeout=3.0)
+        res = _safe_get_result(future, timeout=10.0)
 
         final_data = res if res else default_res.copy()
 
@@ -1058,18 +1072,21 @@ def get_user_settings():
     global bot_instance
     if not bot_instance:
         bot_instance = NexubotGUI()
-        asyncio.run(bot_instance.initialize_settings())
 
-    bot_instance.settings["latency"] = bot_instance.provider.get_ping()
+    loop = _get_persistent_loop()
 
-    # Inject Neural Logic Data (Dynamic)
-    bot_instance.settings["neural_meta"] = {
-        "model": f"Transformer-XL {VERSION}",
-        "epochs": "50,000",
-        "bias": "Conservative" if bot_instance.ai_engine.min_confidence > 80 else "Balanced",
-    }
+    async def _safe_init():
+        await bot_instance.initialize_settings()
+        bot_instance.settings["latency"] = bot_instance.provider.get_ping()
+        bot_instance.settings["neural_meta"] = {
+            "model": f"Transformer-XL {VERSION}",
+            "epochs": "50,000",
+            "bias": "Conservative" if bot_instance.ai_engine.min_confidence > 80 else "Balanced",
+        }
+        return bot_instance.settings
 
-    return bot_instance.settings
+    future = asyncio.run_coroutine_threadsafe(_safe_init(), loop)
+    return _safe_get_result(future, timeout=5.0) or {}
 
 
 @eel.expose
@@ -1105,11 +1122,9 @@ def shutdown_bot():
     global bot_instance
     if bot_instance:
         loop = _get_persistent_loop()
-        # Clean shutdown of DB and MT5
         future = asyncio.run_coroutine_threadsafe(bot_instance.stop_session(), loop)
         _safe_get_result(future, timeout=5.0)
 
-    # Kill the process
     os._exit(0)
 
 
@@ -1131,5 +1146,5 @@ def trigger_training(symbol=None):
     if not bot_instance:
         return False
     loop = _get_persistent_loop()
-    future = asyncio.run_coroutine_threadsafe(bot_instance.trigger_manual_training(symbol), loop)
+    asyncio.run_coroutine_threadsafe(bot_instance.trigger_manual_training(symbol), loop)
     return True
