@@ -156,12 +156,7 @@ class DatabaseManager:
 
         try:
             async with self.async_session() as session:
-                # 1. Clean old trade results (30 days)
-                cutoff = time.time() - (86400 * 30)
-                stmt_trades = delete(TradeResult).where(TradeResult.timestamp < cutoff)
-                await session.execute(stmt_trades)
-
-                # 2. Clean empty sessions (0 trades)
+                # Clean empty sessions (0 trades)
                 stmt_sessions = delete(SessionAnalytics).where(SessionAnalytics.total_trades == 0)
                 await session.execute(stmt_sessions)
 

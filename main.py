@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*np.object.*
 # Ensure 'src' is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
-from src.bot.gui_backend import (
+from src.api.eel_interface import (
     attempt_login,
     close_app,
     fetch_dashboard_update,
@@ -21,7 +21,6 @@ from src.bot.gui_backend import (
     save_settings,
     set_mode,
     shutdown_bot,
-    stop_and_reset,
     trigger_training,
 )
 from src.utils.logger import setup_logging

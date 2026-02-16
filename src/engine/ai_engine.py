@@ -46,7 +46,7 @@ class AITradingEngine:
         self.htf_cache = {}
         self.low_vol_candidates = {}
         self.signal_history = {}
-        self.user_balance_zar = 0.0
+        self.user_balance_account = 0.0
 
         # Dynamic Configuration
         self.risk_pct = DEFAULT_RISK_PCT
@@ -103,14 +103,26 @@ class AITradingEngine:
         signal["confidence"] = final_conf
         return signal
 
-    def _calculate_risk_metrics(
-        self, symbol: str, signal: dict, curr: pd.Series, tick, info: dict, nn_result: dict
+    async def _calculate_risk_metrics(
+        self, symbol: str, signal: dict, curr: pd.Series, tick, info: dict, nn_result: dict, provider: DataProvider
     ) -> Optional[Dict]:
         """
-        Calculates Lot Size and Risk using Tick Value
+        Calculates Lot Size, Risk (USD/ZAR conversion), and validates entry freshness.
         """
-        if self.user_balance_zar <= 0:
+        # 1. Fetch Account Currency & Live Rates
+        acct_summary = await provider.get_account_summary()
+        acct_currency = acct_summary.get("currency", "ZAR")
+        self.user_balance_account = acct_summary.get("balance", 0.0)
+
+        if self.user_balance_account <= 0:
             return None
+
+        # Fetch Exchange Rate if needed (Account USD -> Display ZAR)
+        usdzar_rate = 1.0
+        if acct_currency == "USD":
+            usdzar_rate = await provider.get_usdzar_rate()
+        elif acct_currency == "ZAR":
+            usdzar_rate = 1.0  # Base is ZAR
 
         ask, bid = tick.ask, tick.bid
         point = info["point"]
@@ -128,12 +140,20 @@ class AITradingEngine:
         if order_type == "MARKET":
             entry_price = current_market_price
 
-        # Calculate Chase Distance (in ATR multiples)
-        signal_close_price = curr["close"]
-        chase_dist = abs(current_market_price - signal_close_price)
-        if chase_dist > (atr * 0.4):
-            logger.debug(f"Skipping {symbol}: Price moved too far ({chase_dist/atr:.2f} ATR)")
-            return None
+            # --- STRICT RUNAWAY CHECK ---
+            # If the signal price (from closed candle) is too far from current tick, abort.
+            signal_close_price = curr["close"]
+            pct_diff = abs(current_market_price - signal_close_price) / signal_close_price
+
+            # Thresholds: Crypto 0.3%, Forex 0.05%
+            max_diff = 0.003 if "CRYPTO" in provider.get_symbol_type(symbol) else 0.0005
+
+            if pct_diff > max_diff:
+                self._log_once(
+                    f"runaway_{symbol}",
+                    f"Skipping {symbol}: Price Runaway. Signal: {signal_close_price} vs Now: {current_market_price}",
+                )
+                return None
 
         # Ghost Order Logic
         strategy_name = signal.get("strategy", "").lower()
@@ -150,12 +170,8 @@ class AITradingEngine:
                     entry_price = current_market_price + ghost_pips
 
         # Dynamic TP / SL calculation
-        sl_multiplier = 1.0
-        if self._is_high_volatility_symbol(symbol) or atr > (curr["close"] * 0.005):
-            sl_multiplier = 1.4
-
-        sl_dist = atr * sl_multiplier
-        sl_dist = max(sl_dist, point * 50)
+        sl_multiplier = 1.4 if (self._is_high_volatility_symbol(symbol) or atr > (curr["close"] * 0.005)) else 1.0
+        sl_dist = max(atr * sl_multiplier, point * 50)
 
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
@@ -165,16 +181,8 @@ class AITradingEngine:
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
-        pred_exit_atr = float(nn_result.get("pred_exit_atr", 2.0))
-        pred_exit_atr = max(0.8, min(pred_exit_atr, 6.0))
-
-        # Risk-Based Reward Scaling:
-        # If user risks more (higher risk %), we should aim for higher rewards to justify it.
-        tp_multiplier = pred_exit_atr
-        if self.risk_pct > 3.0:
-            tp_multiplier = max(tp_multiplier, 3.0)
-
-        # Conservative TP based on predicted exit ATR but always at least 1.2x SL
+        pred_exit_atr = max(0.8, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
+        tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
         tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
 
         rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
@@ -216,14 +224,14 @@ class AITradingEngine:
         if signal.get("is_shadow", False):
             risk_mult = min(risk_mult, 0.1)
 
-        target_risk_zar = self.user_balance_zar * ((self.risk_pct * risk_mult) / 100)
+        target_risk_account = self.user_balance_account * ((self.risk_pct * risk_mult) / 100)
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
         if risk_per_lot == 0:
             return None
 
         # Lot Sizing
-        lots = target_risk_zar / risk_per_lot
+        lots = target_risk_account / risk_per_lot
 
         try:
             steps = math.floor(lots / vol_step)
@@ -233,36 +241,49 @@ class AITradingEngine:
 
         lots = round(max(min_vol, min(lots, max_vol, self.max_lot)), 2)
 
-        actual_risk_zar = risk_per_lot * lots
+        actual_risk_account = risk_per_lot * lots
+
+        # Convert Account Balance to USD for tier checks if necessary
+        balance_in_usd = self.user_balance_account
+        if acct_currency == "ZAR":
+            balance_in_usd = self.user_balance_account / usdzar_rate
 
         # Safety Cap
-        max_allowed_pct = get_account_risk_caps(self.user_balance_zar)
+        max_allowed_pct = get_account_risk_caps(balance_in_usd)
         if self.allow_high_volatility:
             max_allowed_pct *= 1.5
 
         # Absolute hard cap in ZAR
-        max_allowed_zar = self.user_balance_zar * (max_allowed_pct / 100.0)
+        max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
 
         # Check if risk exceeds cap
-        if actual_risk_zar > max_allowed_zar and not signal.get("is_shadow", False):
+        if actual_risk_account > max_allowed_val and not signal.get("is_shadow", False):
             # Try to reduce lots
-            while actual_risk_zar > max_allowed_zar and lots > min_vol:
+            while actual_risk_account > max_allowed_val and lots > min_vol:
                 lots -= vol_step
-                actual_risk_zar = risk_per_lot * lots
+                actual_risk_account = risk_per_lot * lots
 
             # Final check after reduction
             lots = round(lots, 2)
-            if lots <= min_vol and actual_risk_zar > max_allowed_zar * 1.2:
+            if lots <= min_vol and actual_risk_account > max_allowed_val * 1.2:
                 self._log_once(
                     f"risk_{symbol}",
-                    f"Skipping {symbol}: Risk (R{actual_risk_zar:.2f}) > Cap (R{max_allowed_zar * 1.2:.2f})",
+                    f"Skipping {symbol}: Risk (R{actual_risk_account:.2f}) > Cap (R{max_allowed_val * 1.2:.2f})",
                     logging.DEBUG,
                 )
                 return None
 
         # Profit Calculation
         points_profit = tp_dist / point
-        profit_zar = points_profit * tick_value * lots
+        profit_account = points_profit * tick_value * lots
+
+        # Final Conversion for Reporting (Always provide ZAR for UI)
+        if acct_currency == "USD":
+            actual_risk_zar = actual_risk_account * usdzar_rate
+            profit_zar = profit_account * usdzar_rate
+        else:
+            actual_risk_zar = actual_risk_account
+            profit_zar = profit_account
 
         signal.update(
             {
@@ -272,6 +293,8 @@ class AITradingEngine:
                 "lot_size": round(lots, 2),
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
+                "risk_account": round(actual_risk_account, 2),
+                "currency": acct_currency,
                 "tick_value": tick_value,
                 "point": point,
                 "atr": atr,
@@ -411,16 +434,17 @@ class AITradingEngine:
         curr = df.iloc[-1]
 
         # Stale Check
-        if (time.time() - curr["time"]) > 1800:
+        candle_age = time.time() - curr["time"]
+        # Allow 15 mins (candle duration) + 5 mins buffer max
+        if candle_age > (15 * 60 + 300):
             return None
 
         # ATR Check
         if curr["atr"] <= 0:
             return None
 
-        avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
-
         # Volatility Spike Check
+        avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
         if curr["atr"] > (avg_atr * 3):
             self.signal_history[symbol] = time.time() + 1800  # 30 min ban
             return None
@@ -724,7 +748,7 @@ class AITradingEngine:
         if not tick:
             return None
 
-        result = self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result)
+        result = await self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result, provider)
         if result:
             self.signal_history[symbol] = time.time()
             self.active_features[symbol] = features
@@ -800,7 +824,7 @@ class AITradingEngine:
 
     def set_context(self, balance: float, db: DatabaseManager):
         """Sets user balance and database manager."""
-        self.user_balance_zar = balance
+        self.user_balance_account = balance
         self.db_manager = db
 
     def update_config(self, settings: dict):

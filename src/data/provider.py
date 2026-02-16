@@ -31,6 +31,8 @@ class DataProvider:
         self._news_cache = []
         self._last_news_fetch = 0
         self._symbol_type_cache = {}
+        self._cached_usdzar = None
+        self._cached_usdzar_time = 0
 
     def _fetch_calendar_events(self) -> List[Dict]:
         """
@@ -296,14 +298,16 @@ class DataProvider:
             type_order = mt5.ORDER_TYPE_BUY_LIMIT if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
 
         symbol_info = mt5.symbol_info(symbol)
-        fill_mode = mt5.ORDER_FILLING_FOK  # Default for safety
+        fill_mode = mt5.ORDER_FILLING_FOK
+
         if symbol_info:
-            if (symbol_info.filling_mode & mt5.SYMBOL_FILLING_IOC) != 0:
+            modes = symbol_info.filling_mode
+            if modes & 2:
                 fill_mode = mt5.ORDER_FILLING_IOC
-            elif (symbol_info.filling_mode & mt5.SYMBOL_FILLING_FOK) != 0:
+            elif modes & 1:
                 fill_mode = mt5.ORDER_FILLING_FOK
             else:
-                fill_mode = 0  # Default return
+                fill_mode = mt5.ORDER_FILLING_RETURN
 
         request = {
             "action": action,
@@ -327,15 +331,9 @@ class DataProvider:
             return True
         else:
             err = result.comment if result else "Unknown Error"
-            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err} | Retcode: {result.retcode if result else 'N/A'}")
+            retcode = result.retcode if result else "N/A"
+            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err} | Retcode: {retcode}")
             return False
-
-    async def initialize(self) -> bool:
-        """
-        Initializes connection to MT5 Terminal.
-        Retries logic implemented for stability.
-        """
-        return await asyncio.to_thread(self._sync_connect)
 
     async def fetch_klines(self, symbol: str, timeframe_str: str, limit: int) -> List[Dict]:
         """
@@ -432,7 +430,6 @@ class DataProvider:
 
         # 1. Ask MT5 for the symbol path
         info = mt5.symbol_info(symbol)
-
         result = "FOREX"  # Default safety
 
         if info:
@@ -460,6 +457,35 @@ class DataProvider:
 
         self._symbol_type_cache[symbol] = result
         return result
+
+    async def get_usdzar_rate(self) -> float:
+        """
+        Fetches the current USDZAR exchange rate for currency conversion.
+        Tries standard permutations like USDZAR, USDZARm, USDZAR.
+        """
+        # Return cached if fresh (1 minute)
+        if self._cached_usdzar and (time.time() - self._cached_usdzar_time) < 60:
+            return self._cached_usdzar
+
+        possible_pairs = ["USDZAR", "USDZARm", "USDZAR.", "USDZAR_OT"]
+
+        for pair in possible_pairs:
+            tick = await self.get_current_tick(pair)
+            if tick:
+                rate = (tick.bid + tick.ask) / 2.0
+                self._cached_usdzar = rate
+                self._cached_usdzar_time = time.time()
+                return rate
+
+        # Fallback if pair not found in market watch (Rough Estimate)
+        return 18.5
+
+    async def initialize(self) -> bool:
+        """
+        Initializes connection to MT5 Terminal.
+        Retries logic implemented for stability.
+        """
+        return await asyncio.to_thread(self._sync_connect)
 
     async def shutdown(self):
         """Safely shuts down the connection."""
