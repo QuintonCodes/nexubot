@@ -157,7 +157,7 @@ def get_user_settings():
 
     async def _safe_init():
         await bot_instance.initialize_settings()
-        bot_instance.settings["latency"] = await bot_instance.get_latency()
+        bot_instance.settings["latency"] = bot_instance.get_latency()
         bot_instance.settings["neural_meta"] = {
             "model": f"Transformer-XL {VERSION}",
             "epochs": "50,000",

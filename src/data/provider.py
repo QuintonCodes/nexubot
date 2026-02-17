@@ -40,7 +40,6 @@ class DataProvider:
         Filters for upcoming events in the next 2 hours.
         """
         if not hasattr(mt5, "calendar_get_events"):
-            # Return empty so the bot falls back to news_block.txt silently
             return []
 
         try:
@@ -285,7 +284,14 @@ class DataProvider:
 
     async def execute_trade_on_mt5(self, signal: dict) -> bool:
         """Places the trade on MT5 if in FULL_AUTO mode."""
+        # 1. Connection Check
         if not self.connected:
+            return False
+
+        # 2. Check Connection Validity (Ping)
+        if mt5.terminal_info() is None:
+            logger.error("❌ MT5 Execution Failed: Terminal not responding.")
+            self.connected = False
             return False
 
         symbol = signal["symbol"]
@@ -309,14 +315,23 @@ class DataProvider:
             else:
                 fill_mode = mt5.ORDER_FILLING_RETURN
 
+        try:
+            volume = float(signal["lot_size"])
+            price = float(signal["price"])
+            sl = float(signal["sl"])
+            tp = float(signal["tp"])
+        except ValueError:
+            logger.error(f"❌ Execution Error: Invalid numeric types for {symbol}")
+            return False
+
         request = {
             "action": action,
             "symbol": symbol,
-            "volume": signal["lot_size"],
+            "volume": volume,
             "type": type_order,
-            "price": signal["price"],
-            "sl": signal["sl"],
-            "tp": signal["tp"],
+            "price": price,
+            "sl": sl,
+            "tp": tp,
             "deviation": 20,
             "magic": 123456,
             "comment": f"Nexubot {signal['strategy']}",
@@ -324,6 +339,7 @@ class DataProvider:
             "type_filling": fill_mode,
         }
 
+        # 3. Send Order
         result = await asyncio.to_thread(mt5.order_send, request)
 
         if result and result.retcode != mt5.TRADE_RETCODE_DONE:

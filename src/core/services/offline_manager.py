@@ -74,6 +74,10 @@ class OfflineManager:
         logger.info("🔄 Checking for interrupted trades...")
         active_trades = await self.engine.db.get_active_trades()
 
+        if not active_trades:
+            logger.info("✅ No interrupted trades found.")
+            return
+
         for symbol, signal, start_time in active_trades:
             self.engine.ai_engine.register_active_trade(symbol)
 
@@ -145,8 +149,8 @@ class OfflineManager:
 
             # Case 3: Still Active
             else:
-                logger.info(f"Resuming {symbol}...")
+                logger.info(f"♻️ Resuming Active Trade: {symbol} (Strategy: {signal.get('strategy', 'Unknown')})")
                 self.engine.active_signals.append(signal)
                 self.engine.monitored_tasks[symbol] = asyncio.create_task(
-                    self.engine.monitor.verify_trade_realtime(symbol, signal, resume_start_time=start_time)
+                    self.engine.monitor.verify_trade_realtime(symbol, signal, start_time)
                 )

@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import json
+import numpy as np
 import re
 import time
 from datetime import datetime
 from functools import wraps
-from sqlalchemy import and_, select, desc, delete, text, func
+from sqlalchemy import and_, select, desc, delete, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
@@ -15,6 +16,17 @@ from src.data.provider import DataProvider
 from src.config import DATABASE_URL, FALLBACK_CRYPTO, FALLBACK_FOREX, LOSS_COOLDOWN_DURATION
 
 logger = logging.getLogger(__name__)
+
+
+class SafeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(SafeEncoder, self).default(obj)
 
 
 # --- RETRY DECORATOR ---
@@ -117,6 +129,10 @@ class DatabaseManager:
             connection_string,
             echo=False,
             connect_args={"ssl": "require"},
+            pool_size=10,
+            max_overflow=20,
+            pool_recycle=1800,
+            pool_pre_ping=True,
         )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -265,18 +281,18 @@ class DatabaseManager:
                     query = query.where(and_(*conditions))
 
                 # 3. Get Total Count (for Pagination)
-            count_query = select(func.count()).select_from(query.subquery())
-            total_records = (await session.execute(count_query)).scalar()
+                count_query = select(func.count()).select_from(query.subquery())
+                total_records = (await session.execute(count_query)).scalar()
 
-            # 4. Apply Pagination
-            query = query.offset((page - 1) * limit).limit(limit)
-            trades = (await session.execute(query)).scalars().all()
+                # 4. Apply Pagination
+                query = query.offset((page - 1) * limit).limit(limit)
+                trades = (await session.execute(query)).scalars().all()
 
-            # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
-            stats_query = select(
-                func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
-            )
-            total_trades, lifetime_pnl, total_wins = (await session.execute(stats_query)).one()
+                # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
+                stats_query = select(
+                    func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
+                )
+                total_trades, lifetime_pnl, total_wins = (await session.execute(stats_query)).one()
 
             return {
                 "trades": trades,
@@ -299,11 +315,10 @@ class DatabaseManager:
 
         try:
             async with self.async_session() as session:
-                # Aggregate PnL and Win/Loss counts in one query
                 stmt = select(
                     func.sum(TradeResult.pnl_zar),
-                    func.sum(TradeResult.result),  # Sum of 1s (Wins)
-                    func.count(TradeResult.id),  # Total trades
+                    func.sum(TradeResult.result),
+                    func.count(TradeResult.id),
                 )
                 result = await session.execute(stmt)
                 total_pnl, wins, total_count = result.one()
@@ -424,26 +439,6 @@ class DatabaseManager:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
-            # --- AUTO-MIGRATION: Check for missing columns ---
-            async with self.async_session() as session:
-                try:
-                    await session.execute(text("SELECT size FROM trade_results LIMIT 1"))
-                except Exception:
-                    logger.info("🔧 Migrating DB: Adding 'size' column...")
-                    await session.rollback()  # Rollback the failed select
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("ALTER TABLE trade_results ADD COLUMN size FLOAT DEFAULT 0.01"))
-
-                try:
-                    await session.execute(text("SELECT execution_mode FROM user_settings LIMIT 1"))
-                except:
-                    logger.info("🔧 Migrating DB: Adding 'execution_mode' column...")
-                    await session.rollback()
-                    async with self.engine.begin() as conn:
-                        await conn.execute(
-                            text("ALTER TABLE user_settings ADD COLUMN execution_mode VARCHAR DEFAULT 'SIGNAL_ONLY'")
-                        )
-
             logger.info("✅ DB Connected")
         except Exception as e:
             logger.warning(f"⚠️ DB Connection failed: {e}")
@@ -503,18 +498,20 @@ class DatabaseManager:
             return
 
         try:
+            json_str = json.dumps(signal, cls=SafeEncoder)
+
             async with self.async_session() as session:
-                stmt = pg_insert(ActiveTrade).values(
-                    symbol=symbol, signal_json=json.dumps(signal), start_time=time.time()
-                )
+                stmt = pg_insert(ActiveTrade).values(symbol=symbol, signal_json=json_str, start_time=time.time())
 
                 # If symbol exists, update the signal info and time
                 do_update_stmt = stmt.on_conflict_do_update(
-                    index_elements=["symbol"], set_=dict(signal_json=json.dumps(signal), start_time=time.time())
+                    index_elements=["symbol"], set_=dict(signal_json=json_str, start_time=time.time())
                 )
 
                 await session.execute(do_update_stmt)
                 await session.commit()
+        except TypeError as te:
+            logger.error(f"JSON Serialization Failed for {symbol}: {te}")
         except Exception as e:
             logger.error(f"Failed to save active trade {symbol}: {e}")
 

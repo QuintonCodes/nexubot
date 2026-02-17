@@ -139,14 +139,11 @@ class AITradingEngine:
         entry_price = signal.get("price", current_market_price)
         if order_type == "MARKET":
             entry_price = current_market_price
-
-            # --- STRICT RUNAWAY CHECK ---
-            # If the signal price (from closed candle) is too far from current tick, abort.
             signal_close_price = curr["close"]
             pct_diff = abs(current_market_price - signal_close_price) / signal_close_price
 
-            # Thresholds: Crypto 0.3%, Forex 0.05%
-            max_diff = 0.003 if "CRYPTO" in provider.get_symbol_type(symbol) else 0.0005
+            # Stricter thresholds: Crypto 0.5%, Forex 0.1% to prevent late entries
+            max_diff = 0.005 if "CRYPTO" in provider.get_symbol_type(symbol) else 0.001
 
             if pct_diff > max_diff:
                 self._log_once(
@@ -232,6 +229,13 @@ class AITradingEngine:
 
         # Lot Sizing
         lots = target_risk_account / risk_per_lot
+
+        # If lot is very small (e.g. 0.01) but confidence is high (>80), boost risk slightly to target Max Lot
+        if lots < 0.05 and signal["confidence"] > 80.0:
+            # Boost risk up to 1.5x but keep strict cap
+            lots = lots * 2.5
+            # Ensure we don't breach max lot setting
+            lots = min(lots, self.max_lot)
 
         try:
             steps = math.floor(lots / vol_step)
@@ -435,8 +439,8 @@ class AITradingEngine:
 
         # Stale Check
         candle_age = time.time() - curr["time"]
-        # Allow 15 mins (candle duration) + 5 mins buffer max
-        if candle_age > (15 * 60 + 300):
+        # Allow 15 mins (candle duration) + 1 min buffer
+        if candle_age > (15 * 60 + 60):
             return None
 
         # ATR Check
@@ -573,7 +577,8 @@ class AITradingEngine:
             if strat_signal and pattern_signal:
                 if strat_signal["direction"] == pattern_signal["direction"]:
                     strat_signal["confidence"] += 10
-                    strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
+                    if pattern_signal["pattern"] not in strat_signal["strategy"]:
+                        strat_signal["strategy"] += f" + {pattern_signal['pattern']}"
                     final_signal_candidate = strat_signal
                 else:
                     # Conflict Logic
@@ -763,7 +768,6 @@ class AITradingEngine:
         """
         logger.info("🧠 AI Engine Initializing...")
 
-        # Run training in a separate thread to ensure non-blocking behavior
         await asyncio.to_thread(ModelTrainer.train_if_needed)
 
         # Reload brain if updated
