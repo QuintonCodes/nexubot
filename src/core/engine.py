@@ -1,7 +1,4 @@
 import asyncio
-import eel
-import os
-import sys
 import time
 from datetime import datetime
 
@@ -10,21 +7,15 @@ from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
 from src.utils.backfill import backfill_data
 from src.utils.logger import setup_logging
-from src.utils.trainer import ModelTrainer
-from src.config import (
-    DEFAULT_MIN_CONFIDENCE,
-    DEFAULT_RISK_PCT,
-)
 from src.utils.concurrency import get_persistent_loop
 from src.core.services.application_data import ApplicationData
 from src.core.services.market_scanner import MarketScanner
 from src.core.services.offline_manager import OfflineManager
 from src.core.services.trade_monitor import TradeMonitor
+from src.config import DEFAULT_MIN_CONFIDENCE, DEFAULT_RISK_PCT
 
 # Initialize Logging immediately
 logger = setup_logging()
-
-# Global instance to hold the bot state
 bot_instance = None
 
 
@@ -197,29 +188,28 @@ class NexubotEngine:
 
     async def trigger_manual_training(self, symbol=None):
         """
-        Orchestrates the entire training lifecycle:
+        Developer Orchestration:
         1. Backfill Data (Full or Partial)
         2. Train Model
         3. Reload Engine
         """
         if self.system_status != "IDLE":
-            logger.warning("⚠️ Training already in progress.")
+            logger.warning("⚠️ System must be IDLE to run training.")
             return False
 
         try:
             self.system_status = "BACKFILLING"
-            logger.info(f"🔄 Starting Manual Training Cycle. Target: {symbol if symbol else 'ALL'}")
+            logger.info(f"🔄 Starting Manual SMC Training Cycle.")
 
-            # 1. Backfill
+            # 1. Backfill - Pass the existing provider and engine to avoid MT5 connection clash!
             target = [symbol] if symbol else None
-            await backfill_data(target_symbols=target)
+            await backfill_data(self.provider, self.ai_engine, target_symbols=target)
 
             # 2. Train
             self.system_status = "TRAINING"
             logger.info("🧠 Backfill Complete. Starting Neural Training...")
 
-            # Run training in thread to avoid blocking main loop
-            await asyncio.to_thread(ModelTrainer.train_if_needed, force=True)
+            await asyncio.to_thread(self.ai_engine.nn_brain.train_network)
 
             # 3. Restart to apply
             logger.info("✅ Training Complete. Reloading Systems...")
