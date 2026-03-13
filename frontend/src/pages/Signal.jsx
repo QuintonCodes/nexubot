@@ -11,14 +11,15 @@ import {
   MdTrendingUp,
   MdVisibility,
 } from "react-icons/md";
+
+import Footer from "../components/Footer";
 import { useForceClose, useSignalData } from "../hooks/useEelQuery";
+import { fmtPnL, getCurrencySymbol } from "../utils/formatter";
 
 function Signal() {
-  // 1. Data from Hook
   const { data, isLoading } = useSignalData();
   const { mutate: forceClose } = useForceClose();
 
-  // 2. Local UI State
   const [currentIndex, setCurrentIndex] = useState(0);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
 
@@ -28,43 +29,32 @@ function Signal() {
   const signals = data?.signals || [];
   const activeSignal = signals.length > 0 ? signals[currentIndex] : null;
 
-  const nextSignal = () => {
+  const currSym = getCurrencySymbol(data?.account?.currency);
+
+  function nextSignal() {
     setCurrentIndex((prev) => (prev + 1) % signals.length);
-  };
+  }
 
-  const prevSignal = () => {
+  function prevSignal() {
     setCurrentIndex((prev) => (prev - 1 + signals.length) % signals.length);
-  };
+  }
 
-  const handleForceClose = () => {
+  function handleForceClose() {
     if (
       activeSignal &&
       confirm(`Force close trade for ${activeSignal.symbol}?`)
     ) {
       forceClose(activeSignal.symbol);
     }
-  };
+  }
 
-  const fmtPnL = (val) => {
-    if (val === undefined || val === null || Math.abs(val) < 0.005) {
-      return <span className="text-white">R 0.00</span>;
-    }
-    const isWin = val > 0;
-    return (
-      <span className={isWin ? "text-primary" : "text-danger"}>
-        R {isWin ? "+" : ""}
-        {val.toFixed(2)}
-      </span>
-    );
-  };
-
-  const handleScroll = () => {
+  function handleScroll() {
     if (!logsContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current;
     // If user is within 50px of the bottom, enable auto-scroll. Otherwise disable it.
     const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
     setShouldAutoScroll(isNearBottom);
-  };
+  }
 
   useLayoutEffect(() => {
     if (shouldAutoScroll && logsContainerRef.current) {
@@ -88,7 +78,7 @@ function Signal() {
         {[
           {
             label: "Account Balance",
-            val: `R ${(Math.abs(data?.account?.balance || 0) < 0.005 ? 0 : data.account.balance).toFixed(2)}`,
+            val: `${currSym} ${(Math.abs(data?.account?.balance || 0) < 0.005 ? 0 : data.account.balance).toFixed(2)}`,
             color: "text-white",
             icon: <MdAccountBalanceWallet className="text-gray-600 text-xl" />,
           },
@@ -106,7 +96,7 @@ function Signal() {
           },
           {
             label: "Session PnL",
-            val: fmtPnL(data?.stats?.session_pnl),
+            val: fmtPnL(data?.stats?.session_pnl, currSym),
             color: `${(data?.stats?.session_pnl || 0) > 0 ? "text-primary" : "text-danger"}`,
             icon: <MdShowChart className="text-primary/50 text-xl" />,
           },
@@ -139,12 +129,23 @@ function Signal() {
                   SCANNING MARKETS...
                 </h2>
                 <p className="text-gray-500 text-sm mt-2">
-                  Neural Engine is analyzing price action.
+                  Neural Engine is analyzing price action across active pairs.
                 </p>
+                {data?.monitored_symbols?.length > 0 && (
+                  <div className="mt-6 max-w-md mx-auto flex flex-wrap justify-center gap-2">
+                    {data.monitored_symbols.map((sym, idx) => (
+                      <span
+                        key={idx}
+                        className="text-[10px] px-2 py-1 bg-gray-800 text-gray-400 border border-gray-700 rounded-sm"
+                      >
+                        {sym}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <div>
-                {/* Navigation Controls */}
                 {signals.length > 1 && (
                   <div className="flex justify-between items-center mb-4 bg-gray-900 p-2 rounded">
                     <button
@@ -256,7 +257,8 @@ function Signal() {
                               RISK (SL)
                             </div>
                             <div className="text-danger font-bold">
-                              -R{activeSignal.risk_zar.toFixed(2)}
+                              -{currSym}
+                              {activeSignal.risk_zar.toFixed(2)}
                             </div>
                           </div>
                           <div className="text-right">
@@ -264,7 +266,8 @@ function Signal() {
                               PROFIT (TP)
                             </div>
                             <div className="text-primary font-bold">
-                              +R{activeSignal.profit_zar.toFixed(2)}
+                              +{currSym}
+                              {activeSignal.profit_zar.toFixed(2)}
                             </div>
                           </div>
                         </div>
@@ -315,10 +318,13 @@ function Signal() {
               </div>
               <div className="bg-black/30 p-3 border-l-2 border-warning">
                 <div className="text-xs text-gray-500 uppercase">
-                  Sentiment Analysis
+                  Sentiment / Structure
                 </div>
                 <div className="text-warning font-bold mt-1">
                   {activeSignal?.neural_info?.sentiment || "--"}
+                  {activeSignal?.neural_info?.smc_state
+                    ? ` (${activeSignal.neural_info.smc_state.split("|")[0].trim()})`
+                    : ""}
                 </div>
               </div>
               <div className="bg-black/30 p-3 border-l-2 border-secondary">
@@ -345,13 +351,20 @@ function Signal() {
                     </span>
                   </p>
                   <p>
-                    &gt; Trend Correlation:{" "}
-                    <span className="text-primary">aligned with H4 Trend</span>
+                    &gt; Structural Breaks:{" "}
+                    <span className="text-warning">
+                      {activeSignal.neural_info?.smc_state || "No clear BOS"}
+                    </span>
                   </p>
-                  <p>&gt; Volatility Check: ATR within operational bounds.</p>
                   <p>
-                    &gt; Risk Calculation: {activeSignal.lot_size} lots fits
-                    &lt; 2% risk profile.
+                    &gt; Trend Correlation:{" "}
+                    <span className="text-primary">
+                      aligned with System Filter
+                    </span>
+                  </p>
+                  <p>
+                    &gt; Volatility Check: Indicator relative to{" "}
+                    {activeSignal.neural_info?.volatility || "baseline"}
                   </p>
                   <p>
                     &gt; Final Verdict:{" "}
@@ -395,17 +408,17 @@ function Signal() {
                     <MdCheckCircle className="text-primary text-sm mt-1" />
                     <div>
                       <div className="text-sm font-bold text-gray-200">
-                        Trend Filter
+                        Trend Filter Confluence
                       </div>
                       <div className="text-xs text-gray-500">
-                        M15 / H4 Confluence
+                        M15 / H4 Verified
                       </div>
                     </div>
                   </div>
                 </>
               ) : (
                 <div className="text-xs text-gray-500 italic">
-                  Waiting for signal...
+                  Monitoring pairs passively. Awaiting structural confirmation.
                 </div>
               )}
             </div>
@@ -488,10 +501,7 @@ function Signal() {
                         : "text-danger"
                   }`}
                 >
-                  {/* Logic to format R 0.00 clean */}
-                  {Math.abs(data?.stats.session_pnl || 0) < 0.01
-                    ? "R 0.00"
-                    : `R ${data?.stats.session_pnl > 0 ? "+" : ""}${data?.stats.session_pnl?.toFixed(2)}`}
+                  {fmtPnL(data?.stats.session_pnl, currSym)}
                 </span>
               </div>
             </div>
@@ -514,15 +524,7 @@ function Signal() {
         </div>
       </div>
 
-      <footer className="mt-4 py-3 text-center text-xs text-gray-700">
-        <p>
-          NEXUBOT INSTITUTIONAL ENGINE © {new Date().getFullYear()}. ALL RIGHTS
-          RESERVED.
-        </p>
-        <p className="mt-1">
-          WARNING: Trading involves substantial risk of loss.
-        </p>
-      </footer>
+      <Footer />
     </div>
   );
 }

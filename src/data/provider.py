@@ -84,9 +84,14 @@ class DataProvider:
         """Fetches live account balance and equity."""
         info = mt5.account_info()
         if not info:
-            return {"balance": 0.0, "equity": 0.0, "profit": 0.0}
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
 
-        return {"balance": float(info.balance), "equity": float(info.equity), "profit": float(info.profit)}
+        return {
+            "balance": float(info.balance),
+            "equity": float(info.equity),
+            "profit": float(info.profit),
+            "currency": getattr(info, "currency", "USD"),
+        }
 
     def _sync_connect(self) -> bool:
         """Synchronous MT5 Connection with Retries and Auto-Kill"""
@@ -142,7 +147,23 @@ class DataProvider:
         priority_forex = set(FALLBACK_FOREX)
 
         # Also allow major pairs explicitly
-        major_forex_bases = ["EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD", "XAUUSD", "XAGUSD"]
+        major_forex_bases = [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCAD",
+            "AUDUSD",
+            "XAUUSD",
+            "XAGUSD",
+            "GBPJPY",
+            "NZDUSD",
+            "BTCJPY",
+            "CHFJPY",
+            "EURJPY",
+            "AUDJPY",
+            "CADJPY",
+            "EURAUD",
+        ]
         major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
 
         # Get only selected symbols (Market Watch)
@@ -374,7 +395,7 @@ class DataProvider:
     async def get_account_summary(self) -> Dict:
         """Async wrapper to get account details"""
         if not self.connected:
-            return {"balance": 0.0, "equity": 0.0, "profit": 0.0}
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
         return await asyncio.to_thread(self._sync_account_info)
 
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:

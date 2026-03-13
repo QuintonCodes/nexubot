@@ -32,6 +32,7 @@ class ApplicationData:
             "mode": self.engine.execution_mode,
             "system_status": self.engine.system_status,
             "recent_trades": [],
+            "currency": "USD",
             "timestamp": time.time(),
         }
 
@@ -41,6 +42,7 @@ class ApplicationData:
             if acct:
                 safe_response["balance"] = acct.get("balance", 0.0)
                 safe_response["equity"] = acct.get("equity", 0.0)
+                safe_response["currency"] = acct.get("currency", "USD")
 
             # 2. Fetch Stats & Recent Trades (Limit 20 for chart reconstruction)
             stats, recent_trades = await asyncio.gather(
@@ -52,15 +54,8 @@ class ApplicationData:
             win_rate = (stats["wins"] / total_trades * 100) if total_trades > 0 else 0.0
             total_pnl = stats["total_pnl"]
 
-            # 4. Smart Chart Reconstruction (Backwards from Total PnL)
-            # This avoids fetching thousands of rows for the equity curve
             chart_points = []
-
-            # Start with current Total PnL as the last point
             current_curve_val = total_pnl
-
-            # Iterate backwards through recent trades to build the curve history
-            # Sort trades by time desc (newest first)
             sorted_trades = sorted(recent_trades, key=lambda x: x.timestamp, reverse=True)
 
             for t in sorted_trades:
@@ -75,7 +70,6 @@ class ApplicationData:
 
             # Reverse back to chronological order for the chart (Oldest -> Newest)
             chart_points.reverse()
-
             chart_labels = [p["label"] for p in chart_points]
             chart_data = [p["value"] for p in chart_points]
 
@@ -115,7 +109,7 @@ class ApplicationData:
     async def get_signal_page_data(self):
         """Aggregates all data needed for the Signal Page."""
         safe_response = {
-            "account": {"balance": 0.0, "equity": 0.0},
+            "account": {"balance": 0.0, "equity": 0.0, "currency": "USD"},
             "stats": {
                 "lifetime_wr": 0.0,
                 "active_count": 0,
@@ -128,6 +122,7 @@ class ApplicationData:
             "signals": [],
             "logs": [],
             "mode": self.engine.execution_mode,
+            "monitored_symbols": [],
         }
 
         try:
@@ -149,6 +144,7 @@ class ApplicationData:
             }
             safe_response["signals"] = self.engine.active_signals
             safe_response["logs"] = read_recent_logs(30)
+            safe_response["monitored_symbols"] = self.engine.active_crypto_list + self.engine.active_forex_list
 
             return safe_response
         except Exception as e:

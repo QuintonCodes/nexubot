@@ -6,7 +6,7 @@ import sys
 
 from src.core.engine import NexubotEngine
 from src.utils.concurrency import get_persistent_loop, safe_get_result
-from src.config import VERSION
+from src.config import VERSION, ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +14,21 @@ bot_instance = None
 
 
 @eel.expose
-def attempt_login(login_id, server, password):
+def attempt_login(login_id, server, password, mt5_path=None):
     """Called from login.html when user clicks 'Initialize Connection'"""
     global bot_instance
     if not bot_instance:
         bot_instance = NexubotEngine()
 
+    if mt5_path:
+        loc = ConfigManager.load_settings()
+        loc["MT5_PATH"] = mt5_path
+        ConfigManager.save_settings(loc)
+
     loop = get_persistent_loop()
-    future = asyncio.run_coroutine_threadsafe(bot_instance.initialize_connection(login_id, server, password), loop)
+    future = asyncio.run_coroutine_threadsafe(
+        bot_instance.initialize_connection(login_id, server, password, mt5_path), loop
+    )
     return safe_get_result(future, timeout=45.0)
 
 
@@ -47,6 +54,7 @@ def fetch_dashboard_update():
         "chart_data": [],
         "mode": "SIGNAL_ONLY",
         "system_status": "IDLE",
+        "currency": "USD",
     }
     if not bot_instance:
         return default_data
@@ -73,7 +81,7 @@ def fetch_signal_updates():
     """Polled by signal.html"""
     global bot_instance
     default_data = {
-        "account": {"balance": 0, "equity": 0},
+        "account": {"balance": 0, "equity": 0, "currency": "USD"},
         "stats": {
             "lifetime_wr": 0,
             "active_count": 0,
@@ -86,18 +94,17 @@ def fetch_signal_updates():
         "signals": [],
         "logs": [],
         "mode": "SIGNAL_ONLY",
+        "monitored_symbols": [],
     }
     if not bot_instance:
         return default_data
 
     loop = get_persistent_loop()
-
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.data_service.get_signal_page_data(), loop)
         res = safe_get_result(future, timeout=3.0)
 
         final_data = res if res else default_data.copy()
-
         if bot_instance and bot_instance.provider:
             final_data["latency"] = bot_instance.get_latency()
 
@@ -122,13 +129,11 @@ def fetch_trade_history(filters=None):
         return default_res
 
     loop = get_persistent_loop()
-
     try:
         future = asyncio.run_coroutine_threadsafe(bot_instance.data_service.get_trade_history(filters), loop)
         res = safe_get_result(future, timeout=10.0)
 
         final_data = res if res else default_res.copy()
-
         if bot_instance and bot_instance.provider:
             final_data["latency"] = bot_instance.get_latency()
 
@@ -147,6 +152,12 @@ def force_close(symbol):
 
 
 @eel.expose
+def get_app_version():
+    """Returns the app version defined in backend config."""
+    return VERSION
+
+
+@eel.expose
 def get_user_settings():
     """Returns current settings to populate the Settings Page."""
     global bot_instance
@@ -157,6 +168,9 @@ def get_user_settings():
 
     async def _safe_init():
         await bot_instance.initialize_settings()
+
+        loc = ConfigManager.load_settings()
+        bot_instance.settings["mt5_path"] = loc.get("MT5_PATH", "")
         bot_instance.settings["latency"] = bot_instance.get_latency()
         bot_instance.settings["neural_meta"] = {
             "model": f"Transformer-XL {VERSION}",
@@ -170,11 +184,26 @@ def get_user_settings():
 
 
 @eel.expose
+def logout_user():
+    """Disconnects the system and wipes active sessions for re-login."""
+    global bot_instance
+    if bot_instance:
+        loop = get_persistent_loop()
+        asyncio.run_coroutine_threadsafe(bot_instance.stop_session(), loop)
+    return True
+
+
+@eel.expose
 def save_settings(data):
     """Saves settings and restarts the engine."""
     global bot_instance
     if not bot_instance:
         return False
+
+    if "mt5_path" in data:
+        loc = ConfigManager.load_settings()
+        loc["MT5_PATH"] = data["mt5_path"]
+        ConfigManager.save_settings(loc)
 
     loop = get_persistent_loop()
 

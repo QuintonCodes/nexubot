@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  MdAccountBalance,
   MdAccountBalanceWallet,
   MdCalendarToday,
   MdChevronLeft,
@@ -11,7 +10,10 @@ import {
   MdHistory,
   MdShowChart,
 } from "react-icons/md";
+
+import Footer from "../components/Footer";
 import { useHistoryData } from "../hooks/useEelQuery";
+import { fmtCurrency, fmtPnL, getCurrencySymbol } from "../utils/formatter";
 
 export default function History() {
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
@@ -48,8 +50,10 @@ export default function History() {
     total_records: 0,
   };
 
+  const currSym = getCurrencySymbol(data?.stats?.currency);
+
   // --- Handlers ---
-  const handleRangeBtn = (range) => {
+  function handleRangeBtn(range) {
     setSelectedRangeBtn(range);
     setDateRange({ start: "", end: "" }); // Clear custom dates
     setQueryFilters((prev) => ({
@@ -59,9 +63,9 @@ export default function History() {
       startDate: "",
       endDate: "",
     }));
-  };
+  }
 
-  const handleApplyFilters = () => {
+  function handleApplyFilters() {
     if (dateRange.start || dateRange.end) {
       setSelectedRangeBtn("");
     }
@@ -83,9 +87,9 @@ export default function History() {
       outcome: outcomeVal,
       assets: assets,
     });
-  };
+  }
 
-  const handleDateChange = (e) => {
+  function handleDateChange(e) {
     const { name, value } = e.target;
     setDateRange((prev) => {
       const newRange = { ...prev, [name]: value };
@@ -102,24 +106,24 @@ export default function History() {
       }
       return newRange;
     });
-  };
+  }
 
-  const handlePageChange = (newPage) => {
+  function handlePageChange(newPage) {
     if (newPage >= 1 && newPage <= pagination.total_pages) {
       setQueryFilters((prev) => ({ ...prev, page: newPage }));
     }
-  };
+  }
 
-  const handleOutcomeChange = (e) => {
+  function handleOutcomeChange(e) {
     const val = e.target.value;
     setOutcomeFilter(val);
     let apiVal = "ALL";
     if (val === "Wins Only") apiVal = "WINS";
     if (val === "Losses Only") apiVal = "LOSSES";
     setQueryFilters((prev) => ({ ...prev, outcome: apiVal, page: 1 }));
-  };
+  }
 
-  const handleAssetToggle = (type) => {
+  function handleAssetToggle(type) {
     setAssetFilter((prev) => {
       const newState = { ...prev, [type]: !prev[type] };
       const assets = [];
@@ -132,25 +136,7 @@ export default function History() {
       }));
       return newState;
     });
-  };
-
-  const fmtCurrency = (val) => {
-    const safeVal = Math.abs(val) < 0.005 ? 0 : val;
-    return `R ${(safeVal || 0).toFixed(2)}`;
-  };
-
-  const fmtPnL = (val) => {
-    if (val === undefined || val === null || Math.abs(val) < 0.005) {
-      return <span className="text-white">R 0.00</span>;
-    }
-    const isWin = val > 0;
-    return (
-      <span className={isWin ? "text-primary" : "text-danger"}>
-        R {isWin ? "+" : ""}
-        {val.toFixed(2)}
-      </span>
-    );
-  };
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -159,7 +145,7 @@ export default function History() {
         {[
           {
             label: "Current Balance",
-            val: fmtCurrency(stats.balance),
+            val: fmtCurrency(stats.balance, currSym),
             icon: <MdAccountBalanceWallet />,
           },
           {
@@ -174,7 +160,7 @@ export default function History() {
           },
           {
             label: "Net PnL",
-            val: fmtPnL(stats.lifetime_pnl),
+            val: fmtPnL(stats.lifetime_pnl, currSym),
             icon: (
               <MdShowChart
                 className={
@@ -348,9 +334,7 @@ export default function History() {
                     <th className="px-4 py-3 font-medium">Asset</th>
                     <th className="px-4 py-3 font-medium">Type</th>
                     <th className="px-4 py-3 font-medium">Entry / Exit</th>
-                    <th className="px-4 py-3 font-medium text-right">
-                      PnL (ZAR)
-                    </th>
+                    <th className="px-4 py-3 font-medium text-right">PnL</th>
                     <th className="px-4 py-3 font-medium text-center">
                       Confidence
                     </th>
@@ -416,7 +400,7 @@ export default function History() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
-                            {fmtPnL(t.pnl)}
+                            {fmtPnL(t.pnl, currSym)}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <div className="flex items-center justify-center gap-2">
@@ -480,15 +464,7 @@ export default function History() {
         </div>
       </div>
 
-      <footer className="mt-8 py-6 text-center text-xs text-gray-700">
-        <p>
-          NEXUBOT INSTITUTIONAL ENGINE © {new Date().getFullYear()}. ALL RIGHTS
-          RESERVED.
-        </p>
-        <p className="mt-1">
-          WARNING: Trading involves substantial risk of loss.
-        </p>
-      </footer>
+      <Footer />
     </div>
   );
 }

@@ -7,21 +7,7 @@ import { callEel } from "./lib/eel";
 export default function MainLayout({ children }) {
   const location = useLocation();
   const [latency, setLatency] = useState("--");
-
-  // Latency check on mount (simulated from login.js)
-  useEffect(() => {
-    const start = Date.now();
-    setTimeout(() => {
-      setLatency(Date.now() - start);
-    }, 100);
-  }, []);
-
-  const handleStop = async () => {
-    if (confirm("Stop Engine, Save Session and Exit?")) {
-      await callEel("shutdown_bot");
-      window.close();
-    }
-  };
+  const [version, setVersion] = useState("v1.0.0");
 
   const navLinks = [
     { path: "/dashboard", label: "DASHBOARD" },
@@ -29,6 +15,28 @@ export default function MainLayout({ children }) {
     { path: "/history", label: "HISTORY" },
     { path: "/settings", label: "SETTINGS" },
   ];
+
+  async function handleStop() {
+    if (confirm("Stop Engine, Save Session and Exit?")) {
+      await callEel("shutdown_bot");
+      window.close();
+    }
+  }
+
+  // Latency check on mount (simulated from login.js)
+  useEffect(() => {
+    // 1. Fetch Backend Version
+    callEel("get_app_version")
+      .then((v) => {
+        if (v) setVersion(v);
+      })
+      .catch(console.error);
+
+    const start = Date.now();
+    setTimeout(() => {
+      setLatency(Date.now() - start);
+    }, 100);
+  }, []);
 
   return (
     <div className="min-h-screen bg-background-dark text-gray-300 relative overflow-x-hidden selection:bg-primary selection:text-black">
@@ -50,7 +58,7 @@ export default function MainLayout({ children }) {
                   <h1 className="text-xl font-bold tracking-wider text-white group-hover:text-primary transition-colors">
                     NEXUBOT{" "}
                     <span className="text-xs font-normal text-gray-400 ml-1">
-                      v1.4.0
+                      {version}
                     </span>
                   </h1>
                   <div className="text-[10px] uppercase tracking-[0.2em] text-primary animate-pulse">

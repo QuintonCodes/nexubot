@@ -5,12 +5,10 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import joblib
 import logging
-import numpy as np
 import pandas as pd
 import sys
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils import class_weight
 from typing import Dict
 
 from src.config import ENTRY_MODEL_FILE, EXIT_MODEL_FILE, FEATURE_COLS, SCALER_FILE
@@ -69,7 +67,6 @@ class NeuralPredictor:
         """
         # Graceful Failover to pure SMC Heuristics if models are tampered/missing
         if not self.is_ready or self.entry_model is None:
-            # Heuristic override: if SMC structure generated a signal, we default to high confidence
             return {"prob": 0.85, "risk_mult": 1.0, "pred_exit_atr": 2.0}
 
         try:
@@ -127,7 +124,7 @@ class NeuralPredictor:
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
 
-            # Train Entry Model
+            # 1. Train Entry Model
             logger.info("🧠 Training SMC Entry Model...")
             entry_model = tf.keras.models.Sequential(
                 [
@@ -141,12 +138,32 @@ class NeuralPredictor:
 
             entry_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
             entry_model.fit(X_scaled, y_entry, epochs=150, batch_size=32, verbose=1, validation_split=0.15)
+            entry_model.save(ENTRY_MODEL_FILE)
+
+            # 2. Train Exit Model mapping Risk adjustments (Ensures secondary keras is generated)
+            logger.info("🧠 Training SMC Exit Model...")
+            if "target_exit_atr" in df.columns:
+                y_exit = df["target_exit_atr"]
+            else:
+                y_exit = pd.Series([2.0] * len(df))  # Fallback exit target structure mapping if absent
+
+            exit_model = tf.keras.models.Sequential(
+                [
+                    tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
+                    tf.keras.layers.Dense(16, activation="relu"),
+                    tf.keras.layers.Dense(1, activation="linear"),
+                ]
+            )
+
+            exit_model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+            exit_model.fit(X_scaled, y_exit, epochs=100, batch_size=32, verbose=1, validation_split=0.15)
+            exit_model.save(EXIT_MODEL_FILE)
 
             # Save artifacts to root directory
-            entry_model.save(ENTRY_MODEL_FILE)
             joblib.dump(self.scaler, SCALER_FILE)
 
             self.entry_model = entry_model
+            self.exit_model = exit_model
             self.is_ready = True
             logger.info("✅ Training Complete. Artifacts ready for PyInstaller packaging.")
 

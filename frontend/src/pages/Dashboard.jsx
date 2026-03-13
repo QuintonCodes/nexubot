@@ -14,24 +14,37 @@ import {
 } from "react-icons/md";
 import { Link } from "react-router-dom";
 
+import Footer from "../components/Footer";
 import { useDashboardData } from "../hooks/useEelQuery";
 import { callEel } from "../lib/eel";
+import { fmtCurrency, fmtPnL, getCurrencySymbol } from "../utils/formatter";
 
 function Dashboard() {
   const { data, isLoading } = useDashboardData();
   const [localModeOverride, setLocalModeOverride] = useState(null);
 
-  // Derive the final display value: Local state takes priority, then server data
   const isAutoMode =
     localModeOverride !== null ? localModeOverride : data?.mode === "FULL_AUTO";
-
-  // Check System Status
   const systemStatus = data?.system_status || "IDLE";
   const isBusy = systemStatus !== "IDLE";
 
   // --- Chart Refs ---
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
+
+  const currSym = getCurrencySymbol(data?.currency);
+
+  async function handleModeToggle(e) {
+    const newState = e.target.checked;
+    setLocalModeOverride(newState);
+
+    try {
+      await callEel("set_mode", newState);
+    } catch (error) {
+      setLocalModeOverride(null);
+      console.error("Mode toggle error", error);
+    }
+  }
 
   // Update Chart when data changes
   useEffect(() => {
@@ -113,37 +126,6 @@ function Dashboard() {
     }
   }, [data]);
 
-  const handleModeToggle = async (e) => {
-    const newState = e.target.checked;
-    setLocalModeOverride(newState);
-
-    try {
-      await callEel("set_mode", newState);
-    } catch (error) {
-      setLocalModeOverride(null);
-      console.error("Mode toggle error", error);
-    }
-  };
-
-  const fmtPnL = (val) => {
-    if (val === undefined || val === null || Math.abs(val) < 0.005) {
-      return <span className="text-white">R 0.00</span>;
-    }
-    const isWin = val > 0;
-    return (
-      <span className={isWin ? "text-primary" : "text-danger"}>
-        R {isWin ? "+" : ""}
-        {val.toFixed(2)}
-      </span>
-    );
-  };
-
-  // Helper for currency formatting
-  const fmtCurrency = (val) => {
-    const safeVal = Math.abs(val) < 0.005 ? 0 : val;
-    return `R ${(safeVal || 0).toFixed(2)}`;
-  };
-
   if (isLoading && !data) {
     return (
       <div className="flex items-center justify-center h-full text-primary font-mono animate-pulse">
@@ -174,7 +156,7 @@ function Dashboard() {
               Account Balance
             </div>
             <div className="text-2xl font-bold text-white tracking-tight">
-              {fmtCurrency(data.balance)}
+              {fmtCurrency(data.balance, currSym)}
             </div>
             <div className="text-[10px] text-primary mt-1 flex items-center gap-1">
               <span className="text-sm material-icons">
@@ -197,7 +179,7 @@ function Dashboard() {
             <div
               className={`text-2xl font-bold tracking-tight ${data.total_pnl >= 0 ? "text-primary" : "text-danger"}`}
             >
-              {fmtPnL(data.total_pnl)}
+              {fmtPnL(data.total_pnl, currSym)}
             </div>
             <div className="text-[10px] text-gray-500 mt-1">
               All Time Performance
@@ -307,7 +289,7 @@ function Dashboard() {
             <div className="flex justify-between items-center border-b border-gray-800 pb-2">
               <span className="text-xs text-gray-400">Equity</span>
               <span className="text-xs text-white">
-                {fmtCurrency(data.equity)}
+                {fmtCurrency(data.equity, currSym)}
               </span>
             </div>
             <div className="flex justify-between items-center border-b border-gray-800 pb-2">
@@ -404,7 +386,7 @@ function Dashboard() {
                     <td
                       className={`py-3 pr-2 text-right ${pnlClass} font-bold`}
                     >
-                      {fmtPnL(trade.pnl)}
+                      {fmtPnL(trade.pnl, currSym)}
                     </td>
                     <td className="py-3 pr-2 text-right">
                       <span
@@ -432,15 +414,7 @@ function Dashboard() {
         </div>
       </div>
 
-      <footer className="mt-4 py-3 text-center text-xs text-gray-700">
-        <p>
-          NEXUBOT INSTITUTIONAL ENGINE © {new Date().getFullYear()}. ALL RIGHTS
-          RESERVED.
-        </p>
-        <p className="mt-1">
-          WARNING: Trading involves substantial risk of loss.
-        </p>
-      </footer>
+      <Footer />
     </div>
   );
 }

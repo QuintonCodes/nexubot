@@ -12,7 +12,7 @@ from src.core.services.application_data import ApplicationData
 from src.core.services.market_scanner import MarketScanner
 from src.core.services.offline_manager import OfflineManager
 from src.core.services.trade_monitor import TradeMonitor
-from src.config import DEFAULT_MIN_CONFIDENCE, DEFAULT_RISK_PCT
+from src.config import DEFAULT_MIN_CONFIDENCE, DEFAULT_RISK_PCT, ConfigManager
 
 # Initialize Logging immediately
 logger = setup_logging()
@@ -61,7 +61,7 @@ class NexubotEngine:
         """Returns the connection latency (ping) to the broker server."""
         return self.provider.get_ping()
 
-    async def initialize_connection(self, login_id, server, password):
+    async def initialize_connection(self, login_id, server, password, mt5_path=None):
         """
         Attempt to connect to MT5 using credentials from the GUI.
         """
@@ -82,6 +82,8 @@ class NexubotEngine:
         self.provider._login = mt5_login
         self.provider._password = password
         self.provider._server = server
+        if mt5_path:
+            self.provider._path = mt5_path
 
         logger.info(f"🖥️ Connecting to {server}...")
 
@@ -153,7 +155,7 @@ class NexubotEngine:
             await asyncio.sleep(2)
 
         await self.initialize_settings()
-        self.ai_engine.nn_brain = asyncio.to_thread(lambda: self.ai_engine.nn_brain.__init__(auto_load=True))
+        await self.ai_engine.initialize()
 
         await self.initialize_connection(self.settings["login"], self.settings["server"], self.settings["password"])
         return True

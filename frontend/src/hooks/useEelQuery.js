@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
+
 import { callEel } from "../lib/eel";
 
 let globalDashboardCache = null;
 let globalSignalCache = null;
 
 const DEFAULT_SIGNAL_DATA = {
-  account: { balance: 0, equity: 0 },
+  account: { balance: 0, equity: 0, currency: "USD" },
   stats: {
     active_count: 0,
     session_pnl: 0,
@@ -19,6 +20,7 @@ const DEFAULT_SIGNAL_DATA = {
   signals: [],
   logs: [],
   mode: "SIGNAL_ONLY",
+  monitored_symbols: [],
 };
 
 const DEFAULT_DASHBOARD_DATA = {
@@ -33,6 +35,7 @@ const DEFAULT_DASHBOARD_DATA = {
   chart_data: [],
   mode: "SIGNAL_ONLY",
   system_status: "IDLE",
+  currency: "USD",
 };
 
 const DEFAULT_HISTORY_DATA = {
@@ -41,6 +44,7 @@ const DEFAULT_HISTORY_DATA = {
     lifetime_wr: 0,
     total_trades: 0,
     lifetime_pnl: 0,
+    currency: "USD",
   },
   history: [],
   pagination: { current: 1, total_pages: 1, total_records: 0 },
@@ -50,23 +54,12 @@ const DEFAULT_SETTINGS_DATA = {
   login: "",
   server: "",
   password: "",
+  mt5_path: "",
   lot_size: 0.1,
   risk: 2.0,
   high_vol: false,
   confidence: 75,
   neural_meta: { model: "--", epochs: "--", bias: "--" },
-};
-
-const isValidDashboardData = (data) => {
-  if (!data || typeof data !== "object") return false;
-  if (data.balance === 0 && data.equity === 0) return false;
-  return true;
-};
-
-const isValidSignalData = (data) => {
-  if (!data || typeof data !== "object") return false;
-  if (data.account?.balance === 0 && data.account?.equity === 0) return false;
-  return true;
 };
 
 // --- DASHBOARD HOOK ---
@@ -75,9 +68,8 @@ export function useDashboardData() {
     queryKey: ["dashboard"],
     queryFn: async () => {
       const res = await callEel("fetch_dashboard_update");
-      if (!isValidDashboardData(res)) {
-        throw new Error("Dashboard data not ready");
-      }
+      if (!res) return globalDashboardCache || DEFAULT_DASHBOARD_DATA;
+      globalDashboardCache = res;
       return res;
     },
     refetchInterval: 1000,
@@ -87,15 +79,7 @@ export function useDashboardData() {
     retry: false,
   });
 
-  useEffect(() => {
-    if (query.data) {
-      globalDashboardCache = query.data;
-    }
-  }, [query.data]);
-
-  const safeData = query.data || globalDashboardCache || DEFAULT_DASHBOARD_DATA;
-
-  return { ...query, data: safeData };
+  return { ...query, data: query.data || DEFAULT_DASHBOARD_DATA };
 }
 
 // --- SIGNAL HOOK ---
@@ -104,9 +88,8 @@ export function useSignalData() {
     queryKey: ["signals"],
     queryFn: async () => {
       const res = await callEel("fetch_signal_updates");
-      if (!isValidSignalData(res)) {
-        throw new Error("Signal data not ready");
-      }
+      if (!res) return globalSignalCache || DEFAULT_SIGNAL_DATA;
+      globalSignalCache = res;
       return res;
     },
     refetchInterval: 1000,
@@ -117,14 +100,12 @@ export function useSignalData() {
   });
 
   useEffect(() => {
-    if (query.data) {
-      globalSignalCache = query.data;
-    }
-  }, [query.data]);
+    return () => {
+      globalSignalCache = null;
+    };
+  }, []);
 
-  const safeData = query.data || globalSignalCache || DEFAULT_SIGNAL_DATA;
-
-  return { ...query, data: safeData };
+  return { ...query, data: query.data || DEFAULT_SIGNAL_DATA };
 }
 
 export function useHistoryData(filterParams) {

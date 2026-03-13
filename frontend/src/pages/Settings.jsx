@@ -4,6 +4,7 @@ import {
   MdCloudDownload,
   MdDns,
   MdLink,
+  MdPowerSettingsNew,
   MdPsychology,
   MdRefresh,
   MdSettingsSuggest,
@@ -54,6 +55,7 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
     login: initialData.login || "",
     server: initialData.server || "",
     password: initialData.password || "",
+    mt5_path: initialData.mt5_path || "",
     lot_size: initialData.lot_size ?? 0.1,
     risk: initialData.risk ?? 2.0,
     high_vol: initialData.high_vol ?? false,
@@ -63,15 +65,21 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
   const [trainSymbol, setTrainSymbol] = useState("");
   const [trainingTriggered, setTrainingTriggered] = useState(false);
 
-  const handleChange = (e) => {
+  const meta = initialData?.neural_meta || {
+    model: "--",
+    epochs: "--",
+    bias: "--",
+  };
+
+  function handleChange(e) {
     const { id, value, type, checked } = e.target;
     setForm((prev) => ({
       ...prev,
       [id]: type === "checkbox" ? checked : value,
     }));
-  };
+  }
 
-  const handleSubmit = (e) => {
+  function handleSubmit(e) {
     e.preventDefault();
     saveSettings(form, {
       onSuccess: () => {
@@ -83,9 +91,9 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
         alert("Failed to save settings.");
       },
     });
-  };
+  }
 
-  const handleManualTrain = async (symbol = null) => {
+  async function handleManualTrain(symbol = null) {
     if (
       confirm(
         symbol
@@ -104,14 +112,15 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
         setTimeout(() => setTrainingTriggered(false), 2000);
       }
     }
-  };
+  }
 
-  // Helper for Neural Meta info
-  const meta = initialData?.neural_meta || {
-    model: "--",
-    epochs: "--",
-    bias: "--",
-  };
+  async function handleLogout() {
+    if (confirm("Disconnect MT5 and System Sessions?")) {
+      await callEel("logout_user");
+      sessionStorage.setItem("manual_logout", "true");
+      navigate("/");
+    }
+  }
 
   return (
     <div className="mx-auto max-w-5xl py-10 animate-in fade-in duration-500">
@@ -119,8 +128,13 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
         <h1 className="text-3xl font-bold uppercase tracking-tight text-white">
           Configuration Settings
         </h1>
-        <div className="animate-pulse text-xs text-secondary">
-          &lt;EDIT MODE ACTIVE&gt;
+        <div className="flex gap-4">
+          <button
+            onClick={handleLogout}
+            className="text-xs flex items-center gap-1 font-bold text-danger border border-danger/50 bg-danger/10 px-3 py-1 hover:bg-danger hover:text-white transition-colors cursor-pointer rounded-sm uppercase tracking-wider"
+          >
+            <MdPowerSettingsNew /> Disconnect
+          </button>
         </div>
       </div>
 
@@ -182,6 +196,23 @@ function SettingsForm({ initialData, saveSettings, isPending, navigate }) {
                       onChange={handleChange}
                       className="w-full rounded-none border border-gray-700 bg-black py-2 pl-9 text-sm text-gray-300 placeholder-gray-600 transition-colors focus:border-secondary focus:ring-1 focus:ring-secondary"
                       placeholder="••••••••"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] uppercase tracking-wider text-gray-500">
+                    MT5 Terminal Path
+                  </label>
+                  <div className="relative">
+                    <MdDns className="absolute top-3 left-3 text-lg text-gray-600" />
+                    <input
+                      id="mt5_path"
+                      type="text"
+                      value={form.mt5_path}
+                      onChange={handleChange}
+                      className="w-full rounded-none border border-gray-700 bg-black py-2 pl-9 text-sm text-gray-300 placeholder-gray-600 transition-colors focus:border-secondary focus:ring-1 focus:ring-secondary"
+                      placeholder="C:\Program Files\MetaTrader 5\terminal64.exe"
                     />
                   </div>
                 </div>

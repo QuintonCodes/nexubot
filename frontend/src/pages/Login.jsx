@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MdBadge,
   MdDns,
-  MdHelpOutline,
   MdHub,
   MdMemory,
   MdNetworkCheck,
@@ -15,29 +14,35 @@ import { callEel } from "../lib/eel";
 
 export default function Login() {
   const navigate = useNavigate();
+  const hasCheckedAutoLogin = useRef(false);
+
   const [formData, setFormData] = useState({
     login_id: "",
     server: "",
     password: "",
+    mt5_path: "",
   });
-  const [status, setStatus] = useState({ loading: false, error: null });
+
+  const [status, setStatus] = useState({
+    loading: false,
+    error: null,
+    message: "INITIALIZING SYSTEM...",
+  });
   const [latency, setLatency] = useState("--");
+  const [version, setVersion] = useState("v1.0.0");
 
-  // Latency check on mount (simulated from login.js)
-  useEffect(() => {
-    const start = Date.now();
-    setTimeout(() => {
-      setLatency(Date.now() - start);
-    }, 100);
-  }, []);
-
-  const handleChange = (e) => {
+  function handleChange(e) {
     setFormData({ ...formData, [e.target.id]: e.target.value });
-  };
+  }
 
-  const handleLogin = async (e) => {
+  async function handleLogin(e) {
     e.preventDefault();
-    setStatus({ loading: true, error: null });
+    setStatus({
+      loading: true,
+      error: null,
+      message: "CONNECTING TO NEURAL NET...",
+    });
+    sessionStorage.removeItem("manual_logout");
 
     try {
       const response = await callEel(
@@ -45,6 +50,7 @@ export default function Login() {
         formData.login_id,
         formData.server,
         formData.password,
+        formData.mt5_path,
       );
 
       if (response && response.success) {
@@ -56,9 +62,109 @@ export default function Login() {
       setStatus({
         loading: false,
         error: ">> ERROR: " + (error.message || error),
+        message: null,
       });
     }
-  };
+  }
+
+  // Latency check on mount (simulated from login.js)
+  useEffect(() => {
+    let isMounted = true;
+
+    // 1. Fetch Backend Version
+    callEel("get_app_version")
+      .then((v) => {
+        if (v && isMounted) setVersion(v);
+      })
+      .catch(console.error);
+
+    const start = Date.now();
+    setTimeout(() => {
+      if (isMounted) setLatency(Date.now() - start);
+    }, 100);
+
+    // 3. Robust Auto Login Flow
+    async function checkAutoLogin() {
+      if (hasCheckedAutoLogin.current) return;
+      hasCheckedAutoLogin.current = true;
+
+      // Check if user explicitly clicked "Disconnect" to avoid an infinite auto-login loop
+      const isManualLogout = sessionStorage.getItem("manual_logout") === "true";
+
+      try {
+        setStatus({
+          loading: true,
+          error: null,
+          message: "CHECKING SAVED CREDENTIALS...",
+        });
+        const settings = await callEel("get_user_settings");
+
+        if (isMounted && settings && settings.login) {
+          // Immediately pre-fill the form so details are remembered visually
+          setFormData({
+            login_id: String(settings.login),
+            server: settings.server || "",
+            password: settings.password || "",
+            mt5_path: settings.mt5_path || "",
+          });
+
+          // Only auto-connect if it wasn't a manual logout and we have all required fields
+          if (!isManualLogout && settings.server && settings.password) {
+            setStatus({
+              loading: true,
+              error: null,
+              message: "AUTO-CONNECTING TO MT5...",
+            });
+
+            const response = await callEel(
+              "attempt_login",
+              settings.login,
+              settings.server,
+              settings.password,
+              settings.mt5_path || "",
+            );
+
+            if (isMounted) {
+              if (response && response.success) {
+                navigate("/dashboard");
+              } else {
+                setStatus({
+                  loading: false,
+                  error:
+                    response?.message ||
+                    "Auto-Login Failed. Please verify and login manually.",
+                  message: null,
+                });
+              }
+            }
+            return; // Exit early if we handled the auto-login sequence
+          }
+        }
+
+        // If no valid auto-login was triggered, restore the UI to active state
+        if (isMounted) {
+          if (isManualLogout) {
+            sessionStorage.removeItem("manual_logout"); // Clear flag for next app launch
+          }
+          setStatus({ loading: false, error: null, message: null });
+        }
+      } catch (error) {
+        if (isMounted) {
+          setStatus({
+            loading: false,
+            error: ">> ERROR: " + (error.message || error),
+            message: null,
+          });
+        }
+      }
+    }
+
+    checkAutoLogin();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [navigate]);
 
   return (
     <div className="bg-background-dark text-gray-300 min-h-screen flex flex-col relative overflow-x-hidden transition-colors duration-300">
@@ -76,7 +182,7 @@ export default function Login() {
             <h1 className="text-xl font-bold tracking-wider text-white group-hover:text-primary transition-colors">
               NEXUBOT
               <span className="text-xs font-normal text-gray-400 ml-1">
-                v1.4.0
+                {version}
               </span>
             </h1>
             <div className="text-[10px] uppercase tracking-[0.2em] text-primary block animate-pulse">
@@ -180,6 +286,23 @@ export default function Login() {
                 </div>
               </div>
 
+              <div className="group/input relative">
+                <label className="block text-xs font-bold text-primary uppercase tracking-wider mb-2 group-focus-within/input:text-secondary transition-colors">
+                  MT5 Terminal Path
+                </label>
+                <div className="relative">
+                  <input
+                    id="mt5_path"
+                    value={formData.mt5_path}
+                    onChange={handleChange}
+                    className="w-full bg-black border border-gray-700 text-secondary p-3 pl-10 focus:ring-0 focus:border-primary focus:shadow-neon-green transition-all duration-300 placeholder-gray-700 outline-none"
+                    type="text"
+                    placeholder="C:\Program Files\MetaTrader 5\terminal64.exe"
+                  />
+                  <MdDns className="absolute left-3 top-3 text-gray-600 text-lg" />
+                </div>
+              </div>
+
               <div className="pt-4">
                 <button
                   id="loginBtn"
@@ -190,7 +313,7 @@ export default function Login() {
                   <span className="relative z-10 flex items-center justify-center gap-2">
                     {status.loading ? (
                       <span className="animate-pulse">
-                        CONNECTING TO NEURAL NET...
+                        {status.message || "CONNECTING TO NEURAL NET..."}
                       </span>
                     ) : (
                       <>
@@ -201,16 +324,6 @@ export default function Login() {
                   </span>
                   <div className="absolute inset-0 bg-white/10 translate-y-full group-hover/btn:translate-y-0 transition-transform duration-300"></div>
                 </button>
-              </div>
-
-              <div className="flex justify-between items-center text-[10px] uppercase text-gray-600 pt-2 border-t border-dashed border-gray-800">
-                <a
-                  className="hover:text-primary transition-colors flex items-center gap-1"
-                  href="#"
-                >
-                  <MdHelpOutline className="text-[12px]" /> Need Assistance?
-                </a>
-                <span className="text-right">Encrypted via TLS 1.3</span>
               </div>
             </form>
 
