@@ -9,6 +9,6 @@ scipy
 scikit-learn
 tensorflow
 joblib
-eel
-pyinstaller
 cryptography
+python-telegram-bot
+requests
