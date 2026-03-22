@@ -1,0 +1,156 @@
+import asyncio
+import logging
+import math
+import time
+import uuid
+
+from src.config import TIMEFRAME
+
+logger = logging.getLogger(__name__)
+
+
+class OfflineManager:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def _calculate_offline_result(self, signal: dict, start_time: float, klines: list):
+        """Synchronous CPU-bound calculation logic for offline verification."""
+        if not klines:
+            return None, 0.0, False
+
+        sl = signal["sl"]
+        tp = signal["tp"]
+        entry = signal["price"]
+        is_long = signal["direction"] == "LONG"
+        order_type = signal.get("order_type", "MARKET")
+        trade_duration = 14400
+
+        outcome = None
+        pnl = 0.0
+        filled_offline = order_type == "MARKET"
+
+        for k in klines:
+            if k["time"] < start_time:
+                continue
+
+            if (k["time"] - start_time) > trade_duration:
+                outcome = "TIMEOUT (Offline)"
+                break
+
+            if not filled_offline:
+                if is_long:
+                    if k["low"] <= entry:
+                        filled_offline = True
+                else:
+                    if k["high"] >= entry:
+                        filled_offline = True
+                if filled_offline:
+                    continue
+
+            if filled_offline:
+                if is_long:
+                    if k["low"] <= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    if k["high"] >= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+                else:
+                    if k["high"] >= sl:
+                        outcome = "LOSS (SL Offline)"
+                        pnl = -signal["risk_zar"]
+                        break
+                    if k["low"] <= tp:
+                        outcome = "WIN (TP Offline)"
+                        pnl = signal["profit_zar"]
+                        break
+
+        return outcome, pnl, filled_offline
+
+    async def check_offline_trades(self):
+        """Resumes or closes trades that were active before shutdown."""
+        logger.info("🔄 Checking for interrupted trades...")
+        active_trades = await self.engine.db.get_active_trades()
+
+        if not active_trades:
+            logger.info("✅ No interrupted trades found.")
+            return
+
+        for symbol, signal, start_time in active_trades:
+            self.engine.ai_engine.register_active_trade(symbol)
+
+            elapsed = time.time() - start_time
+            candles_needed = math.ceil(elapsed / 900) + 5
+            klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, min(candles_needed, 1000))
+
+            outcome, pnl, filled = self._calculate_offline_result(signal, start_time, klines)
+
+            # Case 1: Trade finished (TP or SL hit)
+            if outcome and "TIMEOUT" not in outcome:
+                won = pnl > 0
+                logger.info(f"🔔 Offline Result ({symbol}): {outcome} | PnL: R{pnl:.2f}")
+                unique_id = f"{symbol}_OFFLINE_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                await self.engine.db.log_trade(
+                    {
+                        "id": unique_id,
+                        "symbol": symbol,
+                        "signal": signal["signal"],
+                        "confidence": signal["confidence"],
+                        "entry": signal["price"],
+                        "exit": signal["tp"] if won else signal["sl"],
+                        "won": won,
+                        "pnl": pnl,
+                        "strategy": signal["strategy"] + " (Offline)",
+                        "lot_size": signal["lot_size"],
+                    }
+                )
+                await self.engine.db.delete_active_trade(symbol)
+
+            # Case 2: Trade Timed Out
+            elif outcome == "TIMEOUT (Offline)" or elapsed > 14400:
+                if not filled:
+                    logger.info(f"🚫 Offline Result ({symbol}): CANCELLED (Never Filled)")
+                else:
+                    # Calculate Floating PnL
+                    last_close = klines[-1]["close"] if klines else signal["price"]
+                    tick_val = signal.get("tick_value", 0.0)
+                    point = signal.get("point", 0.00001)
+                    lot = signal.get("lot_size", 0.1)
+
+                    diff = (
+                        (last_close - signal["price"])
+                        if signal["direction"] == "LONG"
+                        else (signal["price"] - last_close)
+                    )
+                    pnl = (diff / point) * tick_val * lot
+                    won = pnl > 0
+
+                    outcome_str = "WIN (Timeout)" if won else "LOSS (Timeout)"
+                    logger.info(f"🔔 Offline Result ({symbol}): {outcome_str} | PnL: R{pnl:.2f}")
+
+                    unique_id = f"{symbol}_TIMEOUT_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                    await self.engine.db.log_trade(
+                        {
+                            "id": unique_id,
+                            "symbol": symbol,
+                            "signal": signal["signal"],
+                            "confidence": signal["confidence"],
+                            "entry": signal["price"],
+                            "exit": last_close,
+                            "won": won,
+                            "pnl": pnl,
+                            "strategy": signal["strategy"] + " (Timeout)",
+                            "lot_size": lot,
+                        }
+                    )
+                await self.engine.db.delete_active_trade(symbol)
+
+            # Case 3: Still Active
+            else:
+                logger.info(f"♻️ Resuming Active Trade: {symbol} (Strategy: {signal.get('strategy', 'Unknown')})")
+                self.engine.active_signals.append(signal)
+                self.engine.monitored_tasks[symbol] = asyncio.create_task(
+                    self.engine.monitor.verify_trade_realtime(symbol, signal, start_time)
+                )

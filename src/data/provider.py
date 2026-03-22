@@ -2,14 +2,17 @@ import asyncio
 import logging
 import MetaTrader5 as mt5
 import os
-import time
 import subprocess
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
-from src.config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 logger = logging.getLogger(__name__)
+
+# Markets to ignore
+IGNORED_CURRENCIES = ["RUB", "TRY", "ZAR", "MXN", "CNH", "HKD", "SGD", "NOK", "SEK", "PLN", "DKK", "HUF"]
 
 
 class DataProvider:
@@ -27,6 +30,9 @@ class DataProvider:
         self.last_cache_clear = time.time()
         self._news_cache = []
         self._last_news_fetch = 0
+        self._symbol_type_cache = {}
+        self._cached_usdzar = None
+        self._cached_usdzar_time = 0
 
     def _fetch_calendar_events(self) -> List[Dict]:
         """
@@ -34,7 +40,6 @@ class DataProvider:
         Filters for upcoming events in the next 2 hours.
         """
         if not hasattr(mt5, "calendar_get_events"):
-            # Return empty so the bot falls back to news_block.txt silently
             return []
 
         try:
@@ -74,6 +79,19 @@ class DataProvider:
                 logger.info("⚠️ Forced kill of terminal64.exe")
         except Exception as e:
             logger.error(f"Failed to kill terminal: {e}")
+
+    def _sync_account_info(self) -> Dict:
+        """Fetches live account balance and equity."""
+        info = mt5.account_info()
+        if not info:
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
+
+        return {
+            "balance": float(info.balance),
+            "equity": float(info.equity),
+            "profit": float(info.profit),
+            "currency": getattr(info, "currency", "USD"),
+        }
 
     def _sync_connect(self) -> bool:
         """Synchronous MT5 Connection with Retries and Auto-Kill"""
@@ -116,11 +134,88 @@ class DataProvider:
             logger.exception(f"Critical MT5 Connection Error: {e}")
             return False
 
+    def _sync_get_market_watch_symbols(self) -> Dict:
+        """
+        Fetches all symbols currently visible in MT5 Market Watch.
+        Categorizes them into Crypto and Forex based on simple heuristics.
+        """
+        if not self.connected:
+            return {}
+
+        # Fallbacks from Config (Prioritized)
+        priority_crypto = set(FALLBACK_CRYPTO)
+        priority_forex = set(FALLBACK_FOREX)
+
+        # Also allow major pairs explicitly
+        major_forex_bases = [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCAD",
+            "AUDUSD",
+            "XAUUSD",
+            "XAGUSD",
+            "GBPJPY",
+            "NZDUSD",
+            "BTCJPY",
+            "CHFJPY",
+            "EURJPY",
+            "AUDJPY",
+            "CADJPY",
+            "EURAUD",
+        ]
+        major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
+
+        # Get only selected symbols (Market Watch)
+        symbols = mt5.symbols_get(selected=True)
+        if not symbols:
+            return {}
+
+        categorized = {"crypto": [], "forex": []}
+
+        for s in symbols:
+            name = s.name.upper()
+            # 1. Ignore Trash
+            if s.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED or not s.visible:
+                continue
+            if any(ign in name for ign in IGNORED_CURRENCIES):
+                continue
+
+            # 2. Strict Filtering Logic
+            is_priority = (name in priority_crypto) or (name in priority_forex)
+            is_major = any(m in name for m in major_forex_bases) or any(m in name for m in major_crypto_bases)
+
+            # Only add if it's in our Priority List or is a Major Pair
+            if not (is_priority or is_major):
+                continue
+
+            category = self.get_symbol_type(s.name)
+            if category == "CRYPTO":
+                categorized["crypto"].append(s.name)
+            else:
+                categorized["forex"].append(s.name)
+
+        # Fallback if empty (Force default list)
+        if not categorized["crypto"] and not categorized["forex"]:
+            categorized["crypto"] = list(priority_crypto)
+            categorized["forex"] = list(priority_forex)
+
+        return categorized
+
     def _sync_get_rates(self, symbol: str, timeframe: int, limit: int) -> List[Dict]:
         """Fetches candles with Synchronization Check."""
         # 1. Select symbol in Market Watch to trigger sync
+        if not self.connected:
+            return []
+
         selected = mt5.symbol_select(symbol, True)
         if not selected:
+            # Check if terminal is actually dead before logging warning
+            term_info = mt5.terminal_info()
+            if term_info is None:
+                self.connected = False  # Terminal is gone
+                return []
+
             logger.warning(f"Symbol {symbol} not found in Market Watch.")
             return []
 
@@ -182,6 +277,7 @@ class DataProvider:
             "trade_tick_value": info.trade_tick_value,
             "currency_profit": info.currency_profit,
             "currency_base": info.currency_base,
+            "filling_mode": info.filling_mode,
         }
 
     async def check_live_news_block(self, symbol: str, currencies: List[str]) -> bool:
@@ -207,12 +303,74 @@ class DataProvider:
 
         return False
 
-    async def initialize(self) -> bool:
-        """
-        Initializes connection to MT5 Terminal.
-        Retries logic implemented for stability.
-        """
-        return await asyncio.to_thread(self._sync_connect)
+    async def execute_trade_on_mt5(self, signal: dict) -> bool:
+        """Places the trade on MT5 if in FULL_AUTO mode."""
+        # 1. Connection Check
+        if not self.connected:
+            return False
+
+        # 2. Check Connection Validity (Ping)
+        if mt5.terminal_info() is None:
+            logger.error("❌ MT5 Execution Failed: Terminal not responding.")
+            self.connected = False
+            return False
+
+        symbol = signal["symbol"]
+        action = mt5.TRADE_ACTION_DEAL
+        type_order = mt5.ORDER_TYPE_BUY if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL
+
+        # Handle Limit Orders
+        if signal.get("order_type") == "LIMIT":
+            action = mt5.TRADE_ACTION_PENDING
+            type_order = mt5.ORDER_TYPE_BUY_LIMIT if signal["signal"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+
+        symbol_info = mt5.symbol_info(symbol)
+        fill_mode = mt5.ORDER_FILLING_FOK
+
+        if symbol_info:
+            modes = symbol_info.filling_mode
+            if modes & 2:
+                fill_mode = mt5.ORDER_FILLING_IOC
+            elif modes & 1:
+                fill_mode = mt5.ORDER_FILLING_FOK
+            else:
+                fill_mode = mt5.ORDER_FILLING_RETURN
+
+        try:
+            volume = float(signal["lot_size"])
+            price = float(signal["price"])
+            sl = float(signal["sl"])
+            tp = float(signal["tp"])
+        except ValueError:
+            logger.error(f"❌ Execution Error: Invalid numeric types for {symbol}")
+            return False
+
+        request = {
+            "action": action,
+            "symbol": symbol,
+            "volume": volume,
+            "type": type_order,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 20,
+            "magic": 123456,
+            "comment": f"Nexubot {signal['strategy']}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": fill_mode,
+        }
+
+        # 3. Send Order
+        result = await asyncio.to_thread(mt5.order_send, request)
+
+        if result and result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.info(f"✅ AUTOMATION: Trade Placed on MT5 for {symbol} ({signal['lot_size']} lots)")
+            return True
+        else:
+            err = result.comment if result else "Unknown Error"
+            retcode = result.retcode if result else "N/A"
+            logger.error(f"❌ AUTOMATION FAILED {symbol}: {err} | Retcode: {retcode}")
+            return False
 
     async def fetch_klines(self, symbol: str, timeframe_str: str, limit: int) -> List[Dict]:
         """
@@ -234,16 +392,31 @@ class DataProvider:
 
         return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
 
+    async def get_account_summary(self) -> Dict:
+        """Async wrapper to get account details"""
+        if not self.connected:
+            return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
+        return await asyncio.to_thread(self._sync_account_info)
+
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
         """Returns full tick object (Bid/Ask)."""
         return await asyncio.to_thread(self._sync_get_tick_struct, symbol)
 
-    async def get_symbol_info(self, symbol: str) -> Dict:
-        """
-        Fetches detailed symbol specification for risk calculations.
-        Crucial for ZAR account conversion.
-        """
-        return await asyncio.to_thread(self._sync_symbol_info, symbol)
+    async def get_dynamic_symbols(self) -> Dict:
+        """Async wrapper to get market watch symbols."""
+        return await asyncio.to_thread(self._sync_get_market_watch_symbols)
+
+    def get_ping(self) -> int:
+        """Returns the last known latency to the broker in ms."""
+        if not self.connected:
+            return -1
+        try:
+            info = mt5.terminal_info()
+            if info:
+                return int(info.ping_last / 1000)
+            return 0
+        except:
+            return -1
 
     async def get_spread(self, symbol: str) -> Dict:
         """
@@ -267,10 +440,89 @@ class DataProvider:
         if symbol not in self.spread_cache:
             self.spread_cache[symbol] = []
         self.spread_cache[symbol].append(spread_raw)
-        if len(self.spread_cache[symbol]) > 50:
+
+        # Keep last 10 ticks
+        if len(self.spread_cache[symbol]) > 10:
             self.spread_cache[symbol].pop(0)
 
-        return {"spread": spread_raw, "spread_high": False}
+        avg_spread = sum(self.spread_cache[symbol]) / len(self.spread_cache[symbol])
+
+        return {"spread": spread_raw, "avg_spread": avg_spread, "spread_high": False}
+
+    async def get_symbol_info(self, symbol: str) -> Dict:
+        """
+        Fetches detailed symbol specification for risk calculations.
+        Crucial for ZAR account conversion.
+        """
+        return await asyncio.to_thread(self._sync_symbol_info, symbol)
+
+    def get_symbol_type(self, symbol: str) -> str:
+        """
+        Robustly determines if a symbol is 'CRYPTO' or 'FOREX'
+        based on MT5 internal classification paths.
+        """
+        # Return cached result if available
+        if symbol in self._symbol_type_cache:
+            return self._symbol_type_cache[symbol]
+
+        # 1. Ask MT5 for the symbol path
+        info = mt5.symbol_info(symbol)
+        result = "FOREX"  # Default safety
+
+        if info:
+            path = info.path.lower()
+            # MT5 Path Check (Most Accurate)
+            if "crypto" in path or "bitcoin" in path or "digital" in path:
+                result = "CRYPTO"
+            if "indices" in path or "stock" in path or "nas" in path:
+                result = "INDICES"
+            if "forex" in path or "majors" in path or "minors" in path or "exotics" in path:
+                result = "FOREX"
+        else:
+            # 2. Fallback: Name-based Heuristic (if MT5 info fails or is vague)
+            s = symbol.upper()
+
+            # Common Crypto Bases
+            crypto_bases = ["BTC", "ETH", "SOL", "XRP", "BNB", "ADA", "DOGE", "LTC"]
+            if any(base in s for base in crypto_bases):
+                result = "CRYPTO"
+
+            # Common Forex/Metals
+            forex_bases = ["EUR", "USD", "GBP", "JPY", "CAD", "AUD", "NZD", "CHF", "XAU", "XAG"]
+            if any(base in s for base in forex_bases):
+                result = "FOREX"
+
+        self._symbol_type_cache[symbol] = result
+        return result
+
+    async def get_usdzar_rate(self) -> float:
+        """
+        Fetches the current USDZAR exchange rate for currency conversion.
+        Tries standard permutations like USDZAR, USDZARm, USDZAR.
+        """
+        # Return cached if fresh (1 minute)
+        if self._cached_usdzar and (time.time() - self._cached_usdzar_time) < 60:
+            return self._cached_usdzar
+
+        possible_pairs = ["USDZAR", "USDZARm", "USDZAR.", "USDZAR_OT"]
+
+        for pair in possible_pairs:
+            tick = await self.get_current_tick(pair)
+            if tick:
+                rate = (tick.bid + tick.ask) / 2.0
+                self._cached_usdzar = rate
+                self._cached_usdzar_time = time.time()
+                return rate
+
+        # Fallback if pair not found in market watch (Rough Estimate)
+        return 18.5
+
+    async def initialize(self) -> bool:
+        """
+        Initializes connection to MT5 Terminal.
+        Retries logic implemented for stability.
+        """
+        return await asyncio.to_thread(self._sync_connect)
 
     async def shutdown(self):
         """Safely shuts down the connection."""

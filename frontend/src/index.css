@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+/* 1. Define the Local Font */
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./assets/fonts/GeistMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./assets/fonts/GeistMono-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@theme {
+  /* Colors from your shared.js */
+  --color-primary: #00ff41;
+  --color-secondary: #00ffff;
+  --color-danger: #ff0055;
+  --color-warning: #f0e68c;
+  --color-background-light: #f0f2f5;
+  --color-background-dark: #050505;
+  --color-panel-dark: #0a0a0a;
+  --color-border-dark: #1f2937;
+
+  /* Shadows */
+  --shadow-neon-green: 0 0 10px #00ff41;
+  --shadow-neon-cyan: 0 0 10px #00ffff;
+  --shadow-neon-red: 0 0 5px #ff4d4d;
+
+  /* Fonts */
+  --font-display: "Geist Mono", monospace;
+
+  /* Animations */
+  --animate-shimmer: shimmer 1s infinite;
+
+  @keyframes shimmer {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+}
+
+body {
+  font-family: var(--font-display);
+}
+
+/* Custom Utilities */
+.grid-bg {
+  background-size: 40px 40px;
+  mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
+  -webkit-mask-image: radial-gradient(
+    circle at center,
+    black 40%,
+    transparent 100%
+  );
+}
+
+.scanline {
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0) 50%,
+    rgba(0, 0, 0, 0.2) 50%,
+    rgba(0, 0, 0, 0.2)
+  );
+  background-size: 100% 4px;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  opacity: 1;
+}
+
+.glitch-hover:hover {
+  animation: glitch 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) both infinite;
+  color: #00ff41;
+}
+@keyframes glitch {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(-2px, 2px);
+  }
+  40% {
+    transform: translate(-2px, -2px);
+  }
+  60% {
+    transform: translate(2px, 2px);
+  }
+  80% {
+    transform: translate(2px, -2px);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border: 1px solid #333;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00ff41;
+}
+
+/* Tailwind Custom Utilities (Optional if not using CDN for everything) */
+.text-shadow-neon {
+  text-shadow: 0 0 5px rgba(0, 255, 65, 0.5);
+}
+
+.toggle-checkbox:checked {
+  right: 0;
+  border-color: #00ff41;
+}
+.toggle-checkbox:checked + .toggle-label {
+  background-color: #00ff41;
+}

@@ -1,9 +1,8 @@
+import csv
 import logging
 import os
-import pandas as pd
-from datetime import datetime
 
-from src.config import DATA_FILE
+from src.config import FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
@@ -13,38 +12,31 @@ class DataCollector:
     Collects feature data and trade results for future ML training.
     """
 
-    @staticmethod
-    def log_training_data(symbol: str, features: dict, result: int, pnl: float, excursion: float = 0.0):
-        """
-        Appends a row of training data to the CSV.
+    def __init__(self, filename="training_data.csv"):
+        self.filename = filename
 
-        Args:
-            symbol: The pair traded.
-            features: Dictionary of indicator values.
-            result: 1 (Win) or 0 (Loss).
-            pnl: Profit/Loss in ZAR.
-            excursion: Max favorable ATR multiple (default 0.0 for live logs).
+    def log_training_data(self, symbol: str, features: dict, won: int, pnl: float, excursion: float = 0.0):
         """
+        Logs the strict SMC feature set for ML training.
+        """
+        file_exists = os.path.isfile(self.filename)
+
+        # We only want the specific features + targets
+        headers = ["symbol"] + FEATURE_COLS + ["target_win", "pnl", "target_excursion"]
+
+        row = {"symbol": symbol}
+        for col in FEATURE_COLS:
+            row[col] = features.get(col, 0.0)
+
+        row["target_win"] = won
+        row["pnl"] = pnl
+        row["target_excursion"] = excursion
+
         try:
-            # Prepare the data row
-            data = {
-                "timestamp": datetime.now().isoformat(),
-                "symbol": symbol,
-                **features,  # Unpack indicator values
-                "target_win": result,
-                "target_pnl": pnl,
-                "target_excursion": excursion,
-            }
-
-            df = pd.DataFrame([data])
-
-            # Append to CSV (create header if file doesn't exist)
-            if not os.path.exists(DATA_FILE):
-                df.to_csv(DATA_FILE, index=False, mode="w")
-            else:
-                df.to_csv(DATA_FILE, index=False, mode="a", header=False)
-
-            logger.debug(f"💾 Training data logged for {symbol}")
-
+            with open(self.filename, mode="a", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=headers)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
         except Exception as e:
-            logger.error(f"Failed to log training data: {e}")
+            logger.error(f"Failed to log training data for {symbol}: {e}")

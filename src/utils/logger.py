@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 
@@ -36,7 +37,7 @@ def setup_logging():
         logger.handlers.clear()
 
     # Formatter
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%d %b %H:%M:%S")
 
     # File Handler
     file_handler = logging.FileHandler("nexubot.log", encoding="utf-8", mode="a")
@@ -53,8 +54,25 @@ def setup_logging():
     logging.getLogger("aiohttp").setLevel(logging.ERROR)
     logging.getLogger("asyncio").setLevel(logging.ERROR)
     logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
+    logging.getLogger("geventwebsocket.handler").setLevel(logging.ERROR)
 
     return logger
+
+
+def read_recent_logs(limit=20):
+    """Reads the last N lines from the log file."""
+    log_file = "nexubot.log"
+    if not os.path.exists(log_file):
+        return []
+
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            # simple filter to remove clutter
+            filtered = [l.strip() for l in lines if "geventwebsocket" not in l and "aiohttp" not in l]
+            return filtered[-limit:]
+    except Exception:
+        return []
 
 
 # Global accessor
