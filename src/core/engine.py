@@ -42,6 +42,7 @@ class NexubotEngine:
             "losses": 0,
             "total": 0,
             "pnl": 0.0,
+            "currency": "USD",
             "start": datetime.now(),
         }
         self.active_signals = []
@@ -94,6 +95,11 @@ class NexubotEngine:
             await self.initialize_settings()
 
             asyncio.create_task(self.ai_engine.initialize())
+
+            # Get actual account currency for session stats
+            acct = await self.provider.get_account_summary()
+            if acct:
+                self.session_stats["currency"] = acct.get("currency", "USD")
 
             # Save valid credentials to DB
             new_settings = self.settings.copy()

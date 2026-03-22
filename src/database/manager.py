@@ -75,7 +75,8 @@ class TradeResult(Base):
     entry_price: Mapped[float] = mapped_column()
     exit_price: Mapped[float] = mapped_column()
     result: Mapped[int] = mapped_column()  # 1=Win, 0=Loss
-    pnl_zar: Mapped[float] = mapped_column()
+    pnl: Mapped[float] = mapped_column()
+    currency: Mapped[str] = mapped_column(default="USD")
     strategy: Mapped[str] = mapped_column()
     size: Mapped[float] = mapped_column(default=0.01)
 
@@ -94,7 +95,8 @@ class SessionAnalytics(Base):
     end_time: Mapped[float] = mapped_column()
     total_trades: Mapped[int] = mapped_column()
     win_rate: Mapped[float] = mapped_column()
-    net_pnl_zar: Mapped[float] = mapped_column()
+    net_pnl: Mapped[float] = mapped_column()
+    currency: Mapped[str] = mapped_column(default="USD")
 
 
 class UserSettings(Base):
@@ -290,7 +292,7 @@ class DatabaseManager:
 
                 # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
                 stats_query = select(
-                    func.count(TradeResult.id), func.sum(TradeResult.pnl_zar), func.sum(TradeResult.result)
+                    func.count(TradeResult.id), func.sum(TradeResult.pnl), func.sum(TradeResult.result)
                 )
                 total_trades, lifetime_pnl, total_wins = (await session.execute(stats_query)).one()
 
@@ -316,7 +318,7 @@ class DatabaseManager:
         try:
             async with self.async_session() as session:
                 stmt = select(
-                    func.sum(TradeResult.pnl_zar),
+                    func.sum(TradeResult.pnl),
                     func.sum(TradeResult.result),
                     func.count(TradeResult.id),
                 )
@@ -457,7 +459,8 @@ class DatabaseManager:
                     end_time=time.time(),
                     total_trades=stats["total"],
                     win_rate=win_rate,
-                    net_pnl_zar=stats.get("pnl", stats.get("pnl_zar", 0.0)),
+                    net_pnl=stats.get("pnl", 0.0),
+                    currency=stats.get("currency", "USD"),
                 )
                 session.add(analytics)
                 await session.commit()
@@ -482,7 +485,8 @@ class DatabaseManager:
                     entry_price=trade_data["entry"],
                     exit_price=trade_data["exit"],
                     result=1 if trade_data["won"] else 0,
-                    pnl_zar=trade_data["pnl"],
+                    pnl=trade_data["pnl"],
+                    currency=trade_data.get("currency", "USD"),
                     strategy=trade_data["strategy"],
                     size=trade_data.get("size", 0.01),
                 )

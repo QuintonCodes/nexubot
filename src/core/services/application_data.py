@@ -66,7 +66,7 @@ class ApplicationData:
                     }
                 )
                 # Subtract this trade's PnL to get the value BEFORE this trade happened
-                current_curve_val -= t.pnl_zar
+                current_curve_val -= t.pnl
 
             # Reverse back to chronological order for the chart (Oldest -> Newest)
             chart_points.reverse()
@@ -84,7 +84,8 @@ class ApplicationData:
                         "entry": float(t.entry_price),
                         "exit": float(t.exit_price),
                         "size": getattr(t, "size", 0.01),
-                        "pnl": float(t.pnl_zar),
+                        "pnl": float(t.pnl),
+                        "currency": getattr(t, "currency", "USD"),
                         "result": int(t.result),
                     }
                 )
@@ -184,7 +185,8 @@ class ApplicationData:
                         "signal_type": t.signal_type,
                         "entry": float(t.entry_price),
                         "exit": float(t.exit_price),
-                        "pnl": float(t.pnl_zar),
+                        "pnl": float(t.pnl),
+                        "currency": getattr(t, "currency", "USD"),
                         "result": int(t.result),
                         "confidence": float(t.confidence),
                         "size": getattr(t, "size", 0.01),

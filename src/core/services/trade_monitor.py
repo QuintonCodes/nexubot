@@ -158,6 +158,7 @@ class TradeMonitor:
                         "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
                         "won": won,
                         "pnl": final_pnl,
+                        "currency": self.engine.session_stats.get("currency", "USD"),
                         "strategy": signal["strategy"],
                         "lot_size": lot_size,
                     }
