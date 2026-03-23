@@ -416,7 +416,7 @@ class AITradingEngine:
         adx_strength = curr["adx"]
 
         final_signal = self.strategy_analyzer.analyze_router(
-            curr, df, htf_trend, self.active_fvgs[symbol], self.active_obs[symbol], adx_strength
+            curr, df, htf_trend, self.active_fvgs[symbol], self.active_obs[symbol], adx_strength, structure_info
         )
 
         if not final_signal:
@@ -550,20 +550,3 @@ class AITradingEngine:
         """Sets user balance and database manager."""
         self.user_balance_account = balance
         self.db_manager = db
-
-    def update_config(self, settings: dict):
-        """Updates engine parameters dynamically from GUI settings."""
-        if "risk" in settings:
-            self.risk_pct = float(settings["risk"])
-        if "lot_size" in settings:
-            self.max_lot = float(settings["lot_size"])
-        if "confidence" in settings:
-            self.min_confidence = float(settings["confidence"])
-        if "high_vol" in settings:
-            self.allow_high_volatility = bool(settings["high_vol"])
-
-        mode = settings.get("execution_mode", "SIGNAL_ONLY")
-
-        logger.info(
-            f"⚙️ Engine Config Updated: Risk={self.risk_pct}%, MaxLot={self.max_lot}, MinConf={self.min_confidence}%, HighVol={self.allow_high_volatility}, Mode={mode}"
-        )

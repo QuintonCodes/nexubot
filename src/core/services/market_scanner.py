@@ -34,7 +34,7 @@ class MarketScanner:
             if signals_found >= MAX_SIGNALS_PER_SCAN:
                 break
 
-            # Skip if already active in UI
+            # Skip if trade is already active/monitoring
             if any(s.get("symbol") == sym for s in self.engine.active_signals):
                 continue
 
@@ -44,23 +44,19 @@ class MarketScanner:
                 if signal:
                     signal.setdefault("symbol", sym)
                     signal["detected_at"] = time.time()
-                    signal["status"] = "PENDING"  # Initial status
+                    signals_found += 1
 
-                    is_shadow = signal.get("is_shadow", False)
+                    # Add to active list to prevent duplicate scans on this pair
+                    self.engine.active_signals.append(signal)
 
-                    if not is_shadow:
-                        signals_found += 1
-                        self.engine.active_signals.insert(0, signal)
+                    # 1. Alert via Telegram
+                    if hasattr(self.engine, "notifier"):
+                        self.engine.notifier.send_signal_alert(sym, signal)
 
-                        if self.engine.execution_mode == "FULL_AUTO":
-                            placed = await self.engine.provider.execute_trade_on_mt5(signal)
-                            if placed:
-                                signal["status"] = "PLACED"
-                        self.engine.monitored_tasks[sym] = asyncio.create_task(
-                            self.engine.monitor.verify_trade_realtime(sym, signal)
-                        )
-                    else:
-                        asyncio.create_task(self.engine.monitor.verify_trade_realtime(sym, signal))
+                    # 2. Start monitoring the trade for TP/SL
+                    self.engine.monitored_tasks[sym] = asyncio.create_task(
+                        self.engine.monitor.verify_trade_realtime(sym, signal)
+                    )
 
     async def _refresh_market_watch_symbols(self):
         """Fetches current Market Watch from Provider."""
@@ -122,6 +118,10 @@ class MarketScanner:
                 # 2. Sort Pairs every 15 mins (Logic from console.py)
                 if now - last_sort_time > 900:
                     logger.info("📊 Re-ranking pairs by volatility...")
+                    self.engine.notifier.send_message(
+                        "📊 *Market Scanner Update*\nRe-ranking pairs by volatility and hunting for high-probability setups..."
+                    )
+
                     await self._refresh_market_watch_symbols()
 
                     active_crypto = await self._sort_pairs(active_crypto)

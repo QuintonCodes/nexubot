@@ -10,13 +10,6 @@ class TradeMonitor:
     def __init__(self, engine):
         self.engine = engine
 
-    def _update_signal_status(self, symbol: str, status: str):
-        """Helper to update status text in UI list"""
-        for s in self.engine.active_signals:
-            if s["symbol"] == symbol:
-                s["status"] = status
-                break
-
     async def force_close_trade(self, symbol: str) -> bool:
         """Manually closes an active signal/trade."""
         self.engine.active_signals = [s for s in self.engine.active_signals if s["symbol"] != symbol]
@@ -42,8 +35,6 @@ class TradeMonitor:
 
         # Order Management
         is_filled = signal.get("order_type", "MARKET") == "MARKET"
-        if is_filled:
-            self._update_signal_status(symbol, "OPEN")
 
         # Trailer State
         be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
@@ -138,6 +129,9 @@ class TradeMonitor:
                 return
 
             logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: R{final_pnl:.2f}")
+
+            if is_filled:
+                self.engine.notifier.send_trade_result(symbol, outcome, final_pnl, won)
 
             if is_filled:
                 if won:

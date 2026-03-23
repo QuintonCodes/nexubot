@@ -1,66 +1,62 @@
-import eel
+import asyncio
 import os
 import sys
-import time
 import warnings
+from dotenv import load_dotenv
 
-# --- 1. Filter np.object Warning ---
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*np.object.*")
-
-# Ensure 'src' is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
-from src.api.eel_interface import (
-    attempt_login,
-    close_app,
-    fetch_dashboard_update,
-    fetch_signal_updates,
-    fetch_trade_history,
-    force_close,
-    get_app_version,
-    get_user_settings,
-    logout_user,
-    save_settings,
-    set_mode,
-    shutdown_bot,
-    trigger_training,
-)
+from src.api.telegram_notifier import TelegramNotifier
+from src.core.engine import NexubotEngine
 from src.utils.logger import setup_logging
 
+load_dotenv()
 setup_logging()
 
 
-def on_close(page, sockets):
-    """
-    Modified callback to prevent shutdown during page redirection.
-    """
-    time.sleep(1)
-
-    if not sockets:
-        print("❌ Final window closed. Shutting down Nexubot...")
-        shutdown_bot()
+async def run_daily_reporter(engine, notifier):
+    """Background task to send a report every 24 hours."""
+    while True:
+        await asyncio.sleep(86400)  # Wait 24 hours
+        stats = engine.session_stats
+        notifier.send_daily_report(stats["wins"], stats["losses"], stats["total"], stats["pnl"])
 
 
-def start_app():
-    # Point to the web folder
-    eel.init("web")
-    print("🚀 Starting Nexubot GUI...")
+async def main():
+    notifier = TelegramNotifier()
+    notifier.send_message("🚀 *Nexubot Boot Sequence Initiated...*")
 
-    # Start the app
-    try:
-        eel.start(
-            "index.html",
-            size=(1280, 720),
-            position=(100, 100),
-            close_callback=on_close,
-            cmdline_args=["--disable-http-cache", "--disable-plugins", "--no-experiments"],
-        )
-    except (SystemExit, KeyboardInterrupt):
-        pass
-    except Exception as e:
-        print(f"Eel Error: {e}")
-        sys.exit(1)
+    # Pass notifier to engine
+    engine = NexubotEngine(notifier)
+
+    login = os.getenv("MT5_LOGIN")
+    password = os.getenv("MT5_PASSWORD")
+    server = os.getenv("MT5_SERVER")
+    path = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
+
+    if not all([login, password, server]):
+        notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
+        return
+
+    # Initialize Headless Connection
+    result = await engine.initialize_connection(login, server, password, path)
+
+    if result["success"]:
+        notifier.send_message(f"✅ *Connected to MT5 Server:* {server}\n⚙️ *Execution Mode:* {engine.execution_mode}")
+
+        # Start the daily reporting loop in the background
+        asyncio.create_task(run_daily_reporter(engine, notifier))
+
+        # Keep the main thread alive indefinitely
+        while True:
+            await asyncio.sleep(3600)
+    else:
+        notifier.send_message(f"❌ *MT5 Connection Failed:* {result['message']}")
 
 
 if __name__ == "__main__":
-    start_app()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Nexubot Shutting Down...")

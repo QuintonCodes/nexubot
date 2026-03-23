@@ -9,45 +9,15 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.5.0"
-
-
-# ---------------------------------------------------------
-# CONFIG MANAGER
-# ---------------------------------------------------------
-class ConfigManager:
-    @staticmethod
-    def get_config_path():
-        local_app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/.config"))
-        return os.path.join(local_app_data, "Nexubot", "settings.json")
-
-    @classmethod
-    def load_settings(cls):
-        path = cls.get_config_path()
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    @classmethod
-    def save_settings(cls, settings):
-        path = cls.get_config_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(settings, f, indent=4)
-
+VERSION = "v1.0.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
 # ---------------------------------------------------------
-_local_settings = ConfigManager.load_settings()
-MT5_LOGIN = int(_local_settings.get("MT5_LOGIN", os.getenv("MT5_LOGIN", "0")))
-MT5_PASSWORD = _local_settings.get("MT5_PASSWORD", os.getenv("MT5_PASSWORD", ""))
-MT5_SERVER = _local_settings.get("MT5_SERVER", os.getenv("MT5_SERVER", ""))
-MT5_PATH = _local_settings.get("MT5_PATH", os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe"))
+MT5_LOGIN = os.getenv("MT5_LOGIN", "")
+MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+MT5_SERVER = os.getenv("MT5_SERVER", "")
+MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
 
 # ---------------------------------------------------------
 # DATABASE & FALLBACKS
@@ -83,7 +53,7 @@ SESSION_CONFIG = {
 # ---------------------------------------------------------
 TIMEFRAME = "M15"
 CANDLE_LIMIT = 500
-DEFAULT_MIN_CONFIDENCE = 75.0
+DEFAULT_MIN_CONFIDENCE = 70.0
 DEFAULT_BALANCE_ZAR = 500.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 0.1
