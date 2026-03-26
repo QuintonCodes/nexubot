@@ -4,16 +4,14 @@ import json
 import numpy as np
 import re
 import time
-from datetime import datetime
 from functools import wraps
-from sqlalchemy import and_, select, desc, delete, func
+from sqlalchemy import select, desc, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
-from typing import Dict, List
+from typing import List
 
-from src.data.provider import DataProvider
-from src.config import DATABASE_URL, FALLBACK_CRYPTO, FALLBACK_FOREX, LOSS_COOLDOWN_DURATION
+from src.config import DATABASE_URL, LOSS_COOLDOWN_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -97,19 +95,6 @@ class SessionAnalytics(Base):
     win_rate: Mapped[float] = mapped_column()
     net_pnl: Mapped[float] = mapped_column()
     currency: Mapped[str] = mapped_column(default="USD")
-
-
-class UserSettings(Base):
-    __tablename__ = "user_settings"
-    id: Mapped[int] = mapped_column(primary_key=True, default=1)
-    login: Mapped[str] = mapped_column(nullable=True)
-    server: Mapped[str] = mapped_column(nullable=True)
-    password: Mapped[str] = mapped_column(nullable=True)
-    lot_size: Mapped[float] = mapped_column(default=0.1)
-    risk: Mapped[float] = mapped_column(default=2.0)
-    confidence: Mapped[int] = mapped_column(default=75)
-    high_vol: Mapped[bool] = mapped_column(default=False)
-    execution_mode: Mapped[str] = mapped_column(default="SIGNAL_ONLY")
 
 
 # --- MANAGER ---
@@ -216,125 +201,6 @@ class DatabaseManager:
             logger.error(f"Failed to fetch active trades: {e}")
             return []
 
-    async def get_alltime_trade_history(self, provider: DataProvider, filters=None) -> Dict:
-        """
-        Returns all time trading history with custom filter options
-        """
-        if not self.engine:
-            return {}
-
-        page = 1
-        limit = 10
-        if filters:
-            page = filters.get("page", 1)
-            limit = filters.get("limit", 10)
-
-        try:
-            async with self.async_session() as session:
-                # 1. Base Query
-                query = select(TradeResult).order_by(TradeResult.timestamp.desc())
-
-                # 2. Apply Filters
-                conditions = []
-                if filters:
-                    if filters.get("startDate"):
-                        try:
-                            start_ts = datetime.strptime(filters["startDate"], "%Y-%m-%d").timestamp()
-                            conditions.append(TradeResult.timestamp >= start_ts)
-                        except:
-                            pass
-                    if filters.get("endDate"):
-                        try:
-                            end_ts = datetime.strptime(filters["endDate"], "%Y-%m-%d").timestamp() + 86400
-                            conditions.append(TradeResult.timestamp <= end_ts)
-                        except:
-                            pass
-                    if filters.get("range"):
-                        now = time.time()
-                        if filters["range"] == "24H":
-                            conditions.append(TradeResult.timestamp >= now - 86400)
-                        if filters["range"] == "7D":
-                            conditions.append(TradeResult.timestamp >= now - 604800)
-                        if filters["range"] == "30D":
-                            conditions.append(TradeResult.timestamp >= now - 2592000)
-
-                    outcome = filters.get("outcome", "ALL")
-                    if outcome == "WINS":
-                        conditions.append(TradeResult.result == 1)
-                    elif outcome == "LOSSES":
-                        conditions.append(TradeResult.result == 0)
-
-                    assets = filters.get("assets", [])
-                    if assets and "ALL" not in assets:
-                        dynamic_symbols = await provider.get_dynamic_symbols()
-
-                        crypto = dynamic_symbols.get("crypto", FALLBACK_CRYPTO)
-                        forex = dynamic_symbols.get("crypto", FALLBACK_FOREX)
-
-                        symbol_conditions = []
-                        if "CRYPTO" in assets:
-                            symbol_conditions.extend(crypto)
-                        if "FOREX" in assets:
-                            symbol_conditions.extend(forex)
-                        if symbol_conditions:
-                            conditions.append(TradeResult.symbol.in_(symbol_conditions))
-
-                if conditions:
-                    query = query.where(and_(*conditions))
-
-                # 3. Get Total Count (for Pagination)
-                count_query = select(func.count()).select_from(query.subquery())
-                total_records = (await session.execute(count_query)).scalar()
-
-                # 4. Apply Pagination
-                query = query.offset((page - 1) * limit).limit(limit)
-                trades = (await session.execute(query)).scalars().all()
-
-                # 5. Calculate Lifetime Stats (Optimized: Single aggregated query)
-                stats_query = select(
-                    func.count(TradeResult.id), func.sum(TradeResult.pnl), func.sum(TradeResult.result)
-                )
-                total_trades, lifetime_pnl, total_wins = (await session.execute(stats_query)).one()
-
-            return {
-                "trades": trades,
-                "page": page,
-                "limit": limit,
-                "total_records": total_records or 0,
-                "total_trades": total_trades or 0,
-                "lifetime_pnl": lifetime_pnl or 0.0,
-                "total_wins": total_wins or 0,
-            }
-        except Exception as e:
-            logger.error(f"Failed to fetch trade history from DB: {e}")
-            return {}
-
-    @db_retry()
-    async def get_dashboard_stats(self) -> Dict:
-        """Efficiently fetches aggregated stats for the dashboard."""
-        if not self.engine:
-            return {"total_pnl": 0.0, "wins": 0, "losses": 0}
-
-        try:
-            async with self.async_session() as session:
-                stmt = select(
-                    func.sum(TradeResult.pnl),
-                    func.sum(TradeResult.result),
-                    func.count(TradeResult.id),
-                )
-                result = await session.execute(stmt)
-                total_pnl, wins, total_count = result.one()
-
-                total_pnl = total_pnl or 0.0
-                wins = wins or 0
-                total_count = total_count or 0
-                losses = total_count - wins
-
-                return {"total_pnl": total_pnl, "wins": wins, "losses": losses}
-        except Exception as e:
-            logger.error(f"Dashboard Stats Error: {e}")
-            return {"total_pnl": 0.0, "wins": 0, "losses": 0}
-
     async def get_pair_performance(self, symbol: str) -> float:
         """
         Returns win rate for a specific pair.
@@ -379,33 +245,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Recent Trades Error: {e}")
             return []
-
-    @db_retry()
-    async def get_settings(self) -> Dict:
-        """Fetches user settings from DB"""
-        if not self.engine:
-            return {}
-
-        try:
-            async with self.async_session() as session:
-                stmt = select(UserSettings).where(UserSettings.id == 1)
-                result = await session.execute(stmt)
-                settings = result.scalars().first()
-                if settings:
-                    return {
-                        "login": settings.login,
-                        "server": settings.server,
-                        "password": settings.password,
-                        "lot_size": settings.lot_size,
-                        "risk": settings.risk,
-                        "confidence": settings.confidence,
-                        "high_vol": settings.high_vol,
-                        "execution_mode": settings.execution_mode,
-                    }
-                return {}
-        except Exception as e:
-            logger.error(f"Failed to load settings from DB: {e}")
-            return {}
 
     @db_retry()
     async def get_total_historical_win_rate(self) -> float:
@@ -518,34 +357,3 @@ class DatabaseManager:
             logger.error(f"JSON Serialization Failed for {symbol}: {te}")
         except Exception as e:
             logger.error(f"Failed to save active trade {symbol}: {e}")
-
-    async def save_settings(self, data: dict):
-        """Upserts user settings"""
-        if not self.engine:
-            return
-
-        try:
-            async with self.async_session() as session:
-                stmt = select(UserSettings).where(UserSettings.id == 1)
-                result = await session.execute(stmt)
-                obj = result.scalars().first()
-
-                if not obj:
-                    obj = UserSettings(id=1)
-                    session.add(obj)
-
-                for key in ["login", "password", "server", "execution_mode"]:
-                    if key in data:
-                        setattr(obj, key, data[key])
-                if "lot_size" in data:
-                    obj.lot_size = float(data["lot_size"])
-                if "risk" in data:
-                    obj.risk = float(data["risk"])
-                if "confidence" in data:
-                    obj.confidence = int(data["confidence"])
-                if "high_vol" in data:
-                    obj.high_vol = bool(data["high_vol"])
-
-                await session.commit()
-        except Exception as e:
-            logger.error(f"Failed to save settings: {e}")

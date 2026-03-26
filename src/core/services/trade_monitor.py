@@ -10,12 +10,6 @@ class TradeMonitor:
     def __init__(self, engine):
         self.engine = engine
 
-    async def force_close_trade(self, symbol: str) -> bool:
-        """Manually closes an active signal/trade."""
-        self.engine.active_signals = [s for s in self.engine.active_signals if s["symbol"] != symbol]
-        logger.info(f"🛑 Trade {symbol} Force Closed by User.")
-        return True
-
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
         Monitors price and Logs Data for ML.

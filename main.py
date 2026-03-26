@@ -40,10 +40,10 @@ async def main():
         return
 
     # Initialize Headless Connection
-    result = await engine.initialize_connection(login, server, password, path)
+    is_connected = await engine.initialize_connection(login, server, password, path)
 
-    if result["success"]:
-        notifier.send_message(f"✅ *Connected to MT5 Server:* {server}\n⚙️ *Execution Mode:* {engine.execution_mode}")
+    if is_connected:
+        notifier.send_message(f"✅ *Connected to MT5 Server:* {server}")
 
         # Start the daily reporting loop in the background
         asyncio.create_task(run_daily_reporter(engine, notifier))
@@ -52,7 +52,7 @@ async def main():
         while True:
             await asyncio.sleep(3600)
     else:
-        notifier.send_message(f"❌ *MT5 Connection Failed:* {result['message']}")
+        notifier.send_message(f"❌ *MT5 Connection Failed.* Check console logs.")
 
 
 if __name__ == "__main__":
