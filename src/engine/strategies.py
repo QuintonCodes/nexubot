@@ -16,28 +16,56 @@ class StrategyAnalyzer:
         active_obs: List[Dict],
         adx_strength: float,
         structure: dict,
+        allowed_session_types: List[str],
     ) -> Optional[Dict]:
         """
         Unified SMC Strategy Router. Strict MTF Alignment applied.
         """
         if htf_trend == "FLAT" or adx_strength < 15.0:
+            if "REVERSION" in allowed_session_types:
+                return self._mean_reversion_strategy(curr, df)
             return None
 
-        # 1. Structure Break Continuation
-        res = self._smc_structure_continuation(curr, df, htf_trend, structure, active_fvgs)
-        if res:
-            return res
+        # 2. Trend & Breakout Strategies
+        if "TREND" in allowed_session_types or "BREAKOUT" in allowed_session_types:
+            # Structure Break Continuation
+            res = self._smc_structure_continuation(curr, df, htf_trend, structure, active_fvgs)
+            if res:
+                return res
 
-        # 2. SMC POI Reversal
-        res = self._smc_poi_reversal(curr, df, htf_trend, active_fvgs, active_obs)
-        if res:
-            return res
+            # SMC POI Reversal
+            res = self._smc_poi_reversal(curr, df, htf_trend, active_fvgs, active_obs)
+            if res:
+                return res
 
-        # 3. Liquidity Sweep
-        res = self._smc_liquidity_sweep(curr, df, htf_trend, active_fvgs)
-        if res:
-            return res
+            # Liquidity Sweep
+            res = self._smc_liquidity_sweep(curr, df, htf_trend, active_fvgs)
+            if res:
+                return res
 
+        return None
+
+    def _mean_reversion_strategy(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
+        """Mean Reversion logic for low-volatility environments. Relies on Bollinger Bands and ATR for SL placement."""
+        # Simple Bollinger Band Reversion for quiet markets
+        if curr["close"] < curr.get("bb_lower", 0) and curr["close"] > curr["open"]:
+            return {
+                "strategy": "Mean Reversion (Range Bound)",
+                "signal": "BUY",
+                "direction": "LONG",
+                "confidence": 70.0,
+                "order_type": "MARKET",
+                "suggested_sl": curr["low"] - (curr["atr"] * 0.5),
+            }
+        elif curr["close"] > curr.get("bb_upper", float("inf")) and curr["close"] < curr["open"]:
+            return {
+                "strategy": "Mean Reversion (Range Bound)",
+                "signal": "SELL",
+                "direction": "SHORT",
+                "confidence": 70.0,
+                "order_type": "MARKET",
+                "suggested_sl": curr["high"] + (curr["atr"] * 0.5),
+            }
         return None
 
     def _smc_structure_continuation(self, curr, df, htf_trend, structure, active_fvgs):

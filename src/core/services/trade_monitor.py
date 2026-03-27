@@ -13,33 +13,39 @@ class TradeMonitor:
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
         Monitors price and Logs Data for ML.
-        Updates self.active_signals state for UI.
         """
         logger.info(f"👀 Monitoring trade {symbol} for outcome...")
         await self.engine.db.save_active_trade(symbol, signal)
 
         entry = signal["price"]
         sl = signal["sl"]
-        tp = signal["tp"]
+        tp1 = signal.get("tp1")
+        tp2 = signal.get("tp2")
+        tp3 = signal.get("tp3", signal["tp"])
+
         is_long = signal["direction"] == "LONG"
-        atr = signal.get("atr", 1.0)
+        point = signal.get("point", 0.00001)
+
         lot_size = signal["lot_size"]
         tick_value = signal.get("tick_value", 0.0)
-        point = signal.get("point", 0.00001)
+        atr = signal["atr"]
 
         # Order Management
         is_filled = signal.get("order_type", "MARKET") == "MARKET"
 
         # Trailer State
-        be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
         duration = 14400  # 4 hours
         start_time = resume_start_time if resume_start_time else time.time()
         interval = 1  # Check every second
 
+        be_stage = 0  # 0=None, 1=BE, 2=Lock 1R, 3=Lock 2R
+        tp1_hit = False
+        tp2_hit = False
         outcome = "TIMEOUT"
+        final_pips = 0.0
         final_pnl = 0.0
-        max_favorable_dist = 0.0
         won = False
+        max_favorable_dist = 0.0
 
         try:
             while (time.time() - start_time) < duration and self.engine.is_running:
@@ -50,58 +56,58 @@ class TradeMonitor:
 
                 current_bid = tick.bid
                 current_ask = tick.ask
-                spread = current_ask - current_bid
 
                 # --- 1. TRADE MONITORING (FILLED) ---
                 curr_price = current_bid if is_long else current_ask
 
-                hit_sl = curr_price <= sl if is_long else curr_price >= sl
-                hit_tp = curr_price >= tp if is_long else curr_price <= tp
-
-                if hit_sl:
-                    outcome = "LOSS (SL Hit)"
-                    points_lost = (sl - entry) / point if is_long else (entry - sl) / point
-                    final_pnl = points_lost * tick_value * lot_size
-                    won = False
-                    break
-                elif hit_tp:
-                    outcome = "WIN (TP Hit)"
-                    points_won = (tp - entry) / point if is_long else (entry - tp) / point
-                    final_pnl = points_won * tick_value * lot_size
-                    won = True
-                    break
-
-                # Update Max Excursion
                 curr_dist = (current_bid - entry) if is_long else (entry - current_ask)
                 max_favorable_dist = max(max_favorable_dist, curr_dist)
 
-                # --- 3. MULTI-STAGE TRAILING ---
-                # Stage 3: Lock 2R
-                if be_stage < 3 and max_favorable_dist > (atr * 3.0):
-                    new_sl = entry + (atr * 2.0) if is_long else entry - (atr * 2.0)
-                    # Ensure we are moving SL in favorable direction
-                    if (is_long and new_sl > sl) or (not is_long and new_sl < sl):
-                        sl = new_sl
-                        be_stage = 3
-                        logger.info(f"🛡️ {symbol} Locked 2R Profit")
+                hit_sl = curr_price <= sl if is_long else curr_price >= sl
+                if hit_sl:
+                    if be_stage > 0:
+                        outcome = "WIN (Stopped in Profit/BE)"
+                        won = True
+                    else:
+                        outcome = "LOSS (SL Hit)"
+                        won = False
 
-                # Stage 2: Lock 1R
-                elif be_stage < 2 and max_favorable_dist > (atr * 2.0):
-                    new_sl = entry + (atr * 1.0) if is_long else entry - (atr * 1.0)
-                    if (is_long and new_sl > sl) or (not is_long and new_sl < sl):
-                        sl = new_sl
-                        be_stage = 2
-                        logger.info(f"🛡️ {symbol} Locked 1R Profit")
+                    points_lost = (sl - entry) / point if is_long else (entry - sl) / point
+                    points_diff = (curr_price - entry) if is_long else (entry - curr_price)
+                    final_pips = points_diff / (point * 10)
+                    final_pnl = points_lost * tick_value * lot_size
+                    break
 
-                # Stage 1: Breakeven
-                elif be_stage < 1 and max_favorable_dist > (atr * 1.0):
-                    # Small buffer to cover commissions/spread
-                    buffer = 20 * point
-                    new_sl = entry + buffer if is_long else entry - buffer
-                    if (is_long and new_sl > sl) or (not is_long and new_sl < sl):
-                        sl = new_sl
-                        be_stage = 1
-                        logger.info(f"🛡️ {symbol} SL Moved to Breakeven")
+                # 2. Multi-TP Milestone Tracking
+                if not tp1_hit and tp1 is not None:
+                    hit_tp1 = curr_price >= tp1 if is_long else curr_price <= tp1
+                    if hit_tp1:
+                        tp1_hit = True
+                        be_stage = max(be_stage, 1)
+                        # Move SL to Breakeven (+ slight buffer)
+                        sl = entry + (20 * point) if is_long else entry - (20 * point)
+                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP1!* Moving SL to Breakeven.")
+
+                if tp1_hit and not tp2_hit and tp2 is not None:
+                    hit_tp2 = curr_price >= tp2 if is_long else curr_price <= tp2
+                    if hit_tp2:
+                        tp2_hit = True
+                        be_stage = max(be_stage, 2)
+                        # Move SL to TP1
+                        sl = tp1
+                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP2!* Trailing SL to TP1.")
+
+                # 3. Final TP Evaluation (TP3)
+                if tp3 is not None:
+                    hit_tp3 = curr_price >= tp3 if is_long else curr_price <= tp3
+                    if hit_tp3:
+                        outcome = "WIN (Full TP3 Hit)"
+                        points_diff = (tp3 - entry) if is_long else (entry - tp3)
+                        points_won = (tp3 - entry) / point if is_long else (entry - tp3) / point
+                        final_pnl = points_won * tick_value * lot_size
+                        final_pips = points_diff / (point * 10)
+                        won = True
+                        break
 
                 await asyncio.sleep(interval)
 
@@ -114,20 +120,17 @@ class TradeMonitor:
                 if tick:
                     close_p = tick.bid if is_long else tick.ask
                     points_diff = (close_p - entry) / point if is_long else (entry - close_p) / point
+                    points_timeout = (close_p - entry) if is_long else (entry - close_p)
                     final_pnl = points_diff * tick_value * lot_size
-                    won = final_pnl > 0
+                    final_pips = points_timeout / (point * 10)
+                    won = final_pnl > 0 or final_pips > 0
                     outcome = "WIN (Floating)" if won else "LOSS (Floating)"
 
-            if outcome == "CANCELLED":
-                logger.info(f"🚫 {symbol} Order Cancelled")
-                return
-
-            logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: R{final_pnl:.2f}")
+            logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: R{final_pnl:.2f} | Pips: {final_pips:.1f}")
 
             if is_filled:
-                self.engine.notifier.send_trade_result(symbol, outcome, final_pnl, won)
+                self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won)
 
-            if is_filled:
                 if won:
                     self.engine.session_stats["wins"] += 1
                 else:
@@ -143,7 +146,7 @@ class TradeMonitor:
                         "signal": signal["signal"],
                         "confidence": signal["confidence"],
                         "entry": entry,
-                        "exit": tp if "TP" in outcome else sl if "SL" in outcome else entry,
+                        "exit": tp3 if "TP" in outcome else sl if "SL" in outcome else entry,
                         "won": won,
                         "pnl": final_pnl,
                         "currency": self.engine.session_stats.get("currency", "USD"),
@@ -152,8 +155,8 @@ class TradeMonitor:
                     }
                 )
 
-            if is_filled:
-                self.engine.ai_engine.record_trade_outcome(symbol, won, final_pnl)
+                target_excursion = max_favorable_dist / atr if atr > 0 else 0.0
+                self.engine.ai_engine.record_trade_outcome(symbol, won, final_pnl, target_excursion)
 
         except Exception as e:
             logger.error(f"Error verifying {symbol}: {e}")

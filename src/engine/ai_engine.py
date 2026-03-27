@@ -8,6 +8,7 @@ from typing import Dict, List, Literal, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
 from src.analysis.candle_sticks import CandleStickDetector
+from src.data.collector import DataCollector
 from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ml_engine import NeuralPredictor
@@ -41,10 +42,6 @@ class AITradingEngine:
         self.htf_cache = {}
         self.signal_history = {}
         self.user_balance_account = 0.0
-
-        # Stateful Memory Arrays for SMC
-        self.active_fvgs = {}
-        self.active_obs = {}
 
         # Dynamic Configuration
         self.risk_pct = DEFAULT_RISK_PCT
@@ -131,8 +128,14 @@ class AITradingEngine:
             signal_close_price = curr["close"]
             pct_diff = abs(current_market_price - signal_close_price) / signal_close_price
 
-            # Stricter thresholds: Crypto 0.5%, Forex 0.1% to prevent late entries
-            max_diff = 0.005 if "CRYPTO" in provider.get_symbol_type(symbol) else 0.001
+            # Stricter thresholds
+            symbol_type = provider.get_symbol_type(symbol)
+            if symbol_type == "CRYPTO":
+                max_diff = 0.005  # 0.5% tolerance for Crypto
+            elif symbol_type == "INDICES":
+                max_diff = 0.003  # 0.3% tolerance for Indices
+            else:
+                max_diff = 0.001  # 0.1% tolerance for Forex
 
             if pct_diff > max_diff:
                 self._log_once(
@@ -171,15 +174,23 @@ class AITradingEngine:
                 self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
                 return None
 
+        tp1_dist = tp_dist * 0.33
+        tp2_dist = tp_dist * 0.66
+        tp3_dist = tp_dist
+
         # Absolute Prices
         if signal["signal"] == "BUY":
             ref_price = entry_price if order_type == "LIMIT" else ask
             sl_price = ref_price - sl_dist
-            tp_price = ref_price + tp_dist
+            tp1_price = ref_price + tp1_dist
+            tp2_price = ref_price + tp2_dist
+            tp3_price = ref_price + tp3_dist
         else:
             ref_price = entry_price if order_type == "LIMIT" else bid
             sl_price = ref_price + sl_dist
-            tp_price = ref_price - tp_dist
+            tp1_price = ref_price - tp1_dist
+            tp2_price = ref_price - tp2_dist
+            tp3_price = ref_price - tp3_dist
 
         # Risk sizing
         risk_mult = nn_result.get("risk_mult", 1.0) * kelly_factor
@@ -208,8 +219,6 @@ class AITradingEngine:
 
         # Safety Cap
         max_allowed_pct = get_account_risk_caps(balance_in_usd)
-        if self.allow_high_volatility:
-            max_allowed_pct *= 1.5
 
         # Absolute hard cap in ZAR
         max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
@@ -243,7 +252,10 @@ class AITradingEngine:
             {
                 "price": round(entry_price, digits),
                 "sl": round(sl_price, digits),
-                "tp": round(tp_price, digits),
+                "tp": round(tp3_price, digits),
+                "tp1": round(tp1_price, digits),
+                "tp2": round(tp2_price, digits),
+                "tp3": round(tp3_price, digits),
                 "lot_size": round(lots, 2),
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
@@ -290,26 +302,15 @@ class AITradingEngine:
         hour = now.hour
         weekday = now.weekday()
 
-        # Monday Morning Block (First 2 hours)
-        if weekday == 0 and hour < 2:
-            return {"allow_trade": False, "reason": "Monday Open"}
+        allowed_types = ["TREND", "REVERSION", "BREAKOUT"]  # Default allow all
 
-        # Pre-London Trap Zone
-        if SESSION_CONFIG["PRE_LONDON_START"] <= hour < SESSION_CONFIG["PRE_LONDON_END"]:
-            return {"allow_trade": False, "reason": "Pre-London Trap"}
-
-        allowed_types = []
-
-        # Asian Session (Mean Reversion Only)
+        # Asian Session leans heavily to mean reversion
         if SESSION_CONFIG["ASIAN_START"] <= hour < SESSION_CONFIG["ASIAN_END"]:
-            allowed_types.append("REVERSION")
-        else:
-            # London/NY (Trend + Breakout)
-            allowed_types.append("TREND")
+            allowed_types = ["REVERSION", "BREAKOUT"]
 
-            # Block Volatility Breakouts at 13:00 SAST
-            if hour != SESSION_CONFIG["NO_VOLATILITY_HOUR"]:
-                allowed_types.append("BREAKOUT")
+        # NY Session is optimal for trend/breakouts
+        if SESSION_CONFIG["NY_START"] <= hour < SESSION_CONFIG["NY_END"]:
+            allowed_types = ["TREND", "BREAKOUT"]
 
         return {"allow_trade": True, "types": allowed_types}
 
@@ -339,26 +340,18 @@ class AITradingEngine:
         """
         Main Analysis pipeline focusing purely on SMC & HTF Alignment.
         """
-        # 1. Dynamic High Volatility Check
+        # 1. Volatility check
         is_volatile_pair = self._is_high_volatility_symbol(symbol)
-        if is_volatile_pair and not self.allow_high_volatility:
-            return None
 
         # 2. Cooldown Checks
         if self._is_on_cooldown(symbol) or symbol in self.active_features:
             return None
 
-        # 3. Session Info & Live News
+        # 3. Session Info
         session_info = self._get_session_status()
-        if not session_info["allow_trade"]:
-            self._log_once("session_block", f"Skipping analysis: {session_info['reason']}")
+        if not session_info.get("allow_trade", True):
             return None
-
-        # News Check
-        is_news_blocked = await provider.check_live_news_block(symbol, [])
-        if is_news_blocked:
-            self._log_once(f"news_{symbol}", f"Skipping {symbol}: 🔴 Live High-Impact News Detected")
-            return None
+        allowed_session_types = session_info.get("types", ["TREND", "REVERSION", "BREAKOUT"])
 
         # 4. Data Preparation
         df = await asyncio.to_thread(self.prepare_data, klines, True)
@@ -366,40 +359,63 @@ class AITradingEngine:
             return None
 
         curr = df.iloc[-1]
-        candle_age = time.time() - curr["time"]
 
-        # Stale Check
-        if candle_age > (15 * 60 + 60):
-            return None
-
-        # ATR Check
         if curr["atr"] <= 0:
             return None
 
         # Volatility Spike Check
         avg_atr = df["atr"].tail(24).mean() if len(df) >= 24 else df["atr"].mean()
-        if curr["atr"] > (avg_atr * 3):
-            self.signal_history[symbol] = time.time() + 1800  # 30 min ban
-            return None
 
         # 5. Spread Check
         symbol_info = await provider.get_symbol_info(symbol)
         if not symbol_info:
             return None
 
-        # symbol_type = provider.get_symbol_type(symbol)
         point = symbol_info.get("point", 0.00001)
         spread_info = await provider.get_spread(symbol)
         spread_price = spread_info.get("spread", 0.0) * point
 
-        if spread_price > (curr["atr"] * 0.9):
+        max_allowed_spread = max(curr["atr"] * 1.5, point * 50)
+        if spread_price > max_allowed_spread:
             return None
 
-        # Initialize Memory states if not present
-        if symbol not in self.active_fvgs:
-            self.active_fvgs[symbol] = []
-        if symbol not in self.active_obs:
-            self.active_obs[symbol] = []
+        # 6. Stateless SMC Detection
+        active_fvgs = []
+        active_obs = []
+
+        if len(df) >= 20:
+            for i in range(len(df) - 20, len(df) - 1):
+                c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+
+                # --- FVG Detection ---
+                if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
+                    fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
+                    # Mitigated if price swept below it later
+                    if not any(df.iloc[j]["low"] < fvg["low"] for j in range(i + 1, len(df))):
+                        active_fvgs.append(fvg)
+                elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
+                    fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
+                    # Mitigated if price swept above it later
+                    if not any(df.iloc[j]["high"] > fvg["high"] for j in range(i + 1, len(df))):
+                        active_fvgs.append(fvg)
+
+                # --- Order Block (OB) Detection ---
+                ob_c1, ob_c2 = df.iloc[i - 1], df.iloc[i]
+                # Bullish OB: Last down candle before an impulsive up move
+                if ob_c1["close"] < ob_c1["open"] and ob_c2["close"] > ob_c2["open"] and ob_c2["close"] > ob_c1["high"]:
+                    ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
+                    # Mitigated if price sweeps below the low of the OB
+                    if not any(df.iloc[j]["low"] < ob["low"] for j in range(i + 1, len(df))):
+                        active_obs.append(ob)
+
+                # Bearish OB: Last up candle before an impulsive down move
+                elif (
+                    ob_c1["close"] > ob_c1["open"] and ob_c2["close"] < ob_c2["open"] and ob_c2["close"] < ob_c1["low"]
+                ):
+                    ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
+                    # Mitigated if price sweeps above the high of the OB
+                    if not any(df.iloc[j]["high"] > ob["high"] for j in range(i + 1, len(df))):
+                        active_obs.append(ob)
 
         # Check Loss Cooldown (Database)
         try:
@@ -410,17 +426,25 @@ class AITradingEngine:
             pass
 
         structure_info = TechnicalAnalyzer.detect_structure(df)
-
-        # Strategy & SMC Logic
         htf_trend = await self._get_htf_trend(symbol, provider)
         adx_strength = curr["adx"]
 
         final_signal = self.strategy_analyzer.analyze_router(
-            curr, df, htf_trend, self.active_fvgs[symbol], self.active_obs[symbol], adx_strength, structure_info
+            curr,
+            df,
+            htf_trend,
+            active_fvgs,
+            active_obs,
+            adx_strength,
+            structure_info,
+            allowed_session_types,
         )
 
         if not final_signal:
             return None
+
+        # Set volatility flag for Telegram UI
+        final_signal["is_high_risk"] = is_volatile_pair
 
         # Modify the signal confidence based on live BOS/CHoCH structural breaks
         if final_signal["direction"] == "LONG":
@@ -450,8 +474,8 @@ class AITradingEngine:
         vol_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
 
         dist_nearest_fvg = 0.0
-        if self.active_fvgs[symbol]:
-            nearest = min(self.active_fvgs[symbol], key=lambda x: abs(x["high"] - curr["close"]))
+        if active_fvgs:
+            nearest = min(active_fvgs, key=lambda x: abs(x["high"] - curr["close"]))
             dist_nearest_fvg = abs(nearest["high"] - curr["close"]) / curr["close"]
 
         features = {
@@ -462,7 +486,7 @@ class AITradingEngine:
             "dist_to_nearest_fvg": dist_nearest_fvg,
             "is_in_breaker": 0.0,  # Reserved for expanding breaker block logic
             "htf_adx_strength": adx_strength,
-            "poi_status": 1.0 if len(self.active_fvgs[symbol]) > 0 or len(self.active_obs[symbol]) > 0 else 0.0,
+            "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
         }
 
         # Inference from read-only bundled model
@@ -472,14 +496,6 @@ class AITradingEngine:
         final_signal = await self._adjust_confidence(symbol, final_signal, nn_result["prob"], htf_trend, vol_ratio)
         if final_signal["confidence"] < self.min_confidence:
             return None
-
-        final_signal["neural_info"] = {
-            "prediction": f"{(nn_result['prob']*100):.1f}% WIN PROB",
-            "sentiment": f"{htf_trend} STRUCT",
-            "smc_state": f"BOS: {structure_info['bos']} | CHoCH: {structure_info['choch']}",
-            "volatility": f"{vol_ratio:.2f}x AVG",
-            "model_version": "SMC-Core v1.5",
-        }
 
         # 12. Execution & Final Risk Sizing
         tick = await provider.get_current_tick(symbol)
@@ -534,11 +550,18 @@ class AITradingEngine:
         scored.sort(key=lambda x: x[1], reverse=True)
         return [s[0] for s in scored]
 
-    def record_trade_outcome(self, symbol: str, won: bool, pnl: float):
-        """Records a trade after it has been completed to update ML"""
+    def record_trade_outcome(self, symbol: str, won: bool, pnl: float, excursion: float = 0.0):
+        """Records a trade after it has been completed to update ML CSV"""
         logger.info(f"🏁 Trade Closed: {symbol} | PnL: {pnl} | Won: {won}")
 
         if symbol in self.active_features:
+            features = self.active_features[symbol]
+            target_win = 1 if won else 0
+
+            collector = DataCollector()
+            collector.log_training_data(symbol=symbol, features=features, won=target_win, pnl=pnl, excursion=excursion)
+            logger.info(f"💾 Live features for {symbol} saved to training data.")
+
             del self.active_features[symbol]
 
     def register_active_trade(self, symbol: str):

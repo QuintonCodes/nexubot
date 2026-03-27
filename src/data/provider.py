@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
-from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, FALLBACK_INDICES, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,7 @@ class DataProvider:
         # Fallbacks from Config (Prioritized)
         priority_crypto = set(FALLBACK_CRYPTO)
         priority_forex = set(FALLBACK_FOREX)
+        priority_indices = set(FALLBACK_INDICES)
 
         # Also allow major pairs explicitly
         major_forex_bases = [
@@ -165,13 +166,14 @@ class DataProvider:
             "EURAUD",
         ]
         major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
+        major_indices_bases = ["US30", "NAS100", "GER30", "SPX500", "UK100", "JPN225"]
 
         # Get only selected symbols (Market Watch)
         symbols = mt5.symbols_get(selected=True)
         if not symbols:
             return {}
 
-        categorized = {"crypto": [], "forex": []}
+        categorized = {"crypto": [], "forex": [], "indices": []}
 
         for s in symbols:
             name = s.name.upper()
@@ -184,14 +186,17 @@ class DataProvider:
             # 2. Strict Filtering Logic
             is_priority = (name in priority_crypto) or (name in priority_forex)
             is_major = any(m in name for m in major_forex_bases) or any(m in name for m in major_crypto_bases)
+            is_index = any(m in name for m in major_indices_bases)
 
             # Only add if it's in our Priority List or is a Major Pair
-            if not (is_priority or is_major):
+            if not (is_priority or is_major or is_index):
                 continue
 
             category = self.get_symbol_type(s.name)
             if category == "CRYPTO":
                 categorized["crypto"].append(s.name)
+            elif category == "INDICES":
+                categorized["indices"].append(s.name)
             else:
                 categorized["forex"].append(s.name)
 
@@ -199,6 +204,7 @@ class DataProvider:
         if not categorized["crypto"] and not categorized["forex"]:
             categorized["crypto"] = list(priority_crypto)
             categorized["forex"] = list(priority_forex)
+            categorized["indices"] = list(priority_indices)
 
         return categorized
 
@@ -279,29 +285,6 @@ class DataProvider:
             "currency_base": info.currency_base,
             "filling_mode": info.filling_mode,
         }
-
-    async def check_live_news_block(self, symbol: str, currencies: List[str]) -> bool:
-        """
-        Returns True if High Impact news is imminent (within 30 mins) for the symbol's currencies.
-        """
-        # Update cache every 5 minutes
-        if time.time() - self._last_news_fetch > 300:
-            self._news_cache = await asyncio.to_thread(self._fetch_calendar_events)
-            self._last_news_fetch = time.time()
-            if self._news_cache:
-                logger.info(f"📅 Live News Updated: {len(self._news_cache)} high impact events found.")
-
-        if not self._news_cache:
-            return False
-
-        now = datetime.now()
-        for event in self._news_cache:
-            event_time = event["time"]
-            # Block 30 mins before and 30 mins after
-            if (event_time - timedelta(minutes=30)) <= now <= (event_time + timedelta(minutes=30)):
-                return True
-
-        return False
 
     async def fetch_klines(self, symbol: str, timeframe_str: str, limit: int) -> List[Dict]:
         """

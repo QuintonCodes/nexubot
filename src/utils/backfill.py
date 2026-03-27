@@ -4,11 +4,10 @@ import MetaTrader5 as mt5
 from typing import List, Optional
 
 from src.data.provider import DataProvider
-from src.engine.ai_engine import AITradingEngine
 from src.data.collector import DataCollector
 from src.analysis.indicators import TechnicalAnalyzer
 from src.analysis.candle_sticks import CandleStickDetector
-from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX
+from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, FALLBACK_INDICES
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +18,9 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
     using the new SMC logic and strict feature sets.
     """
     collector = DataCollector()
+    total_rows_collected = 0
+    max_total_rows = 20000
+    max_rows_per_symbol = 1000
 
     symbols = []
     if target_symbols:
@@ -26,14 +28,20 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
     else:
         logger.info("✅ Fetching User's Market Watch...")
         dynamic_symbols = await provider.get_dynamic_symbols()
-        symbols = dynamic_symbols.get("crypto", []) + dynamic_symbols.get("forex", [])
+        symbols = (
+            dynamic_symbols.get("crypto", []) + dynamic_symbols.get("forex", []) + dynamic_symbols.get("indices", [])
+        )
 
     if not symbols:
-        symbols = FALLBACK_CRYPTO + FALLBACK_FOREX
+        symbols = FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES
 
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
 
     for symbol in symbols:
+        if total_rows_collected >= max_total_rows:
+            logger.info("🎯 Global limit of 20,000 rows reached. Stopping backfill.")
+            break
+
         logger.info(f"⏳ Backfilling {symbol}...")
 
         # Force MT5 to recognize the symbol in Market Watch
@@ -52,57 +60,77 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = TechnicalAnalyzer.calculate_indicators(df_full, heavy=True)
         df_full = CandleStickDetector.calculate_candles(df_full)
 
-        # Stateful memory for this specific symbol during the simulation
-        active_fvgs = []
-        active_obs = []
+        symbol_rows_collected = 0
 
         # Iterate through historical data (Start at 200 to allow indicators to warm up)
         # End 50 candles early to allow forward-looking for Trade Outcome Simulation
         for i in range(200, len(df_full) - 50):
+            if symbol_rows_collected >= max_rows_per_symbol:
+                logger.info(f"✅ {symbol} reached 1,000 row cap.")
+                break
+
             window = df_full.iloc[:i].copy()
             curr = window.iloc[-1]
 
             # -----------------------------------------------------------------
-            # 1. Update SMC Stateful Memory (FVGs)
+            # 1. Stateless SMC Detection (Mirrors Live Engine)
             # -----------------------------------------------------------------
-            if len(window) > 3:
-                c1, c2, c3 = window.iloc[-3], window.iloc[-2], window.iloc[-1]
-                # Bullish FVG (Gap between C1 High and C3 Low)
-                if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
-                    active_fvgs.append({"type": "BULL", "high": c3["low"], "low": c1["high"]})
-                # Bearish FVG (Gap between C1 Low and C3 High)
-                elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
-                    active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": c3["high"]})
+            active_fvgs = []
+            active_obs = []
 
-            # Clean up mitigated FVGs (Price swept completely through them)
-            active_fvgs = [
-                fvg
-                for fvg in active_fvgs
-                if (fvg["type"] == "BULL" and curr["low"] > fvg["low"])
-                or (fvg["type"] == "BEAR" and curr["high"] < fvg["high"])
-            ]
-            active_fvgs = active_fvgs[-5:]  # Keep only the 5 most recent to prevent bloat
+            if len(window) >= 20:
+                for j in range(len(window) - 20, len(window) - 1):
+                    c1, c2, c3 = window.iloc[j - 2], window.iloc[j - 1], window.iloc[j]
+
+                    # --- FVG Detection ---
+                    if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
+                        fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
+                        if not any(window.iloc[k]["low"] < fvg["low"] for k in range(j + 1, len(window))):
+                            active_fvgs.append(fvg)
+                    elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
+                        fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
+                        if not any(window.iloc[k]["high"] > fvg["high"] for k in range(j + 1, len(window))):
+                            active_fvgs.append(fvg)
+
+                    # --- OB Detection ---
+                    ob_c1, ob_c2 = window.iloc[j - 1], window.iloc[j]
+                    if (
+                        ob_c1["close"] < ob_c1["open"]
+                        and ob_c2["close"] > ob_c2["open"]
+                        and ob_c2["close"] > ob_c1["high"]
+                    ):
+                        ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
+                        if not any(window.iloc[k]["low"] < ob["low"] for k in range(j + 1, len(window))):
+                            active_obs.append(ob)
+                    elif (
+                        ob_c1["close"] > ob_c1["open"]
+                        and ob_c2["close"] < ob_c2["open"]
+                        and ob_c2["close"] < ob_c1["low"]
+                    ):
+                        ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
+                        if not any(window.iloc[k]["high"] > ob["high"] for k in range(j + 1, len(window))):
+                            active_obs.append(ob)
 
             # -----------------------------------------------------------------
-            # 2. Determine HTF Trend (Simulation Proxy)
+            # 2. Extract Data & Route
             # -----------------------------------------------------------------
             htf_trend = (
                 "BULL" if curr["close"] > curr["ema_200"] else ("BEAR" if curr["close"] < curr["ema_200"] else "FLAT")
             )
             adx_strength = curr["adx"]
+            structure_info = TechnicalAnalyzer.detect_structure(window)
 
-            # -----------------------------------------------------------------
-            # 3. Strategy Router Execution
-            # -----------------------------------------------------------------
+            allowed_session_types = ["TREND", "REVERSION", "BREAKOUT"]
+
             signal = engine.strategy_analyzer.analyze_router(
-                curr, window, htf_trend, active_fvgs, active_obs, adx_strength
+                curr, window, htf_trend, active_fvgs, active_obs, adx_strength, structure_info, allowed_session_types
             )
 
             if not signal:
                 continue
 
             # -----------------------------------------------------------------
-            # 4. ML Feature Extraction (Strict 8 Features)
+            # 3. ML Feature Extraction
             # -----------------------------------------------------------------
             dt = pd.to_datetime(curr["time"], unit="s")
             dist_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
@@ -126,13 +154,13 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 "hour_norm": dt.hour / 24.0,
                 "volatility_ratio": vol_ratio,
                 "dist_to_nearest_fvg": dist_nearest_fvg,
-                "is_in_breaker": 0.0,  # Placeholder until OB logic expands
+                "is_in_breaker": 0.0,
                 "htf_adx_strength": adx_strength,
-                "poi_status": 1.0 if len(active_fvgs) > 0 else 0.0,
+                "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
             }
 
             # -----------------------------------------------------------------
-            # 5. Forward Simulation (Outcome resolution)
+            # 4. Forward Simulation (Outcome resolution)
             # -----------------------------------------------------------------
             future_window = df_full.iloc[i : i + 50]  # Look ahead next 50 candles
             entry_price = curr["close"]
@@ -181,6 +209,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             # 6. Log Validated Data
             # -----------------------------------------------------------------
             collector.log_training_data(symbol=symbol, features=features, won=won, pnl=pnl, excursion=target_excursion)
+            symbol_rows_collected += 1
+            total_rows_collected += 1
 
-    logger.info("✅ SMC Backfill Complete. New 'training_data.csv' generated securely.")
-    await provider.shutdown()
+    logger.info("✅ SMC Backfill Complete. New dataset generated.")

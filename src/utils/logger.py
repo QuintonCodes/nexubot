@@ -55,6 +55,9 @@ def setup_logging():
     logging.getLogger("asyncio").setLevel(logging.ERROR)
     logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
     logging.getLogger("geventwebsocket.handler").setLevel(logging.ERROR)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
 
     return logger
 

@@ -1,5 +1,4 @@
 import os
-import json
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -26,11 +25,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 FALLBACK_CRYPTO: list[str] = [
     "BTCUSDm",
     "ETHUSDm",
-    "BNBUSDm",
-    "XRPUSDm",
-    "SOLUSDm",
+    "BTCJPYm",
 ]
-FALLBACK_FOREX: list[str] = ["GBPJPYm", "USDJPYm", "EURUSDm", "AUDUSDm", "XAUUSDm"]
+FALLBACK_FOREX: list[str] = ["EURUSDm", "GBPUSDm", "USDJPYm", "USDCADm" "AUDUSDm", "XAUUSDm", "XAGUSDm"]
+FALLBACK_INDICES = ["US30m", "NAS100m", "GER30m", "UK100m"]
 HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "NAS", "US30", "GER30", "JPY"]
 
 # ---------------------------------------------------------
@@ -45,7 +43,6 @@ SESSION_CONFIG = {
     "LONDON_END": 12,
     "NY_START": 15,
     "NY_END": 19,
-    "NO_VOLATILITY_HOUR": 13,
 }
 
 # ---------------------------------------------------------
@@ -60,10 +57,11 @@ DEFAULT_MAX_LOT = 0.1
 
 SCAN_INTERVAL_CRYPTO = 30
 SCAN_INTERVAL_FOREX = 30
+SCAN_INTERVAL_INDICES = 30
 GLOBAL_SIGNAL_COOLDOWN = 60
 PAIR_SIGNAL_COOLDOWN = 900
 LOSS_COOLDOWN_DURATION = 1800
-MAX_SIGNALS_PER_SCAN = 2
+MAX_SIGNALS_PER_SCAN = 3
 
 # ---------------------------------------------------------
 # NEURAL NETWORK

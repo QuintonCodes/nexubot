@@ -1,58 +1,69 @@
 # 🚀 Nexubot: Institutional-Grade AI Trading System
 
-![Version](https://img.shields.io/badge/version-v1.4.0-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
+![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
 
-**Nexubot** is an advanced algorithmic trading engine designed for the **HFMarkets (HFM)** ecosystem. Unlike standard bots that rely solely on indicators, Nexubot utilizes a **Confluence Engine** that fuses Technical Strategies, Chart Pattern Recognition, and Neural Network (ML) validation to generate high-probability trade signals on the M15 timeframe.
+**Nexubot** is an advanced algorithmic trading engine designed for the MetaTrader 5 ecosystem. Moving beyond standard lagging indicators, Nexubot utilizes a state-of-the-art **Smart Money Concept (SMC) Engine** fused with deep **Neural Network (ML) validation** to identify high-probability institutional liquidity sweeps and trend continuations on the M15 timeframe.
 
 ## 🧠 Core Architecture
 
-### 1. Tri-Factor Confluence Engine
+### 1. Smart Money Concepts (SMC) Engine
 
-Nexubot validates every trade through three distinct layers before execution:
+Nexubot reads price action exactly how institutional traders do, featuring a stateless, dynamically updating memory system:
 
-- **Layer 1: Strategy Logic:** Checks trends (Ichimoku, EMA Flow) and mean reversions (Bollinger, RSI).
-- **Layer 2: Pattern Recognition:** Detects institutional setups like **Head & Shoulders**, **Double Tops/Bottoms**, and **Bull/Bear Flags** using `scipy` signal processing.
-- **Layer 3: Neural Validation:** A TensorFlow/Keras model predicts the probability of success. If the ML confidence < 45%, the trade is vetoed regardless of the setup.
+- **Structural Mapping:** Real-time detection of Break of Structure (BOS) and Change of Character (CHoCH) aligned with Higher Timeframe (HTF) trends.
+- **Liquidity Zones:** Dynamic, unmitigated mapping of Fair Value Gaps (FVGs) and Order Blocks (OBs). The bot tracks price sweeps and performs automatic garbage collection to ensure pristine memory management.
+- **Session Awareness:** Automatically adapts strategies (Trend, Breakout, Mean Reversion) based on the current active global trading session (Asian, London, NY).
 
-### 2. Native ZAR Risk Core (South Africa Optimized)
+### 2. Deep Learning Validation (Continuous Learning Loop)
 
-Designed specifically for South African traders using ZAR-denominated accounts.
+A bespoke TensorFlow/Keras neural network acts as the final gatekeeper:
 
-- **Auto-Conversion:** Automatically calculates pip values and risk based on `USDZAR` rates for accurate lot sizing.
-- **Small Account Protection:** Optimized for balances starting at **R450**.
-- **Dynamic Volatility Scaling:** Automatically halves risk during high-impact news or "Meme Coin" volatility spikes.
+- **Entry Model:** Evaluates strict SMC features (Distance to VWAP, MTF Alignment, Volatility Ratio, FVG Proximity) to predict trade success probability.
+- **Exit Model:** Dynamically predicts optimal Take Profit ranges based on real-time Average True Range (ATR) expansion.
+- **Self-Correction (The 20k Loop):** Every live trade outcome and its exact feature state is silently logged to a capped 20,000-row training dataset. Nexubot auto-trains its neural weights on startup to adapt to shifting market regimes.
 
-### 3. Machine Learning Integration
+### 3. Dynamic ZAR Risk Core & Multi-TP System
 
-- **Entry Model:** Binary classification model to predict trade success probability.
-- **Exit Model:** Regression model that predicts the optimal Take Profit distance (ATR Multiples) based on current market volatility.
-- **Self-Correction:** Logs every trade outcome (Win/Loss/Excursion) to a CSV dataset for continuous model retraining.
+Designed specifically for precision risk management and trailing profits:
+
+- **Multi-Tier Targets:** Calculates and executes staggered TP1, TP2, and TP3 milestones.
+- **Aggressive Trailing:** Automatically locks in breakeven at TP1 and trails stops as price reaches sequential targets.
+- **Cross-Market Scaling:** Dynamically adjusts slippage tolerances and volatility thresholds for **Indices (US30, NAS100)**, **Forex**, and **Crypto**.
+- **Auto-Conversion:** Automatically calculates precise lot sizing based on live `USDZAR` rates.
+
+### 4. Asynchronous Telegram Command Center
+
+Operates a dedicated, non-blocking Telegram application alongside the trading engine:
+
+- **Live Notifications:** Instant alerts for detected setups, milestone hits (TP1/TP2), and closed Pips/PnL.
+- **On-Demand AI Analyst:** Users can query specific markets via `/analyze [SYMBOL]` to receive a deep-dive breakdown of HTF flow, local structure, and the neural network's live probability assessment.
 
 ## 🛠️ Tech Stack
 
-- **Core:** Python 3.12+ (AsyncIO for non-blocking execution)
-- **Connectivity:** MetaTrader 5 Python API (Direct HFM Integration)
-- **Analysis:** Pandas, NumPy, SciPy (Signal processing)
+- **Core:** Python 3.12+ (AsyncIO concurrent event loop)
+- **Connectivity:** MetaTrader 5 Python API
 - **AI/ML:** TensorFlow, Scikit-Learn (StandardScaler)
+- **Data & Math:** Pandas, NumPy
 - **Database:** PostgreSQL (NeonDB) via SQLAlchemy & AsyncPG
+- **Interface:** `python-telegram-bot` (Fully Asynchronous)
 
 ## ⚙️ Configuration
 
 The bot is fully configurable via `src/config.py`:
 
-| Setting            | Default  | Description                                          |
-| :----------------- | :------- | :--------------------------------------------------- |
-| **Timeframe**      | `M15`    | Optimized for intraday stability.                    |
-| **Risk Per Trade** | `2.0%`   | Hard cap on equity risk per signal.                  |
-| **Max Confidence** | `95%`    | Capped realism to prevent overfitting.               |
-| **Markets**        | `Hybrid` | Trades Crypto (#BTC, #ETH) & Forex (EURUSD, XAUUSD). |
+| Setting            | Default      | Description                                                           |
+| :----------------- | :----------- | :-------------------------------------------------------------------- |
+| **Timeframe**      | `M15`        | Optimized for intraday structural stability.                          |
+| **Risk Per Trade** | `2.0%`       | Hard cap on equity risk per signal.                                   |
+| **Max Signals**    | `3 per scan` | Limits concurrent exposure.                                           |
+| **Markets**        | `Dynamic`    | Auto-fetches active Crypto, Forex, and Indices from MT5 Market Watch. |
 
 ## 🛠️ Installation & Setup
 
 1. **Clone the Repository**
 
 ```bash
-git clone [https://github.com/QuintonCodes/nexubot.git](https://github.com/QuintonCodes/nexubot.git)
+git clone https://github.com/QuintonCodes/nexubot.git
 cd nexubot
 ```
 
@@ -63,37 +74,36 @@ pip install -r requirements.txt
 ```
 
 3. **Environment Setup**
-   Create a .env file in the root directory:
+
+Create a .env file in the root directory:
 
 ```
-MT5_LOGIN=your_hfm_login_id
-MT5_PASSWORD=your_hfm_password
-MT5_SERVER=HFMarketsSA-Demo2
+MT5_LOGIN=your_broker_login_id
+MT5_PASSWORD=your_broker_password
+MT5_SERVER=Your-Broker-Server
 DATABASE_URL="postgresql+asyncpg://user:pass@host/dbname"
+TELEGRAM_BOT_TOKEN="your_botfather_token"
+TELEGRAM_CHAT_ID="your_personal_chat_id"
 ```
 
-4. **Launch the Engine**
+4. **Initialize Training Data**
+
+Generate the baseline ML dataset by simulating past market environments:
+
+```bash
+python run_backfill.py
+```
+
+5. **Launch the Engine**
 
 ```bash
 python main.py
 ```
 
-On first run, the bot will auto-backfill training data if none exists.
-
-## 📊 Dashboard Output
-
-Nexubot provides a real-time console dashboard tracking session performance:
-
-```plaintext
-╔════════════════════ SESSION DASHBOARD ════════════════════╗
-║ Time Running: 04:12:05 | Total Signals: 12                ║
-║ Win Rate: 75.0%        | Wins: 9 / Loss: 3                ║
-║ Session PnL: +R1,250.50 (Realized)                        ║
-╚═══════════════════════════════════════════════════════════╝
-```
+Nexubot will auto-train its neural network on boot, connect to your broker, initialize the Telegram listener, and begin scanning.
 
 ## ⚠️ Disclaimer
 
-Algorithmic trading involves significant risk. This software is a tool for signal generation and automation, not a guarantee of profit. Past performance of the Neural Network does not guarantee future results.
+Algorithmic trading involves significant risk and is not suitable for all investors. This software is an educational tool for signal generation and automation, not a guarantee of profit. Deep learning models map historical probabilities, which do not guarantee future performance in unprecedented market conditions. Trade responsibly.
 
-Copyright © 2025 Nexubot Systems. Released under [MIT License](https://www.google.com/search?q=LICENSE)
+Copyright © 2026 Nexubot Systems.

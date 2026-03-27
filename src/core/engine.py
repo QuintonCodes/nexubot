@@ -40,6 +40,7 @@ class NexubotEngine:
         self.monitored_tasks = {}
         self.active_crypto_list = []
         self.active_forex_list = []
+        self.active_indices_list = []
         self.session_start = time.time()
 
     async def initialize_connection(self, login_id, server, password, mt5_path=None) -> bool:
@@ -96,12 +97,22 @@ class NexubotEngine:
         logger.info("🛑 Stopping Engine & Saving Session...")
         self.is_running = False
 
-        if self._scanner_task:
+        if self._scanner_task and not self._scanner_task.done():
             self._scanner_task.cancel()
+            try:
+                await self._scanner_task  # Wait for it to properly close
+            except asyncio.CancelledError:
+                pass
 
         # Cancel monitoring tasks
-        for task in self.monitored_tasks.values():
-            task.cancel()
+        for symbol, task in self.monitored_tasks.items():
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
         self.monitored_tasks.clear()
         self.active_signals.clear()
 
