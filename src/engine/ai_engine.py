@@ -81,7 +81,13 @@ class AITradingEngine:
         nn_factor = (nn_prob - 0.5) * 40
 
         # 4. Volatility Penalty (Squeeze or extreme expansion)
-        vol_penalty = -10 if volatility_ratio > 1.5 else (-20 if volatility_ratio > 2.0 else 0)
+        is_volatile_asset = self._is_high_volatility_symbol(symbol)
+
+        if is_volatile_asset:
+            # Gold/Silver/Indices are allowed higher volatility ratios
+            vol_penalty = -5 if volatility_ratio > 2.0 else (-10 if volatility_ratio > 3.0 else 0)
+        else:
+            vol_penalty = -10 if volatility_ratio > 1.5 else (-20 if volatility_ratio > 2.0 else 0)
 
         # Final Calculation
         final_conf = base_conf + trend_bonus + history_factor + nn_factor + vol_penalty
@@ -156,7 +162,7 @@ class AITradingEngine:
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
-        pred_exit_atr = max(0.8, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
+        pred_exit_atr = max(1, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
         tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
         tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
 
@@ -382,6 +388,7 @@ class AITradingEngine:
         # 6. Stateless SMC Detection
         active_fvgs = []
         active_obs = []
+        active_breakers = []
 
         if len(df) >= 20:
             for i in range(len(df) - 20, len(df) - 1):
@@ -390,34 +397,47 @@ class AITradingEngine:
                 # --- FVG Detection ---
                 if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
                     fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
-                    # Mitigated if price swept below it later
                     if not any(df.iloc[j]["low"] < fvg["low"] for j in range(i + 1, len(df))):
                         active_fvgs.append(fvg)
                 elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
                     fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
-                    # Mitigated if price swept above it later
                     if not any(df.iloc[j]["high"] > fvg["high"] for j in range(i + 1, len(df))):
                         active_fvgs.append(fvg)
 
                 # --- Order Block (OB) Detection ---
                 ob_c1, ob_c2 = df.iloc[i - 1], df.iloc[i]
-                # Bullish OB: Last down candle before an impulsive up move
+
+                # Bullish OB / Bearish Breaker
                 if ob_c1["close"] < ob_c1["open"] and ob_c2["close"] > ob_c2["open"] and ob_c2["close"] > ob_c1["high"]:
                     ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
-                    # Mitigated if price sweeps below the low of the OB
-                    if not any(df.iloc[j]["low"] < ob["low"] for j in range(i + 1, len(df))):
+                    is_broken = False
+                    for j in range(i + 1, len(df)):
+                        if df.iloc[j]["low"] < ob["low"]:
+                            is_broken = True
+                            breaker = {"type": "BEAR", "high": ob["high"], "low": ob["low"]}
+                            if not any(df.iloc[k]["high"] > breaker["high"] for k in range(j + 1, len(df))):
+                                active_breakers.append(breaker)
+                            break
+                    if not is_broken:
                         active_obs.append(ob)
 
-                # Bearish OB: Last up candle before an impulsive down move
+                # Bearish OB / Bullish Breaker
                 elif (
                     ob_c1["close"] > ob_c1["open"] and ob_c2["close"] < ob_c2["open"] and ob_c2["close"] < ob_c1["low"]
                 ):
                     ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
-                    # Mitigated if price sweeps above the high of the OB
-                    if not any(df.iloc[j]["high"] > ob["high"] for j in range(i + 1, len(df))):
+                    is_broken = False
+                    for j in range(i + 1, len(df)):
+                        if df.iloc[j]["high"] > ob["high"]:
+                            is_broken = True
+                            breaker = {"type": "BULL", "high": ob["high"], "low": ob["low"]}
+                            if not any(df.iloc[k]["low"] < breaker["low"] for k in range(j + 1, len(df))):
+                                active_breakers.append(breaker)
+                            break
+                    if not is_broken:
                         active_obs.append(ob)
 
-        # Check Loss Cooldown (Database)
+        # 7. Check Loss Cooldown (Database)
         try:
             if self.db_manager and await self.db_manager.check_recent_loss(symbol):
                 self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
@@ -463,7 +483,7 @@ class AITradingEngine:
             elif structure_info["choch"] == "BULL":
                 final_signal["confidence"] -= 15.0
 
-        # 11. ML Prediction (Feature Extraction)
+        # 8. ML Prediction (Feature Extraction)
         now = datetime.now()
         dist_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
         mtf_align = (
@@ -478,13 +498,22 @@ class AITradingEngine:
             nearest = min(active_fvgs, key=lambda x: abs(x["high"] - curr["close"]))
             dist_nearest_fvg = abs(nearest["high"] - curr["close"]) / curr["close"]
 
+        # Check if price is sitting inside a Breaker that aligns with our signal
+        is_in_breaker_val = 0.0
+        if final_signal["direction"] == "LONG":
+            if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers if b["type"] == "BULL"):
+                is_in_breaker_val = 1.0
+        elif final_signal["direction"] == "SHORT":
+            if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers if b["type"] == "BEAR"):
+                is_in_breaker_val = 1.0
+
         features = {
             "dist_to_vwap": dist_vwap,
             "mtf_trend_alignment": mtf_align,
             "hour_norm": now.hour / 24.0,
             "volatility_ratio": vol_ratio,
             "dist_to_nearest_fvg": dist_nearest_fvg,
-            "is_in_breaker": 0.0,  # Reserved for expanding breaker block logic
+            "is_in_breaker": is_in_breaker_val,
             "htf_adx_strength": adx_strength,
             "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
         }
@@ -497,7 +526,7 @@ class AITradingEngine:
         if final_signal["confidence"] < self.min_confidence:
             return None
 
-        # 12. Execution & Final Risk Sizing
+        # 9. Execution & Final Risk Sizing
         tick = await provider.get_current_tick(symbol)
         if not tick:
             return None

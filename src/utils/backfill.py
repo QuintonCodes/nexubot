@@ -1,12 +1,11 @@
 import logging
-import pandas as pd
 import MetaTrader5 as mt5
+import pandas as pd
 from typing import List, Optional
 
-from src.data.provider import DataProvider
-from src.data.collector import DataCollector
-from src.analysis.indicators import TechnicalAnalyzer
 from src.analysis.candle_sticks import CandleStickDetector
+from src.analysis.indicators import TechnicalAnalyzer
+from src.data.collector import DataCollector
 from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, FALLBACK_INDICES
 
 logger = logging.getLogger(__name__)
@@ -77,6 +76,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             # -----------------------------------------------------------------
             active_fvgs = []
             active_obs = []
+            active_breakers = []
 
             if len(window) >= 20:
                 for j in range(len(window) - 20, len(window) - 1):
@@ -92,7 +92,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                         if not any(window.iloc[k]["high"] > fvg["high"] for k in range(j + 1, len(window))):
                             active_fvgs.append(fvg)
 
-                    # --- OB Detection ---
+                    # --- OB & Breaker Detection ---
                     ob_c1, ob_c2 = window.iloc[j - 1], window.iloc[j]
                     if (
                         ob_c1["close"] < ob_c1["open"]
@@ -100,17 +100,33 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                         and ob_c2["close"] > ob_c1["high"]
                     ):
                         ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
-                        if not any(window.iloc[k]["low"] < ob["low"] for k in range(j + 1, len(window))):
+                        is_broken = False
+                        for k in range(j + 1, len(window)):
+                            if window.iloc[k]["low"] < ob["low"]:
+                                is_broken = True
+                                breaker = {"type": "BEAR", "high": ob["high"], "low": ob["low"]}
+                                if not any(window.iloc[m]["high"] > breaker["high"] for m in range(k + 1, len(window))):
+                                    active_breakers.append(breaker)
+                                break
+                        if not is_broken:
                             active_obs.append(ob)
+
                     elif (
                         ob_c1["close"] > ob_c1["open"]
                         and ob_c2["close"] < ob_c2["open"]
                         and ob_c2["close"] < ob_c1["low"]
                     ):
                         ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
-                        if not any(window.iloc[k]["high"] > ob["high"] for k in range(j + 1, len(window))):
+                        is_broken = False
+                        for k in range(j + 1, len(window)):
+                            if window.iloc[k]["high"] > ob["high"]:
+                                is_broken = True
+                                breaker = {"type": "BULL", "high": ob["high"], "low": ob["low"]}
+                                if not any(window.iloc[m]["low"] < breaker["low"] for m in range(k + 1, len(window))):
+                                    active_breakers.append(breaker)
+                                break
+                        if not is_broken:
                             active_obs.append(ob)
-
             # -----------------------------------------------------------------
             # 2. Extract Data & Route
             # -----------------------------------------------------------------
@@ -148,13 +164,21 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 nearest = min(active_fvgs, key=lambda x: abs(x["high"] - curr["close"]))
                 dist_nearest_fvg = abs(nearest["high"] - curr["close"]) / curr["close"]
 
+            is_in_breaker_val = 0.0
+            if signal["direction"] == "LONG":
+                if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers if b["type"] == "BULL"):
+                    is_in_breaker_val = 1.0
+            elif signal["direction"] == "SHORT":
+                if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers if b["type"] == "BEAR"):
+                    is_in_breaker_val = 1.0
+
             features = {
                 "dist_to_vwap": dist_vwap,
                 "mtf_trend_alignment": mtf_align,
                 "hour_norm": dt.hour / 24.0,
                 "volatility_ratio": vol_ratio,
                 "dist_to_nearest_fvg": dist_nearest_fvg,
-                "is_in_breaker": 0.0,
+                "is_in_breaker": is_in_breaker_val,
                 "htf_adx_strength": adx_strength,
                 "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
             }
@@ -166,10 +190,18 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             entry_price = curr["close"]
             atr = curr["atr"]
 
+            # Relax SL multiplier for high volatility pairs during training
+            is_high_vol = any(x in symbol for x in ["XAU", "XAG", "BTC", "US30", "NAS"])
+            backfill_sl_mult = 2.0 if is_high_vol else 1.5
+
             # Dynamic SL based on strategy suggestion or default ATR
             sl = signal.get(
                 "suggested_sl",
-                entry_price - (atr * 1.5) if signal["direction"] == "LONG" else entry_price + (atr * 1.5),
+                (
+                    entry_price - (atr * backfill_sl_mult)
+                    if signal["direction"] == "LONG"
+                    else entry_price + (atr * backfill_sl_mult)
+                ),
             )
 
             # Simulated 2:1 RR

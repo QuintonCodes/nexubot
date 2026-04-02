@@ -1,10 +1,6 @@
-import os
-
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import joblib
 import logging
+import os
 import pandas as pd
 import sys
 import tensorflow as tf
@@ -19,8 +15,7 @@ logger = logging.getLogger(__name__)
 
 class NeuralPredictor:
     """
-    Production-ready Read-Only Neural Predictor.
-    Loads frozen models bundled with PyInstaller. Falls back to SMC heuristics if unavailable.
+    Loads models. Falls back to SMC heuristics if unavailable.
     """
 
     def __init__(self, auto_load: bool = True):
@@ -165,7 +160,7 @@ class NeuralPredictor:
             self.entry_model = entry_model
             self.exit_model = exit_model
             self.is_ready = True
-            logger.info("✅ Training Complete. Artifacts ready for PyInstaller packaging.")
+            logger.info("✅ Training Complete. Artifacts ready.")
 
         except Exception as e:
             logger.error(f"Training failed: {e}")

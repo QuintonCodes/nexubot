@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from typing import List
 
 from src.config import (
     CANDLE_LIMIT,
@@ -76,7 +77,7 @@ class MarketScanner:
             self.engine.active_forex_list = list(FALLBACK_FOREX)
             self.engine.active_indices_list = list(FALLBACK_INDICES)
 
-    async def _sort_pairs(self, symbols: list) -> list:
+    async def _sort_pairs(self, symbols: list) -> List:
         """Fetches 100 candles for all pairs to rank them by volatility (Ported from console.py)."""
         data_map = {}
         for sym in symbols:

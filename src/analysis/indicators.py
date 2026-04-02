@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Literal
+from typing import Dict, Literal
 
 
 class TechnicalAnalyzer:
@@ -17,7 +17,6 @@ class TechnicalAnalyzer:
             if "time" in df.columns:
                 df["datetime"] = pd.to_datetime(df["time"], unit="s")
             else:
-                # Fallback if no time column, though unusual
                 df["datetime"] = pd.Timestamp.now()
 
         # Trend & Volatility (Essential)
@@ -86,7 +85,7 @@ class TechnicalAnalyzer:
         return "FLAT"
 
     @staticmethod
-    def detect_structure(df: pd.DataFrame) -> dict:
+    def detect_structure(df: pd.DataFrame) -> Dict:
         """
         Detects Break of Structure (BOS) and Change of Character (CHoCH)
         using recent confirmed pivot highs and lows.
@@ -95,8 +94,7 @@ class TechnicalAnalyzer:
         if len(df) < 20:
             return {"bos": None, "choch": None, "structure": "FLAT"}
 
-        # Exclude the last 5 candles. Since rolling(10, center=True) looks ahead 5 bars,
-        # the most recent 5 candles cannot have confirmed pivots yet.
+        # Exclude the last 5 candles.
         confirmed_df = df.iloc[:-5]
 
         # Extract actual pivot prices

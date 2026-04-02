@@ -37,6 +37,9 @@ async def main():
         notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
         return
 
+    # 1. Lock the system status BEFORE connecting so the scanner pauses immediately
+    engine.system_status = "TRAINING"
+
     # Initialize Headless Connection
     is_connected = await engine.initialize_connection(login, server, password, path)
 
@@ -45,16 +48,18 @@ async def main():
         await notifier.initialize()
 
         # 2. Auto-Train Neural Network on Boot
-        notifier.send_message("⚙️ *Running Pre-Flight ML Optimization...*")
-        # Run training in background thread to avoid blocking asyncio loop
+        print("⚙️ *Running Pre-Flight ML Optimization...*")
         await asyncio.to_thread(engine.ai_engine.nn_brain.train_network)
 
-        # 3. Fetch Initial DB Stats for Startup Message
+        # 3. Unlock the system status now that training is finished
+        engine.system_status = "IDLE"
+
+        # 4. Fetch Initial DB Stats for Startup Message
         win_rate = await engine.db.get_total_historical_win_rate()
-        # Rough estimation of total trades from the recent log count if available, otherwise default
         recent_trades = await engine.db.get_recent_trades(limit=1000)
         total_trades = len(recent_trades)
 
+        # 5. Send Startup message as the very first Telegram notification
         await notifier.send_startup_message(win_rate, total_trades)
 
         asyncio.create_task(run_daily_reporter(engine, notifier))
@@ -65,11 +70,9 @@ async def main():
         except asyncio.CancelledError:
             print("Received Cancellation Signal.")
         finally:
-            # 🔴 Execute Graceful Shutdown
             print("Initiating Graceful Shutdown...")
             await notifier.send_shutdown_message()
             await engine.stop_session()
-            # wait briefly to ensure telegram message dispatches before process dies
             await asyncio.sleep(2)
     else:
         print(f"❌ *MT5 Connection Failed.* Check console logs.")

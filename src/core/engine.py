@@ -43,7 +43,7 @@ class NexubotEngine:
         self.active_indices_list = []
         self.session_start = time.time()
 
-    async def initialize_connection(self, login_id, server, password, mt5_path=None) -> bool:
+    async def initialize_connection(self, login_id: int, server: str, password: str, mt5_path=None) -> bool:
         """
         Headless connection to MT5 using environment credentials.
         """

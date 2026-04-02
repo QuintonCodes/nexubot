@@ -4,6 +4,7 @@ import os
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from src.analysis.indicators import TechnicalAnalyzer
 from src.config import VERSION
 
 logger = logging.getLogger(__name__)
@@ -62,21 +63,87 @@ class TelegramNotifier:
             df = self.engine.ai_engine.prepare_data(klines, heavy=True)
             curr = df.iloc[-1]
             htf_trend = await self.engine.ai_engine._get_htf_trend(symbol, self.engine.provider)
-            structure = self.engine.ai_engine.strategy_analyzer.detect_structure(df)
+            structure = TechnicalAnalyzer.detect_structure(df)
 
             avg_atr = df["atr"].tail(24).mean()
             vol_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
             dist_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
+
+            active_fvgs = []
+            active_obs = []
+            active_breakers = []
+
+            if len(df) >= 20:
+                for i in range(len(df) - 20, len(df) - 1):
+                    c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+
+                    # --- FVG Detection ---
+                    if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
+                        fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
+                        if not any(df.iloc[j]["low"] < fvg["low"] for j in range(i + 1, len(df))):
+                            active_fvgs.append(fvg)
+                    elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
+                        fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
+                        if not any(df.iloc[j]["high"] > fvg["high"] for j in range(i + 1, len(df))):
+                            active_fvgs.append(fvg)
+
+                    # --- OB & Breaker Detection ---
+                    ob_c1, ob_c2 = df.iloc[i - 1], df.iloc[i]
+                    if (
+                        ob_c1["close"] < ob_c1["open"]
+                        and ob_c2["close"] > ob_c2["open"]
+                        and ob_c2["close"] > ob_c1["high"]
+                    ):
+                        ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
+                        is_broken = False
+                        for j in range(i + 1, len(df)):
+                            if df.iloc[j]["low"] < ob["low"]:
+                                is_broken = True
+                                # Failed Bullish OB becomes a Bearish Breaker
+                                breaker = {"type": "BEAR", "high": ob["high"], "low": ob["low"]}
+                                if not any(df.iloc[k]["high"] > breaker["high"] for k in range(j + 1, len(df))):
+                                    active_breakers.append(breaker)
+                                break
+                        if not is_broken:
+                            active_obs.append(ob)
+
+                    elif (
+                        ob_c1["close"] > ob_c1["open"]
+                        and ob_c2["close"] < ob_c2["open"]
+                        and ob_c2["close"] < ob_c1["low"]
+                    ):
+                        ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
+                        is_broken = False
+                        for j in range(i + 1, len(df)):
+                            if df.iloc[j]["high"] > ob["high"]:
+                                is_broken = True
+                                # Failed Bearish OB becomes a Bullish Breaker
+                                breaker = {"type": "BULL", "high": ob["high"], "low": ob["low"]}
+                                if not any(df.iloc[k]["low"] < breaker["low"] for k in range(j + 1, len(df))):
+                                    active_breakers.append(breaker)
+                                break
+                        if not is_broken:
+                            active_obs.append(ob)
+
+            # Calculate precise distances
+            dist_nearest_fvg = 0.0
+            if active_fvgs:
+                nearest = min(active_fvgs, key=lambda x: abs(x["high"] - curr["close"]))
+                dist_nearest_fvg = abs(nearest["high"] - curr["close"]) / curr["close"]
+
+            is_in_breaker_val = 0.0
+            if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers):
+                is_in_breaker_val = 1.0
 
             features = {
                 "dist_to_vwap": dist_vwap,
                 "mtf_trend_alignment": 1 if htf_trend == structure["structure"] else -1,
                 "hour_norm": 0.5,
                 "volatility_ratio": vol_ratio,
-                "dist_to_nearest_fvg": 0.0,
-                "is_in_breaker": 0.0,
+                "dist_to_nearest_fvg": dist_nearest_fvg,
+                "is_in_breaker": is_in_breaker_val,
                 "htf_adx_strength": curr["adx"],
-                "poi_status": 1.0 if structure["structure"] != "FLAT" else 0.0,
+                "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
             }
 
             nn_result = self.engine.ai_engine.nn_brain.predict(features)
@@ -128,7 +195,7 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_signal_alert(self, symbol, signal):
+    def send_signal_alert(self, symbol: str, signal: dict):
         if signal["signal"] == "BUY":
             header = "🟢 *BUY SIGNAL DETECTED* 🟢"
         else:
@@ -151,7 +218,7 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    async def send_startup_message(self, win_rate, total_trades):
+    async def send_startup_message(self, win_rate: float, total_trades: int):
         msg = (
             f"🚀 *NEXUBOT {VERSION} ONLINE*\n\n"
             f"🤖 *Engine Status:* Deep Learning Linked\n"
@@ -161,7 +228,7 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_trade_result(self, symbol, outcome, pips, won):
+    def send_trade_result(self, symbol: str, outcome: str, pips: float, won: bool):
         result_emoji = "🏆" if won else "💔"
 
         msg = (
@@ -171,7 +238,7 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_daily_report(self, wins, losses, total, pnl):
+    def send_daily_report(self, wins: int, losses: int, total: int, pnl: float):
         win_rate = (wins / total * 100) if total > 0 else 0.0
         msg = (
             f"📊 *NEXUBOT DAILY REPORT* 📊\n\n"

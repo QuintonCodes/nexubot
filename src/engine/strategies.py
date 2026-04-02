@@ -144,9 +144,12 @@ class StrategyAnalyzer:
         """
         body = abs(curr["close"] - curr["open"])
 
+        # Require the wick to be at least 2x the body size for a true rejection
+        rejection_multiplier = 2.0
+
         if htf_trend == "BULL":
             lower_wick = min(curr["close"], curr["open"]) - curr["low"]
-            if lower_wick > body:
+            if lower_wick > (body * rejection_multiplier):
                 return {
                     "strategy": "SMC Liquidity Sweep",
                     "signal": "BUY",
@@ -158,7 +161,7 @@ class StrategyAnalyzer:
 
         elif htf_trend == "BEAR":
             upper_wick = curr["high"] - max(curr["close"], curr["open"])
-            if upper_wick > body:
+            if upper_wick > (body * rejection_multiplier):
                 return {
                     "strategy": "SMC Liquidity Sweep",
                     "signal": "SELL",
