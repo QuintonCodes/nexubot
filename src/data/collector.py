@@ -26,11 +26,11 @@ class DataCollector:
 
         row = {"symbol": symbol}
         for col in FEATURE_COLS:
-            row[col] = features.get(col, 0.0)
+            row[col] = round(float(features.get(col, 0.0)), 4)
 
         row["target_win"] = won
-        row["pnl"] = pnl
-        row["target_excursion"] = excursion
+        row["pnl"] = round(pnl, 2)
+        row["target_excursion"] = round(excursion, 4)
 
         try:
             with open(self.filename, mode="a", newline="") as file:

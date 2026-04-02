@@ -14,6 +14,8 @@ logger = setup_logging()
 
 
 class NexubotEngine:
+    """The central control of the bot."""
+
     def __init__(self, notifier):
         self.notifier = notifier
         self.provider = DataProvider()
@@ -74,14 +76,14 @@ class NexubotEngine:
 
         if connected:
             self.is_running = True
-            asyncio.create_task(self.ai_engine.initialize())
 
             # Get actual account currency for session stats
             acct = await self.provider.get_account_summary()
             if acct:
                 self.session_stats["currency"] = acct.get("currency", "USD")
 
-            self.ai_engine.set_context(500.0, self.db)
+            self.ai_engine.set_context(acct["balance"], self.db, acct.get("currency", "USD"))
+
             await self.offline.check_offline_trades()
 
             if not self._scanner_task or self._scanner_task.done():

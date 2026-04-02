@@ -240,7 +240,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             # -----------------------------------------------------------------
             # 6. Log Validated Data
             # -----------------------------------------------------------------
-            collector.log_training_data(symbol=symbol, features=features, won=won, pnl=pnl, excursion=target_excursion)
+            collector.log_training_data(symbol, features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1
 

@@ -34,7 +34,7 @@ class AITradingEngine:
 
     def __init__(self):
         self.strategy_analyzer = StrategyAnalyzer()
-        self.nn_brain = NeuralPredictor(auto_load=True)
+        self.nn_brain = NeuralPredictor()
 
         self._log_throttle = {}
         self.active_features = {}
@@ -42,6 +42,7 @@ class AITradingEngine:
         self.htf_cache = {}
         self.signal_history = {}
         self.user_balance_account = 0.0
+        self.currency = "USD"
 
         # Dynamic Configuration
         self.risk_pct = DEFAULT_RISK_PCT
@@ -104,7 +105,7 @@ class AITradingEngine:
         """
         # 1. Fetch Account Currency & Live Rates
         acct_summary = await provider.get_account_summary()
-        acct_currency = acct_summary.get("currency", "ZAR")
+        self.currency = acct_summary.get("currency", "USD")
         self.user_balance_account = acct_summary.get("balance", 0.0)
 
         if self.user_balance_account <= 0:
@@ -112,7 +113,7 @@ class AITradingEngine:
 
         # Fetch Exchange Rate if needed (Account USD -> Display ZAR)
         usdzar_rate = 1.0
-        if acct_currency == "USD":
+        if self.currency == "USD":
             usdzar_rate = await provider.get_usdzar_rate()
 
         ask, bid = tick.ask, tick.bid
@@ -220,11 +221,11 @@ class AITradingEngine:
 
         # Convert Account Balance to USD for tier checks if necessary
         balance_in_usd = self.user_balance_account
-        if acct_currency == "ZAR":
+        if self.currency == "ZAR":
             balance_in_usd = self.user_balance_account / usdzar_rate
 
         # Safety Cap
-        max_allowed_pct = get_account_risk_caps(balance_in_usd)
+        max_allowed_pct = get_account_risk_caps(balance_in_usd, self.currency)
 
         # Absolute hard cap in ZAR
         max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
@@ -251,8 +252,8 @@ class AITradingEngine:
         profit_account = points_profit * tick_value * lots
 
         # Final Conversion for Reporting (Always provide ZAR for UI)
-        actual_risk_zar = actual_risk_account * usdzar_rate if acct_currency == "USD" else actual_risk_account
-        profit_zar = profit_account * usdzar_rate if acct_currency == "USD" else profit_account
+        actual_risk_zar = actual_risk_account * usdzar_rate if self.currency == "USD" else actual_risk_account
+        profit_zar = profit_account * usdzar_rate if self.currency == "USD" else profit_account
 
         signal.update(
             {
@@ -266,7 +267,7 @@ class AITradingEngine:
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
                 "risk_account": round(actual_risk_account, 2),
-                "currency": acct_currency,
+                "currency": self.currency,
                 "tick_value": tick_value,
                 "point": point,
                 "atr": atr,
@@ -539,15 +540,6 @@ class AITradingEngine:
 
         return None
 
-    async def initialize(self):
-        """
-        Async initialization to prevent blocking the GUI thread.
-        Runs training check and loads models.
-        """
-        logger.info("🧠 AI Engine Initializing...")
-        self.nn_brain = NeuralPredictor(auto_load=True)
-        logger.info("🧠 AI Engine Ready.")
-
     def prepare_data(self, klines: list, heavy: bool = True) -> Optional[pd.DataFrame]:
         """Prepares DataFrame with Indicators for Analysis."""
         try:
@@ -588,7 +580,7 @@ class AITradingEngine:
             target_win = 1 if won else 0
 
             collector = DataCollector()
-            collector.log_training_data(symbol=symbol, features=features, won=target_win, pnl=pnl, excursion=excursion)
+            collector.log_training_data(symbol, features, target_win, pnl, excursion)
             logger.info(f"💾 Live features for {symbol} saved to training data.")
 
             del self.active_features[symbol]
@@ -598,7 +590,8 @@ class AITradingEngine:
         if symbol not in self.active_features:
             self.active_features[symbol] = {}
 
-    def set_context(self, balance: float, db: DatabaseManager):
+    def set_context(self, balance: float, db: DatabaseManager, currency: str = "USD"):
         """Sets user balance and database manager."""
         self.user_balance_account = balance
+        self.currency = currency
         self.db_manager = db

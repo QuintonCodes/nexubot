@@ -62,7 +62,7 @@ class MarketScanner:
                     )
 
     async def _refresh_market_watch_symbols(self):
-        """Fetches current Market Watch from Provider."""
+        """Fetches current Market Watch."""
         data = await self.engine.provider.get_dynamic_symbols()
         self.engine.active_crypto_list = data.get("crypto", [])
         self.engine.active_forex_list = data.get("forex", [])
@@ -78,7 +78,7 @@ class MarketScanner:
             self.engine.active_indices_list = list(FALLBACK_INDICES)
 
     async def _sort_pairs(self, symbols: list) -> List:
-        """Fetches 100 candles for all pairs to rank them by volatility (Ported from console.py)."""
+        """Fetches 100 candles for all pairs to rank them by volatility."""
         data_map = {}
         for sym in symbols:
             # Quick fetch
@@ -123,7 +123,7 @@ class MarketScanner:
                 # 1. Update Balance context
                 acct = await self.engine.provider.get_account_summary()
                 if acct:
-                    self.engine.ai_engine.set_context(acct["balance"], self.engine.db)
+                    self.engine.ai_engine.set_context(acct["balance"], self.engine.db, acct.get("currency", "USD"))
 
                 now = time.time()
 

@@ -2,7 +2,6 @@ import joblib
 import logging
 import os
 import pandas as pd
-import sys
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 from typing import Dict
@@ -15,50 +14,18 @@ logger = logging.getLogger(__name__)
 
 class NeuralPredictor:
     """
-    Loads models. Falls back to SMC heuristics if unavailable.
+    Operates purely on SMC heuristics.
     """
 
-    def __init__(self, auto_load: bool = True):
+    def __init__(self, auto_load: bool = False):
         self.entry_model = None
         self.exit_model = None
         self.scaler = None
         self.is_ready = False
 
-        if auto_load:
-            self._load_frozen_artifacts()
-
-    def _get_resource_path(self, relative_path: str) -> str:
-        """Helper to find bundled resources safely when packaged as an executable."""
-        if hasattr(sys, "_MEIPASS"):
-            return os.path.join(sys._MEIPASS, relative_path)
-        return os.path.join(os.path.abspath("."), relative_path)
-
-    def _load_frozen_artifacts(self):
-        """Loads read-only pre-trained models bundled with the application."""
-        entry_path = self._get_resource_path(ENTRY_MODEL_FILE)
-        scaler_path = self._get_resource_path(SCALER_FILE)
-        exit_path = self._get_resource_path(EXIT_MODEL_FILE)
-
-        if os.path.exists(entry_path) and os.path.exists(scaler_path):
-            try:
-                self.entry_model = tf.keras.models.load_model(entry_path, compile=False)
-                self.scaler = joblib.load(scaler_path)
-
-                if os.path.exists(exit_path):
-                    self.exit_model = tf.keras.models.load_model(exit_path, compile=False)
-
-                self.is_ready = True
-                logger.info("🧠 Frozen ML Models loaded successfully.")
-            except Exception as e:
-                logger.error(f"Failed to load bundled ML artifacts. Falling back to Heuristics. Error: {e}")
-                self.is_ready = False
-        else:
-            logger.info("⚠️ Bundled ML models not found. Running in Pure SMC Heuristic mode.")
-            self.is_ready = False
-
     def predict(self, features: dict) -> Dict[str, float]:
         """
-        Predicts entry probability using the frozen model.
+        Predicts entry and exit probability.
         """
         # Graceful Failover to pure SMC Heuristics if models are tampered/missing
         if not self.is_ready or self.entry_model is None:
@@ -92,8 +59,7 @@ class NeuralPredictor:
 
     def train_network(self):
         """
-        Developer Tool: Trains the models on the new SMC features.
-        This is ONLY called manually via the GUI to generate production artifacts.
+        Trains the models on the new SMC features.
         """
         data_file = "training_data.csv"
         if not os.path.exists(data_file):

@@ -233,7 +233,7 @@ class DatabaseManager:
 
     @db_retry()
     async def get_recent_trades(self, limit=5) -> List[TradeResult]:
-        """Fetches only the last N trades for dashboard display."""
+        """Fetches only the last N trades for display."""
         if not self.engine:
             return []
 
@@ -324,10 +324,10 @@ class DatabaseManager:
                     entry_price=trade_data["entry"],
                     exit_price=trade_data["exit"],
                     result=1 if trade_data["won"] else 0,
-                    pnl=trade_data["pnl"],
+                    pnl=round(trade_data["pnl"], 2),
                     currency=trade_data.get("currency", "USD"),
                     strategy=trade_data["strategy"],
-                    size=trade_data.get("size", 0.01),
+                    size=trade_data.get("lot_size", 0.01),
                 )
                 session.add(trade)
                 await session.commit()

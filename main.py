@@ -20,7 +20,9 @@ async def run_daily_reporter(engine, notifier):
     while engine.is_running:
         await asyncio.sleep(86400)  # Wait 24 hours
         stats = engine.session_stats
-        notifier.send_daily_report(stats["wins"], stats["losses"], stats["total"], stats["pnl"])
+        notifier.send_daily_report(
+            stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
+        )
 
 
 async def main():

@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramNotifier:
+    """
+    Handles all asynchronous Telegram communication.
+    Responsible for broadcasting signals, analyzing markets on demand, and daily reports.
+    """
+
     def __init__(self, engine=None):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -36,6 +41,10 @@ class TelegramNotifier:
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Silently handles Telegram network timeouts to prevent console crashes."""
         logger.warning(f"Telegram Network Loop: {context.error}")
+
+    def _get_currency_symbol(self, currency: str) -> str:
+        """Helper to return the correct currency symbol based on account base."""
+        return "R" if currency.upper() == "ZAR" else "$"
 
     async def _safe_send(self, chat_id, text):
         try:
@@ -228,25 +237,28 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_trade_result(self, symbol: str, outcome: str, pips: float, won: bool):
+    def send_trade_result(self, symbol: str, outcome: str, pips: float, won: bool, pnl: float, currency: str):
         result_emoji = "🏆" if won else "💔"
+        curr_sym = self._get_currency_symbol(currency)
 
         msg = (
             f"{result_emoji} *TRADE CLOSED: {symbol}* {result_emoji}\n\n"
             f"📝 *Outcome:* {outcome}\n"
-            f"📏 *Captured:* {pips:.1f} Pips\n"
+            f"📏 *Pips:* {pips:.1f} Pips\n"
+            f"💵 *Net PnL:* {curr_sym}{pnl:.2f}\n"
         )
         self.send_message(msg)
 
-    def send_daily_report(self, wins: int, losses: int, total: int, pnl: float):
+    def send_daily_report(self, wins: int, losses: int, total: int, pnl: float, currency: str):
         win_rate = (wins / total * 100) if total > 0 else 0.0
+        curr_sym = self._get_currency_symbol(currency)
+
         msg = (
             f"📊 *NEXUBOT DAILY REPORT* 📊\n\n"
             f"🔄 *Trades Taken:* {total}\n"
             f"✅ *Wins:* {wins}\n"
             f"❌ *Losses:* {losses}\n"
             f"🎯 *Win Rate:* {win_rate:.1f}%\n\n"
-            f"💵 *Net PnL:* R{pnl:.2f}\n\n"
-            f"🧠 *Engine Status:* Continuous learning active. Neural weights updated based on today's outcomes."
+            f"💵 *Net PnL:* {curr_sym}{pnl:.2f}\n\n"
         )
         self.send_message(msg)

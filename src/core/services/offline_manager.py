@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 class OfflineManager:
+    """Offline Trading manager for all previously closed trades."""
+
     def __init__(self, engine):
         self.engine = engine
 

@@ -7,8 +7,31 @@ logger = logging.getLogger(__name__)
 
 
 class TradeMonitor:
+    """Trading monitor for all active trades."""
+
     def __init__(self, engine):
         self.engine = engine
+
+    async def _ghost_track_tp3(self, symbol: str, entry: float, tp3: float, is_long: bool, point: float):
+        """Silently tracks if TP3 is eventually hit after an early exit."""
+        logger.info(f"👻 Ghost tracking {symbol} for TP3 hit...")
+        start = time.time()
+        while time.time() - start < 14400 and self.engine.is_running:  # Track up to 4 hrs
+            tick = await self.engine.provider.get_current_tick(symbol)
+            if not tick:
+                await asyncio.sleep(2)
+                continue
+
+            curr_price = tick.bid if is_long else tick.ask
+            hit_tp3 = curr_price >= tp3 if is_long else curr_price <= tp3
+
+            if hit_tp3:
+                pips = (tp3 - entry) / (point * 10) if is_long else (entry - tp3) / (point * 10)
+                msg = f"👻 *Ghost Tracker Update:* {symbol} eventually hit TP3 for a theoretical {pips:.1f} Pips!"
+                self.engine.notifier.send_message(msg)
+                break
+
+            await asyncio.sleep(2)
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
@@ -126,10 +149,17 @@ class TradeMonitor:
                     won = final_pnl > 0 or final_pips > 0
                     outcome = "WIN (Floating)" if won else "LOSS (Floating)"
 
-            logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: R{final_pnl:.2f} | Pips: {final_pips:.1f}")
+            final_pnl = round(final_pnl, 2)
+            currency = self.engine.session_stats.get("currency", "USD")
+            curr_sym = "R" if currency == "ZAR" else "$"
+            logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: {curr_sym}{final_pnl:.2f} | Pips: {final_pips:.1f}")
 
             if is_filled:
-                self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won)
+                self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won, final_pnl, currency)
+
+                # Ghost Tracking for TP3
+                if "Stopped in Profit/BE" in outcome:
+                    asyncio.create_task(self._ghost_track_tp3(symbol, entry, tp3, is_long, point))
 
                 if won:
                     self.engine.session_stats["wins"] += 1

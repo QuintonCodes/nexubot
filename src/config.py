@@ -51,7 +51,6 @@ SESSION_CONFIG = {
 TIMEFRAME = "M15"
 CANDLE_LIMIT = 500
 DEFAULT_MIN_CONFIDENCE = 70.0
-DEFAULT_BALANCE_ZAR = 500.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 0.1
 
@@ -85,17 +84,25 @@ FEATURE_COLS = [
 # ---------------------------------------------------------
 # DYNAMIC RISK UTILS
 # ---------------------------------------------------------
-def get_account_risk_caps(balance: float) -> float:
+def get_account_risk_caps(balance: float, currency: str = "USD") -> float:
     """
-    Returns the maximum allowable risk percentage based on account size.
-    Smaller accounts get more breathing room for high-probability setups.
-    Larger accounts get tighter safety caps.
+    Returns the maximum allowable risk percentage based on account size and currency.
     """
-    if balance < 2000:
-        return 5.0
-    elif balance < 10000:
-        return 4.0
-    elif balance < 100000:
-        return 3.0
-    else:
-        return 2.0
+    if currency == "ZAR":
+        if balance < 2000:
+            return 5.0
+        elif balance < 10000:
+            return 4.0
+        elif balance < 100000:
+            return 3.0
+        else:
+            return 2.0
+    else:  # USD logic
+        if balance < 100:
+            return 5.0
+        elif balance < 500:
+            return 4.0
+        elif balance < 5000:
+            return 3.0
+        else:
+            return 2.0

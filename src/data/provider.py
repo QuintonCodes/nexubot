@@ -28,45 +28,9 @@ class DataProvider:
         self._path = MT5_PATH
         self.spread_cache = {}
         self.last_cache_clear = time.time()
-        self._news_cache = []
-        self._last_news_fetch = 0
         self._symbol_type_cache = {}
         self._cached_usdzar = None
         self._cached_usdzar_time = 0
-
-    def _fetch_calendar_events(self) -> List[Dict]:
-        """
-        Fetches High Impact news events from MT5 Calendar.
-        Filters for upcoming events in the next 2 hours.
-        """
-        if not hasattr(mt5, "calendar_get_events"):
-            return []
-
-        try:
-            now = datetime.now()
-            future = now + timedelta(hours=2)
-
-            # Fetch calendar values (news events)
-            events = mt5.calendar_get_events(None, None)
-            if not events:
-                return []
-
-            # Filter for High Impact (importance=2 or 3 depending on broker, usually 1=Low, 2=Med, 3=High)
-            high_impact_ids = {e.id for e in events if e.importance >= 3}
-
-            # Get actual values/timings for today
-            values = mt5.calendar_get_values(datetime.now() - timedelta(hours=1), future)
-
-            news_buffer = []
-            if values:
-                for v in values:
-                    if v.event_id in high_impact_ids:
-                        news_buffer.append({"time": v.time, "impact": "HIGH", "event_id": v.event_id})
-            return news_buffer
-
-        except Exception as e:
-            logger.error(f"News fetch failed: {e}")
-            return []
 
     def _kill_terminal(self):
         """Force kills MT5 terminal process."""
@@ -252,15 +216,6 @@ class DataProvider:
             )
         return data
 
-    def _sync_get_tick(self, symbol: str) -> Optional[float]:
-        """Gets current Bid/Ask average."""
-        if not mt5.symbol_select(symbol, True):
-            return None
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
-            return (tick.bid + tick.ask) / 2.0
-        return None
-
     def _sync_get_tick_struct(self, symbol: str) -> Optional[mt5.Tick]:
         """Returns full tick object (Bid/Ask)."""
         if not mt5.symbol_select(symbol, True):
@@ -320,18 +275,6 @@ class DataProvider:
         """Async wrapper to get market watch symbols."""
         return await asyncio.to_thread(self._sync_get_market_watch_symbols)
 
-    def get_ping(self) -> int:
-        """Returns the last known latency to the broker in ms."""
-        if not self.connected:
-            return -1
-        try:
-            info = mt5.terminal_info()
-            if info:
-                return int(info.ping_last / 1000)
-            return 0
-        except:
-            return -1
-
     async def get_spread(self, symbol: str) -> Dict:
         """
         Smart Spread Check using caching + Hourly Clear.
@@ -381,29 +324,29 @@ class DataProvider:
 
         # 1. Ask MT5 for the symbol path
         info = mt5.symbol_info(symbol)
-        result = "FOREX"  # Default safety
+        result = "FOREX"
 
         if info:
             path = info.path.lower()
-            # MT5 Path Check (Most Accurate)
-            if "crypto" in path or "bitcoin" in path or "digital" in path:
+            if "crypto" in path or "bitcoin" in path:
                 result = "CRYPTO"
-            if "indices" in path or "stock" in path or "nas" in path:
+            if "indices" in path or "nas" in path:
                 result = "INDICES"
+            elif "metals" in path or "gold" in path or "silver" in path:
+                result = "METALS"
             if "forex" in path or "majors" in path or "minors" in path or "exotics" in path:
                 result = "FOREX"
         else:
             # 2. Fallback: Name-based Heuristic (if MT5 info fails or is vague)
             s = symbol.upper()
 
-            # Common Crypto Bases
-            crypto_bases = ["BTC", "ETH", "SOL", "XRP", "BNB", "ADA", "DOGE", "LTC"]
-            if any(base in s for base in crypto_bases):
+            if any(base in s for base in ["XAU", "XAG"]):
+                result = "METALS"
+            elif any(base in s for base in ["BTC", "ETH", "SOL", "XRP"]):
                 result = "CRYPTO"
-
-            # Common Forex/Metals
-            forex_bases = ["EUR", "USD", "GBP", "JPY", "CAD", "AUD", "NZD", "CHF", "XAU", "XAG"]
-            if any(base in s for base in forex_bases):
+            elif any(base in s for base in ["US30", "NAS", "GER30"]):
+                result = "INDICES"
+            else:
                 result = "FOREX"
 
         self._symbol_type_cache[symbol] = result
