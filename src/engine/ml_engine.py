@@ -103,8 +103,8 @@ class NeuralPredictor:
 
             # 2. Train Exit Model mapping Risk adjustments (Ensures secondary keras is generated)
             logger.info("🧠 Training SMC Exit Model...")
-            if "target_exit_atr" in df.columns:
-                y_exit = df["target_exit_atr"]
+            if "target_excursion" in df.columns:
+                y_exit = df["target_excursion"]
             else:
                 y_exit = pd.Series([2.0] * len(df))  # Fallback exit target structure mapping if absent
 

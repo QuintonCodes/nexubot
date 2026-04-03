@@ -7,7 +7,16 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
-from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, FALLBACK_INDICES, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+from src.config import (
+    FALLBACK_CRYPTO,
+    FALLBACK_FOREX,
+    FALLBACK_INDICES,
+    FALLBACK_METALS,
+    MT5_LOGIN,
+    MT5_PASSWORD,
+    MT5_SERVER,
+    MT5_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +119,7 @@ class DataProvider:
         priority_crypto = set(FALLBACK_CRYPTO)
         priority_forex = set(FALLBACK_FOREX)
         priority_indices = set(FALLBACK_INDICES)
+        priority_metals = set(FALLBACK_METALS)
 
         # Also allow major pairs explicitly
         major_forex_bases = [
@@ -131,13 +141,14 @@ class DataProvider:
         ]
         major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
         major_indices_bases = ["US30", "NAS100", "GER30", "SPX500", "UK100", "JPN225"]
+        major_metal_bases = ["XAGUSD", "XAUUSD"]
 
         # Get only selected symbols (Market Watch)
         symbols = mt5.symbols_get(selected=True)
         if not symbols:
             return {}
 
-        categorized = {"crypto": [], "forex": [], "indices": []}
+        categorized = {"crypto": [], "forex": [], "indices": [], "metals": []}
 
         for s in symbols:
             name = s.name.upper()
@@ -151,9 +162,10 @@ class DataProvider:
             is_priority = (name in priority_crypto) or (name in priority_forex)
             is_major = any(m in name for m in major_forex_bases) or any(m in name for m in major_crypto_bases)
             is_index = any(m in name for m in major_indices_bases)
+            is_metal = any(m in name for m in major_metal_bases)
 
             # Only add if it's in our Priority List or is a Major Pair
-            if not (is_priority or is_major or is_index):
+            if not (is_priority or is_major or is_index or is_metal):
                 continue
 
             category = self.get_symbol_type(s.name)
@@ -161,14 +173,17 @@ class DataProvider:
                 categorized["crypto"].append(s.name)
             elif category == "INDICES":
                 categorized["indices"].append(s.name)
+            elif category == "METALS":
+                categorized["metals"].append(s.name)
             else:
                 categorized["forex"].append(s.name)
 
         # Fallback if empty (Force default list)
-        if not categorized["crypto"] and not categorized["forex"]:
+        if not categorized["crypto"] and not categorized["forex"] and not categorized["metals"]:
             categorized["crypto"] = list(priority_crypto)
             categorized["forex"] = list(priority_forex)
             categorized["indices"] = list(priority_indices)
+            categorized["metals"] = list(priority_metals)
 
         return categorized
 

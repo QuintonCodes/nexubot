@@ -11,6 +11,8 @@ class StrategyAnalyzer:
         self,
         curr: pd.Series,
         df: pd.DataFrame,
+        df_5m: pd.DataFrame,
+        df_4h: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
         active_fvgs: List[Dict],
         active_obs: List[Dict],
@@ -44,10 +46,11 @@ class StrategyAnalyzer:
                 return res
 
             # New York Session Scalp
-            # TODO: Implement fetch of candles and data frame for 5m and 4H
-            res = self._ny_session_scalp_strategy(curr, df, df)
-            if res:
-                return res
+            if not df_5m.empty:
+                curr_5m = df_5m.iloc[-1]  # Extract the current M5 candle
+                res = self._ny_session_scalp_strategy(curr_5m, df_5m, df_4h)
+                if res:
+                    return res
 
         return None
 
@@ -79,30 +82,43 @@ class StrategyAnalyzer:
         if not structure or structure.get("bos") is None:
             return None
 
+        if curr.get("squeeze_on", False):
+            return None
+
         if htf_trend == "BULL" and structure["bos"] == "BULL":
-            # If we recently broke structure up, look to buy the nearest FVG below us
             fvg_below = [f for f in active_fvgs if f["type"] == "BULL" and f["high"] < curr["close"]]
-            if fvg_below and curr["low"] <= fvg_below[0]["high"]:  # Tapped the FVG
-                return {
-                    "strategy": "SMC BOS Continuation",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 82.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["low"] - curr["atr"],
-                }
+            if fvg_below:
+                fvg = fvg_below[0]
+                # Price is inside the FVG AND forms a bullish reversal candle
+                in_zone = curr["low"] <= fvg["high"] and curr["high"] >= fvg["low"]
+                if in_zone and (
+                    curr.get("bull_pin", False) or curr.get("bull_engulfing", False) or curr.get("doji", False)
+                ):
+                    return {
+                        "strategy": "SMC BOS Continuation",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 86.0,
+                        "order_type": "MARKET",
+                        "suggested_sl": fvg["low"] - (curr["atr"] * 0.5),
+                    }
 
         elif htf_trend == "BEAR" and structure["bos"] == "BEAR":
             fvg_above = [f for f in active_fvgs if f["type"] == "BEAR" and f["low"] > curr["close"]]
             if fvg_above and curr["high"] >= fvg_above[0]["low"]:
-                return {
-                    "strategy": "SMC BOS Continuation",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 82.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["high"] + curr["atr"],
-                }
+                fvg = fvg_above[0]
+                in_zone = curr["high"] >= fvg["low"] and curr["low"] <= fvg["high"]
+                if in_zone and (
+                    curr.get("bear_pin", False) or curr.get("bear_engulfing", False) or curr.get("doji", False)
+                ):
+                    return {
+                        "strategy": "SMC BOS Continuation",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 86.0,
+                        "order_type": "MARKET",
+                        "suggested_sl": fvg["low"] - (curr["atr"] * 0.5),
+                    }
         return None
 
     def _smc_poi_reversal(
@@ -119,24 +135,24 @@ class StrategyAnalyzer:
         if htf_trend == "BULL":
             tapped_poi = any(curr["low"] <= poi["high"] for poi in active_fvgs + active_obs if poi["type"] == "BULL")
             # Confirmation candle requirement
-            if tapped_poi and curr["close"] > curr["open"]:
+            if tapped_poi and (curr.get("bull_pin", False) or curr.get("bull_engulfing", False)):
                 return {
                     "strategy": "SMC POI Bounce",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 78.0,
+                    "confidence": 85.0,
                     "order_type": "MARKET",
                     "suggested_sl": curr["low"] - curr["atr"],
                 }
 
         elif htf_trend == "BEAR":
             tapped_poi = any(curr["high"] >= poi["low"] for poi in active_fvgs + active_obs if poi["type"] == "BEAR")
-            if tapped_poi and curr["close"] < curr["open"]:
+            if tapped_poi and (curr.get("bear_pin", False) or curr.get("bear_engulfing", False)):
                 return {
                     "strategy": "SMC POI Bounce",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 78.0,
+                    "confidence": 85.0,
                     "order_type": "MARKET",
                     "suggested_sl": curr["high"] + curr["atr"],
                 }
@@ -146,16 +162,10 @@ class StrategyAnalyzer:
         self, curr: pd.Series, df: pd.DataFrame, htf_trend: Literal["BULL", "BEAR"], active_fvgs: List[Dict]
     ) -> Optional[Dict]:
         """
-        Triggers trades when Pivot Highs/Lows are swept with aggressive rejection wicks + FVG presence.
+        Triggers trades when Pivot Highs/Lows are swept with aggressive rejection wicks
         """
-        body = abs(curr["close"] - curr["open"])
-
-        # Require the wick to be at least 2x the body size for a true rejection
-        rejection_multiplier = 2.0
-
-        if htf_trend == "BULL":
-            lower_wick = min(curr["close"], curr["open"]) - curr["low"]
-            if lower_wick > (body * rejection_multiplier):
+        if htf_trend == "BULL" and (curr.get("bull_pin", False) or curr.get("bull_engulfing", False)):
+            if curr["low"] < df["low"].shift(1).iloc[-1]:
                 return {
                     "strategy": "SMC Liquidity Sweep",
                     "signal": "BUY",
@@ -165,9 +175,8 @@ class StrategyAnalyzer:
                     "suggested_sl": curr["low"] - (curr["atr"] * 0.5),
                 }
 
-        elif htf_trend == "BEAR":
-            upper_wick = curr["high"] - max(curr["close"], curr["open"])
-            if upper_wick > (body * rejection_multiplier):
+        elif htf_trend == "BEAR" and (curr.get("bear_pin", False) or curr.get("bear_engulfing", False)):
+            if curr["high"] > df["high"].shift(1).iloc[-1]:
                 return {
                     "strategy": "SMC Liquidity Sweep",
                     "signal": "SELL",

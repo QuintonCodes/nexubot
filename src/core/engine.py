@@ -43,6 +43,7 @@ class NexubotEngine:
         self.active_crypto_list = []
         self.active_forex_list = []
         self.active_indices_list = []
+        self.active_metals_list = []
         self.session_start = time.time()
 
     async def initialize_connection(self, login_id: int, server: str, password: str, mt5_path=None) -> bool:

@@ -8,10 +8,12 @@ from src.config import (
     FALLBACK_CRYPTO,
     FALLBACK_FOREX,
     FALLBACK_INDICES,
+    FALLBACK_METALS,
     MAX_SIGNALS_PER_SCAN,
     SCAN_INTERVAL_CRYPTO,
     SCAN_INTERVAL_FOREX,
     SCAN_INTERVAL_INDICES,
+    SCAN_INTERVAL_METALS,
     TIMEFRAME,
 )
 
@@ -67,15 +69,18 @@ class MarketScanner:
         self.engine.active_crypto_list = data.get("crypto", [])
         self.engine.active_forex_list = data.get("forex", [])
         self.engine.active_indices_list = data.get("indices", [])
+        self.engine.active_metals_list = data.get("metals", [])
 
         if (
             not self.engine.active_crypto_list
             and not self.engine.active_forex_list
             and not self.engine.active_indices_list
+            and not self.engine.active_metals_list
         ):
             self.engine.active_crypto_list = list(FALLBACK_CRYPTO)
             self.engine.active_forex_list = list(FALLBACK_FOREX)
             self.engine.active_indices_list = list(FALLBACK_INDICES)
+            self.engine.active_metals_list = list(FALLBACK_METALS)
 
     async def _sort_pairs(self, symbols: list) -> List:
         """Fetches 100 candles for all pairs to rank them by volatility."""
@@ -99,10 +104,13 @@ class MarketScanner:
         active_crypto = []
         active_forex = []
         active_indices = []
+        active_metals = []
 
         last_crypto = 0
         last_forex = 0
         last_indices = 0
+        last_metals = 0
+
         last_sort_time = 0
 
         await self._refresh_market_watch_symbols()
@@ -139,6 +147,7 @@ class MarketScanner:
                     active_crypto = await self._sort_pairs(active_crypto)
                     active_forex = await self._sort_pairs(active_forex)
                     active_indices = await self._sort_pairs(active_indices)
+                    active_metals = await self._sort_pairs(active_metals)
                     last_sort_time = now
 
                 # 3. Batch Process (Parallel Scanning)
@@ -155,6 +164,10 @@ class MarketScanner:
                 if now - last_indices > SCAN_INTERVAL_INDICES:
                     tasks.append(self._process_batch(self.engine.active_indices_list[:5]))
                     last_indices = now
+
+                if now - last_metals > SCAN_INTERVAL_METALS:
+                    tasks.append(self._process_batch(self.engine.active_metals_list[:5]))
+                    last_metals = now
 
                 if tasks:
                     await asyncio.gather(*tasks)

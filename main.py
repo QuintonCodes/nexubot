@@ -15,18 +15,12 @@ load_dotenv()
 setup_logging()
 
 
-async def run_daily_reporter(engine, notifier):
-    """Background task to send a report every 24 hours."""
-    while engine.is_running:
-        await asyncio.sleep(86400)  # Wait 24 hours
-        stats = engine.session_stats
-        notifier.send_daily_report(
-            stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
-        )
-
-
 async def main():
     engine = NexubotEngine(None)
+
+    await engine.db.init_database()
+    await engine.db.cleanup_db()
+
     notifier = TelegramNotifier(engine=engine)
     engine.notifier = notifier
 
@@ -64,8 +58,6 @@ async def main():
         # 5. Send Startup message as the very first Telegram notification
         await notifier.send_startup_message(win_rate, total_trades)
 
-        asyncio.create_task(run_daily_reporter(engine, notifier))
-
         try:
             while True:
                 await asyncio.sleep(3600)
@@ -73,6 +65,13 @@ async def main():
             print("Received Cancellation Signal.")
         finally:
             print("Initiating Graceful Shutdown...")
+
+            # Send Final Report Before Shutdown
+            stats = engine.session_stats
+            notifier.send_daily_report(
+                stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
+            )
+
             await notifier.send_shutdown_message()
             await engine.stop_session()
             await asyncio.sleep(2)

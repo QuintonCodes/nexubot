@@ -47,17 +47,24 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         mt5.symbol_select(symbol, True)
 
         # Fetch large history for robust simulation (5000 candles on M15)
-        klines = await provider.fetch_klines(symbol, "M15", 5000)
-        if not klines or len(klines) < 200:
+        klines_m15 = await provider.fetch_klines(symbol, "M15", 5000)
+        klines_m5 = await provider.fetch_klines(symbol, "M5", 15000)
+        klines_h4 = await provider.fetch_klines(symbol, "H4", 500)
+
+        if not klines_m15 or len(klines_m15) < 200:
             logger.warning(f"⚠️ Not enough data for {symbol}. Skipping.")
             continue
 
         # Load into DataFrame and pre-calculate indicators for blazing fast simulation
-        df_full = pd.DataFrame(klines)
-        df_full = df_full.sort_values("time").reset_index(drop=True)
+        df_full = pd.DataFrame(klines_m15).sort_values("time").reset_index(drop=True)
+        df_5m_full = pd.DataFrame(klines_m5).sort_values("time").reset_index(drop=True)
+        df_4h_full = pd.DataFrame(klines_h4).sort_values("time").reset_index(drop=True)
 
+        # Pre-calculate indicators
         df_full = TechnicalAnalyzer.calculate_indicators(df_full, heavy=True)
         df_full = CandleStickDetector.calculate_candles(df_full)
+        df_5m_full = TechnicalAnalyzer.calculate_indicators(df_5m_full, heavy=False)
+        df_5m_full = CandleStickDetector.calculate_candles(df_5m_full)
 
         symbol_rows_collected = 0
 
@@ -138,8 +145,21 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
 
             allowed_session_types = ["TREND", "REVERSION", "BREAKOUT"]
 
+            curr_time = curr["time"]
+            window_5m = df_5m_full[df_5m_full["time"] <= curr_time]
+            window_4h = df_4h_full[df_4h_full["time"] <= curr_time]
+
             signal = engine.strategy_analyzer.analyze_router(
-                curr, window, htf_trend, active_fvgs, active_obs, adx_strength, structure_info, allowed_session_types
+                curr,
+                window,
+                window_5m,
+                window_4h,
+                htf_trend,
+                active_fvgs,
+                active_obs,
+                adx_strength,
+                structure_info,
+                allowed_session_types,
             )
 
             if not signal:

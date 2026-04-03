@@ -361,8 +361,20 @@ class AITradingEngine:
         allowed_session_types = session_info.get("types", ["TREND", "REVERSION", "BREAKOUT"])
 
         # 4. Data Preparation
-        df = await asyncio.to_thread(self.prepare_data, klines, True)
-        if df is None:
+        klines_m15 = await provider.fetch_klines(symbol, "15m", 200)
+        klines_m5 = await provider.fetch_klines(symbol, "5m", 500)
+        klines_h4 = await provider.fetch_klines(symbol, "4h", 100)
+
+        df = await asyncio.to_thread(self.prepare_data, klines_m15, True)
+        df_5m = await asyncio.to_thread(self.prepare_data, klines_m5, False)
+        df_4h = pd.DataFrame(klines_h4)
+
+        # Check if the preparation failed (returned None)
+        if df is None or df_5m is None:
+            return None
+
+        # Check if the resulting DataFrames are empty
+        if df.empty or df_5m.empty or df_4h.empty:
             return None
 
         curr = df.iloc[-1]
@@ -453,6 +465,8 @@ class AITradingEngine:
         final_signal = self.strategy_analyzer.analyze_router(
             curr,
             df,
+            df_5m,
+            df_4h,
             htf_trend,
             active_fvgs,
             active_obs,
