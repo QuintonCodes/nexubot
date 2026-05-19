@@ -15,7 +15,7 @@ class DataCollector:
 
     def __init__(self, filename="training_data.csv"):
         self.filename = filename
-        self.max_rows = 20000
+        self.max_rows = 14000
 
     def log_training_data(self, symbol: str, features: dict, won: int, pnl: float, excursion: float = 0.0):
         """
@@ -42,7 +42,6 @@ class DataCollector:
             if file_exists:
                 df = pd.read_csv(self.filename, on_bad_lines="skip")
                 if len(df) > self.max_rows:
-                    # Keep the most recent 20,000 trades
                     df.tail(self.max_rows).to_csv(self.filename, index=False)
                     logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
         except Exception as e:

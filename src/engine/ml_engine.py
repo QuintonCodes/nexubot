@@ -4,17 +4,17 @@ import os
 import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
+from keras.callbacks import EarlyStopping
 from typing import Dict
 
 from src.config import ENTRY_MODEL_FILE, EXIT_MODEL_FILE, FEATURE_COLS, SCALER_FILE
-
 
 logger = logging.getLogger(__name__)
 
 
 class NeuralPredictor:
     """
-    Operates purely on SMC heuristics.
+    Operates purely on SMC structural heuristics.
     """
 
     def __init__(self, auto_load: bool = False):
@@ -27,29 +27,29 @@ class NeuralPredictor:
         """
         Predicts entry and exit probability.
         """
-        # Graceful Failover to pure SMC Heuristics if models are tampered/missing
+        # Graceful Failover if models are not yet trained
         if not self.is_ready or self.entry_model is None:
             return {"prob": 0.85, "risk_mult": 1.0, "pred_exit_atr": 2.0}
 
         try:
-            defaults = {col: 0.0 for col in FEATURE_COLS}
-            data = {k: [features.get(k, defaults.get(k, 0))] for k in FEATURE_COLS}
+            # Map incoming features, defaulting to 0 for missing binary flags
+            data = {k: [features.get(k, 0.0)] for k in FEATURE_COLS}
             df_input = pd.DataFrame(data)
 
             X_new = self.scaler.transform(df_input)
             prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
 
-            # Exit Prediction (Default to 2.0 ATR if model is missing or error)
+            # Exit Prediction (Default to 2.0 RR equivalent if model is missing)
             pred_exit_atr = 2.0
             if self.exit_model:
                 raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
                 pred_exit_atr = max(1.0, min(raw_exit, 4.0))
 
-            # Dynamic Risk Sizing
+            # Dynamic Risk Sizing based on Neural Conviction
             risk_mult = 0.5  # Base Low
-            if prob > 0.85:
+            if prob > 0.80:
                 risk_mult = 2.0  # High Conviction
-            elif prob > 0.65:
+            elif prob > 0.60:
                 risk_mult = 1.0  # Standard
 
             return {"prob": prob, "risk_mult": risk_mult, "pred_exit_atr": pred_exit_atr}
@@ -59,7 +59,7 @@ class NeuralPredictor:
 
     def train_network(self):
         """
-        Trains the models on the new SMC features.
+        Trains the models on the discrete SMC features using Early Stopping.
         """
         data_file = "training_data.csv"
         if not os.path.exists(data_file):
@@ -85,8 +85,11 @@ class NeuralPredictor:
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
 
+            # Prevent overfitting on discrete/binary SMC features
+            early_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
+
             # 1. Train Entry Model
-            logger.info("🧠 Training SMC Entry Model...")
+            logger.info("🧠 Training SMC Entry Model ...")
             entry_model = tf.keras.models.Sequential(
                 [
                     tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
@@ -98,11 +101,13 @@ class NeuralPredictor:
             )
 
             entry_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-            entry_model.fit(X_scaled, y_entry, epochs=150, batch_size=32, verbose=1, validation_split=0.15)
+            entry_model.fit(
+                X_scaled, y_entry, epochs=150, batch_size=32, verbose=1, validation_split=0.15, callbacks=[early_stop]
+            )
             entry_model.save(ENTRY_MODEL_FILE)
 
             # 2. Train Exit Model mapping Risk adjustments (Ensures secondary keras is generated)
-            logger.info("🧠 Training SMC Exit Model...")
+            logger.info("🧠 Training SMC Exit Model ...")
             if "target_excursion" in df.columns:
                 y_exit = df["target_excursion"]
             else:
@@ -117,7 +122,9 @@ class NeuralPredictor:
             )
 
             exit_model.compile(optimizer="adam", loss="mse", metrics=["mae"])
-            exit_model.fit(X_scaled, y_exit, epochs=100, batch_size=32, verbose=1, validation_split=0.15)
+            exit_model.fit(
+                X_scaled, y_exit, epochs=100, batch_size=32, verbose=1, validation_split=0.15, callbacks=[early_stop]
+            )
             exit_model.save(EXIT_MODEL_FILE)
 
             # Save artifacts to root directory

@@ -4,7 +4,6 @@ import time
 from typing import List
 
 from src.config import (
-    CANDLE_LIMIT,
     FALLBACK_CRYPTO,
     FALLBACK_FOREX,
     FALLBACK_INDICES,
@@ -43,7 +42,7 @@ class MarketScanner:
             if any(s.get("symbol") == sym for s in self.engine.active_signals):
                 continue
 
-            klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
+            klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, 3000)
             if klines:
                 signal = await self.engine.ai_engine.analyze_market(sym, klines, self.engine.provider)
                 if signal:
@@ -51,7 +50,6 @@ class MarketScanner:
                     signal["detected_at"] = time.time()
                     signals_found += 1
 
-                    # Add to active list to prevent duplicate scans on this pair
                     self.engine.active_signals.append(signal)
 
                     # 1. Alert via Telegram
@@ -89,7 +87,7 @@ class MarketScanner:
             # Quick fetch
             k = await self.engine.provider.fetch_klines(sym, TIMEFRAME, 100)
             if k:
-                df = self.engine.ai_engine.prepare_data(k, heavy=False)
+                df = self.engine.ai_engine.prepare_data(k)
                 if df is not None:
                     data_map[sym] = df
 
@@ -110,7 +108,6 @@ class MarketScanner:
         last_forex = 0
         last_indices = 0
         last_metals = 0
-
         last_sort_time = 0
 
         await self._refresh_market_watch_symbols()
@@ -135,7 +132,7 @@ class MarketScanner:
 
                 now = time.time()
 
-                # 2. Sort Pairs every 15 mins (Logic from console.py)
+                # 2. Re-rank pairs by volatility every 15 minutes
                 if now - last_sort_time > 900:
                     logger.info("📊 Re-ranking pairs by volatility...")
                     self.engine.notifier.send_message(
@@ -148,6 +145,7 @@ class MarketScanner:
                     active_forex = await self._sort_pairs(active_forex)
                     active_indices = await self._sort_pairs(active_indices)
                     active_metals = await self._sort_pairs(active_metals)
+
                     last_sort_time = now
 
                 # 3. Batch Process (Parallel Scanning)

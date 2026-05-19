@@ -50,7 +50,7 @@ class NexubotEngine:
         """
         Headless connection to MT5 using environment credentials.
         """
-        # --- Prevent Duplicate Connection ---
+        #   --- Prevent Duplicate Connection   ---
         if self.provider.connected:
             logger.info("✅ Already connected to MT5.")
             self.is_running = True

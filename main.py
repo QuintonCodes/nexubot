@@ -10,12 +10,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from src.api.telegram_notifier import TelegramNotifier
 from src.core.engine import NexubotEngine
 from src.utils.logger import setup_logging
+from src.config import VERSION
 
 load_dotenv()
 setup_logging()
 
 
 async def main():
+    print(f"🚀 Booting Nexubot {VERSION} (Pure SMC Engine)...")
     engine = NexubotEngine(None)
 
     await engine.db.init_database()
@@ -31,6 +33,7 @@ async def main():
 
     if not all([login, password, server]):
         notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
+        print("❌ Boot Error: Missing MT5 credentials in .env file.")
         return
 
     # 1. Lock the system status BEFORE connecting so the scanner pauses immediately
@@ -44,8 +47,12 @@ async def main():
         await notifier.initialize()
 
         # 2. Auto-Train Neural Network on Boot
-        print("⚙️ *Running Pre-Flight ML Optimization...*")
-        await asyncio.to_thread(engine.ai_engine.nn_brain.train_network)
+        if not os.path.exists("training_data.csv"):
+            print("⚠️ WARNING: 'training_data.csv' not found. Run 'python run_backfill.py' first.")
+            notifier.send_message("⚠️ *Warning:* No ML training data found. Please run backfill.")
+        else:
+            print("⚙️ Running Pre-Flight ML Optimization...")
+            await asyncio.to_thread(engine.ai_engine.nn_brain.train_network)
 
         # 3. Unlock the system status now that training is finished
         engine.system_status = "IDLE"
@@ -64,7 +71,7 @@ async def main():
         except asyncio.CancelledError:
             print("Received Cancellation Signal.")
         finally:
-            print("Initiating Graceful Shutdown...")
+            print("Initiating Graceful Shutdown ...")
 
             # Send Final Report Before Shutdown
             stats = engine.session_stats

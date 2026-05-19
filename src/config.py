@@ -22,36 +22,33 @@ MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe"
 # DATABASE & FALLBACKS
 # ---------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
-FALLBACK_CRYPTO: list[str] = [
-    "BTCUSDm",
-    "ETHUSDm",
-    "BTCJPYm",
-]
-FALLBACK_FOREX: list[str] = ["EURUSDm", "GBPUSDm", "USDJPYm", "USDCADm" "AUDUSDm"]
+
+FALLBACK_CRYPTO: list[str] = ["BTCUSDm", "ETHUSDm"]
+FALLBACK_FOREX: list[str] = ["EURUSDm"]
 FALLBACK_METALS: list[str] = ["XAUUSDm", "XAGUSDm"]
-FALLBACK_INDICES = ["US30m", "NAS100m", "GER30m", "UK100m"]
-HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "NAS", "US30", "GER30", "JPY"]
+FALLBACK_INDICES: list[str] = ["US30m"]
+
+# Used by the engine to relax strict risk parameters during expansion phases
+HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "US30"]
 
 # ---------------------------------------------------------
-# SESSION & TIME FILTERS (SAST)
+# SESSION & TIME FILTERS (SAST - South African Standard Time)
 # ---------------------------------------------------------
 SESSION_CONFIG = {
-    "ASIAN_START": 0,
-    "ASIAN_END": 7,
-    "PRE_LONDON_START": 7,
-    "PRE_LONDON_END": 9,
-    "LONDON_START": 9,
-    "LONDON_END": 12,
-    "NY_START": 15,
-    "NY_END": 19,
+    "ASIAN_START": 2,  # 02:00 SAST
+    "ASIAN_END": 11,  # 11:00 SAST
+    "LONDON_START": 9,  # 09:00 SAST
+    "LONDON_END": 18,  # 18:00 SAST
+    "NY_START": 14,  # 14:00 SAST
+    "NY_END": 23,  # 23:00 SAST
 }
 
 # ---------------------------------------------------------
 # STRATEGY & RISK SETTINGS
 # ---------------------------------------------------------
-TIMEFRAME = "M15"
+TIMEFRAME = "M1"
 CANDLE_LIMIT = 500
-DEFAULT_MIN_CONFIDENCE = 70.0
+DEFAULT_MIN_CONFIDENCE = 60.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 0.1
 
@@ -72,14 +69,13 @@ EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
 
 FEATURE_COLS = [
-    "dist_to_vwap",
-    "mtf_trend_alignment",
-    "hour_norm",
-    "volatility_ratio",
-    "dist_to_nearest_fvg",
-    "is_in_breaker",
-    "htf_adx_strength",
-    "poi_status",
+    "is_htf_aligned",  # 1 if aligned with HTF bias, -1 if against
+    "is_liquidity_swept",  # 1 if recent sweep detected, 0 otherwise
+    "is_in_fvg",  # 1 if currently inside an unmitigated FVG
+    "is_in_orderblock",  # 1 if tapping a valid OB
+    "structural_break",  # 1 for BOS, 2 for CHoCH, 0 for neither
+    "session_volume_spike",  # 1 if massive body displacement detected
+    "distance_to_poi",  # % distance to nearest liquidity pool
 ]
 
 

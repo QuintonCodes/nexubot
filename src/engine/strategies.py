@@ -4,253 +4,317 @@ from typing import Dict, List, Literal, Optional
 
 class StrategyAnalyzer:
     """
-    Modular SMC Strategy Engine.
+    Pure SMC Strategy Engine strictly aligned with HTF institutional flow.
     """
 
     def analyze_router(
         self,
         curr: pd.Series,
         df: pd.DataFrame,
-        df_5m: pd.DataFrame,
-        df_4h: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
         active_fvgs: List[Dict],
         active_obs: List[Dict],
-        adx_strength: float,
-        structure: dict,
-        allowed_session_types: List[str],
+        structure: Literal["BULL", "BEAR", "FLAT"],
     ) -> Optional[Dict]:
         """
-        Unified SMC Strategy Router. Strict MTF Alignment applied.
+        Unified SMC Strategy Router.
+        Enforces HTF alignment and executes strictly on structural confirmations.
         """
-        if htf_trend == "FLAT" or adx_strength < 15.0:
-            if "REVERSION" in allowed_session_types:
-                return self._mean_reversion_strategy(curr, df)
-            return None
 
-        # 2. Trend & Breakout Strategies
-        if "TREND" in allowed_session_types or "BREAKOUT" in allowed_session_types:
-            # Structure Break Continuation
-            res = self._smc_structure_continuation(curr, df, htf_trend, structure, active_fvgs)
-            if res:
-                return res
+        # 1. Calculate Daily Liquidity (PDH / PDL) for Setup 6
+        pdh, pdl = None, None
+        if "time" in df.columns:
+            df_temp = df.copy()
+            df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
+            today = df_temp["date"].iloc[-1]
+            prev_days = df_temp[df_temp["date"] < today]
+            if not prev_days.empty:
+                last_day = prev_days["date"].iloc[-1]
+                yesterday_df = prev_days[prev_days["date"] == last_day]
+                pdh = yesterday_df["high"].max()
+                pdl = yesterday_df["low"].min()
 
-            # SMC POI Reversal
-            res = self._smc_poi_reversal(curr, df, htf_trend, active_fvgs, active_obs)
-            if res:
-                return res
+        daily_levels = {"pdh": pdh, "pdl": pdl}
 
-            # Liquidity Sweep
-            res = self._smc_liquidity_sweep(curr, df, htf_trend, active_fvgs)
-            if res:
-                return res
+        # 2. Establish VWAP Trend State
+        vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
 
-            # New York Session Scalp
-            if not df_5m.empty:
-                curr_5m = df_5m.iloc[-1]  # Extract the current M5 candle
-                res = self._ny_session_scalp_strategy(curr_5m, df_5m, df_4h)
-                if res:
-                    return res
+        #   -----------------------------------------------------------------
+        # Evaluate SMC Setups
+        #   -----------------------------------------------------------------
+
+        # Setups 2 & 6: Liquidity Sweeps (Local Pivots & Daily S/R)
+        res = self._smc_liquidity_sweep(curr, df, htf_trend, structure, daily_levels)
+        if res:
+            return res
+
+        # Setups 1 & 4: POI Reversals (Order Blocks & FVGs + Structural Confirmation)
+        res = self._smc_poi_reversal(curr, df, htf_trend, structure, active_fvgs, active_obs, vwap_trend)
+        if res:
+            return res
+
+        # Setup 3: IFVG Continuation
+        res = self._ifvg_continuation(curr, df, htf_trend, structure, active_fvgs, vwap_trend)
+        if res:
+            return res
+
+        # Setup 7: VWAP Bounce
+        res = self._vwap_bounce(curr, df, htf_trend, structure, vwap_trend)
+        if res:
+            return res
 
         return None
 
-    def _mean_reversion_strategy(self, curr: pd.Series, df: pd.DataFrame) -> Optional[Dict]:
-        """Mean Reversion logic for low-volatility environments. Relies on Bollinger Bands and ATR for SL placement."""
-        # Simple Bollinger Band Reversion for quiet markets
-        if curr["close"] < curr.get("bb_lower", 0) and curr["close"] > curr["open"]:
-            return {
-                "strategy": "Mean Reversion (Range Bound)",
-                "signal": "BUY",
-                "direction": "LONG",
-                "confidence": 70.0,
-                "order_type": "MARKET",
-                "suggested_sl": curr["low"] - (curr["atr"] * 0.5),
-            }
-        elif curr["close"] > curr.get("bb_upper", float("inf")) and curr["close"] < curr["open"]:
-            return {
-                "strategy": "Mean Reversion (Range Bound)",
-                "signal": "SELL",
-                "direction": "SHORT",
-                "confidence": 70.0,
-                "order_type": "MARKET",
-                "suggested_sl": curr["high"] + (curr["atr"] * 0.5),
-            }
-        return None
+    def _smc_liquidity_sweep(
+        self,
+        curr: pd.Series,
+        df: pd.DataFrame,
+        htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        structure: Literal["BULL", "BEAR", "FLAT"],
+        daily_levels: dict,
+    ) -> Optional[Dict]:
+        """
+        Setups 2 & 6: Executes when significant liquidity is swept, followed immediately by a CHoCH/BOS.
+        """
+        bos = structure.get("bos")
+        choch = structure.get("choch")
 
-    def _smc_structure_continuation(self, curr, df, htf_trend, structure, active_fvgs):
-        """Trades the first pullback FVG after a confirmed Break of Structure"""
-        if not structure or structure.get("bos") is None:
+        if not (bos or choch):
             return None
 
-        if curr.get("squeeze_on", False):
-            return None
+        last_low = structure.get("last_low")
+        last_high = structure.get("last_high")
+        pdl = daily_levels.get("pdl")
+        pdh = daily_levels.get("pdh")
+        atr_buffer = curr["atr"] * 0.2
 
-        if htf_trend == "BULL" and structure["bos"] == "BULL":
-            fvg_below = [f for f in active_fvgs if f["type"] == "BULL" and f["high"] < curr["close"]]
-            if fvg_below:
-                fvg = fvg_below[0]
-                # Price is inside the FVG AND forms a bullish reversal candle
-                in_zone = curr["low"] <= fvg["high"] and curr["high"] >= fvg["low"]
-                if in_zone and (
-                    curr.get("bull_pin", False) or curr.get("bull_engulfing", False) or curr.get("doji", False)
-                ):
-                    return {
-                        "strategy": "SMC BOS Continuation",
-                        "signal": "BUY",
-                        "direction": "LONG",
-                        "confidence": 86.0,
-                        "order_type": "MARKET",
-                        "suggested_sl": fvg["low"] - (curr["atr"] * 0.5),
-                    }
+        # Lookback window to verify the sweep happened right before the BOS
+        recent_low = df["low"].tail(5).min()
+        recent_high = df["high"].tail(5).max()
 
-        elif htf_trend == "BEAR" and structure["bos"] == "BEAR":
-            fvg_above = [f for f in active_fvgs if f["type"] == "BEAR" and f["low"] > curr["close"]]
-            if fvg_above and curr["high"] >= fvg_above[0]["low"]:
-                fvg = fvg_above[0]
-                in_zone = curr["high"] >= fvg["low"] and curr["low"] <= fvg["high"]
-                if in_zone and (
-                    curr.get("bear_pin", False) or curr.get("bear_engulfing", False) or curr.get("doji", False)
-                ):
-                    return {
-                        "strategy": "SMC BOS Continuation",
-                        "signal": "SELL",
-                        "direction": "SHORT",
-                        "confidence": 86.0,
-                        "order_type": "MARKET",
-                        "suggested_sl": fvg["low"] - (curr["atr"] * 0.5),
-                    }
+        #   --- BULLISH SWEEPS   ---
+        if bos == "BULL" or choch == "BULL":
+            # Setup 6: Daily Sweep + Structural Shift
+            if pdl and recent_low < pdl and curr["close"] > pdl:
+                return {
+                    "strategy": "Daily Liquidity Sweep",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 92.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_low - atr_buffer,
+                }
+
+            # Setup 2: Immediate Trap (Local Pivot Sweep + CHoCH/BOS)
+            if last_low and recent_low < last_low and curr["close"] > last_low:
+                return {
+                    "strategy": "Local Sweep Trap",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 88.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_low - atr_buffer,
+                }
+
+        #   --- BEARISH SWEEPS   ---
+        if bos == "BEAR" or choch == "BEAR":
+            # Setup 6: Daily Sweep + Structural Shift
+            if pdh and recent_high > pdh and curr["close"] < pdh:
+                return {
+                    "strategy": "Daily Liquidity Sweep",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 92.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_high + atr_buffer,
+                }
+
+            # Setup 2: Immediate Trap (Local Pivot Sweep + CHoCH/BOS)
+            if last_high and recent_high > last_high and curr["close"] < last_high:
+                return {
+                    "strategy": "Local Sweep Trap",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 88.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_high + atr_buffer,
+                }
+
         return None
 
     def _smc_poi_reversal(
         self,
         curr: pd.Series,
         df: pd.DataFrame,
-        htf_trend: Literal["BULL", "BEAR"],
+        htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        structure: Literal["BULL", "BEAR", "FLAT"],
         active_fvgs: List[Dict],
         active_obs: List[Dict],
+        vwap_trend: str,
     ) -> Optional[Dict]:
         """
-        Executes when price taps an active OB, Breaker, or FVG and forms a confirmation candle.
+        Setups 1 & 4: Price must tap an OB/FVG and confirm with a BOS/CHoCH.
         """
-        if htf_trend == "BULL":
-            tapped_poi = any(curr["low"] <= poi["high"] for poi in active_fvgs + active_obs if poi["type"] == "BULL")
-            # Confirmation candle requirement
-            if tapped_poi and (curr.get("bull_pin", False) or curr.get("bull_engulfing", False)):
-                return {
-                    "strategy": "SMC POI Bounce",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 85.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["low"] - curr["atr"],
-                }
+        bos = structure.get("bos")
+        choch = structure.get("choch")
 
-        elif htf_trend == "BEAR":
-            tapped_poi = any(curr["high"] >= poi["low"] for poi in active_fvgs + active_obs if poi["type"] == "BEAR")
-            if tapped_poi and (curr.get("bear_pin", False) or curr.get("bear_engulfing", False)):
-                return {
-                    "strategy": "SMC POI Bounce",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 85.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["high"] + curr["atr"],
-                }
-        return None
-
-    def _smc_liquidity_sweep(
-        self, curr: pd.Series, df: pd.DataFrame, htf_trend: Literal["BULL", "BEAR"], active_fvgs: List[Dict]
-    ) -> Optional[Dict]:
-        """
-        Triggers trades when Pivot Highs/Lows are swept with aggressive rejection wicks
-        """
-        if htf_trend == "BULL" and (curr.get("bull_pin", False) or curr.get("bull_engulfing", False)):
-            if curr["low"] < df["low"].shift(1).iloc[-1]:
-                return {
-                    "strategy": "SMC Liquidity Sweep",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 85.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["low"] - (curr["atr"] * 0.5),
-                }
-
-        elif htf_trend == "BEAR" and (curr.get("bear_pin", False) or curr.get("bear_engulfing", False)):
-            if curr["high"] > df["high"].shift(1).iloc[-1]:
-                return {
-                    "strategy": "SMC Liquidity Sweep",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 85.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": curr["high"] + (curr["atr"] * 0.5),
-                }
-
-        return None
-
-    def _ny_session_scalp_strategy(
-        self, curr_5m: pd.Series, df_5m: pd.DataFrame, df_4h: pd.DataFrame
-    ) -> Optional[Dict]:
-        """
-        Scalping Strategy: Marks the high and low of the first 4H candle of the day.
-        Drops to 5M timeframe. Enters when a 5M candle breaks the 4H zone and retests it (body close inside).
-        Target: Minimum 2R.
-        """
-        if df_4h.empty or len(df_5m) < 2:
+        if not (bos or choch):
             return None
 
-        # 1. Identify the First 4H Candle of the Day
-        # Using SAST (GMT+2) mapping - finding the candle spanning 06:00
-        df_4h["date"] = pd.to_datetime(df_4h["time"], unit="s")
-        today_4h = df_4h[df_4h["date"].dt.date == pd.Timestamp.utcnow().date()]
+        recent_low = df["low"].tail(4).min()
+        recent_high = df["high"].tail(4).max()
+        atr_buffer = curr["atr"] * 0.2
 
-        if today_4h.empty:
+        #   --- BULLISH CONFIRMATIONS   ---
+        if (bos == "BULL" or choch == "BULL") and htf_trend == "BULL":
+            # Setup 1: OB Sweep/Tap + BOS
+            tapped_ob = any(recent_low <= ob["high"] for ob in active_obs if ob["type"] == "BULL")
+            if tapped_ob:
+                return {
+                    "strategy": "OB Bounce + Confirmation",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 87.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_low - atr_buffer,
+                }
+
+            # Setup 4: FVG Bounce (Must align with VWAP for continuations)
+            if vwap_trend == "BULL":
+                tapped_fvg = any(recent_low <= fvg["high"] for fvg in active_fvgs if fvg["type"] == "BULL")
+                if tapped_fvg:
+                    return {
+                        "strategy": "FVG Bounce + Confirmation",
+                        "signal": "BUY",
+                        "direction": "LONG",
+                        "confidence": 85.0,
+                        "order_type": "MARKET",
+                        "suggested_sl": recent_low - atr_buffer,
+                    }
+
+        #   --- BEARISH CONFIRMATIONS   ---
+        if (bos == "BEAR" or choch == "BEAR") and htf_trend == "BEAR":
+            # Setup 1: OB Sweep/Tap + BOS
+            tapped_ob = any(recent_high >= ob["low"] for ob in active_obs if ob["type"] == "BEAR")
+            if tapped_ob:
+                return {
+                    "strategy": "OB Bounce + Confirmation",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 87.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_high + atr_buffer,
+                }
+
+            # Setup 4: FVG Bounce (Must align with VWAP for continuations)
+            if vwap_trend == "BEAR":
+                tapped_fvg = any(recent_high >= fvg["low"] for fvg in active_fvgs if fvg["type"] == "BEAR")
+                if tapped_fvg:
+                    return {
+                        "strategy": "FVG Bounce + Confirmation",
+                        "signal": "SELL",
+                        "direction": "SHORT",
+                        "confidence": 85.0,
+                        "order_type": "MARKET",
+                        "suggested_sl": recent_high + atr_buffer,
+                    }
+
+        return None
+
+    def _ifvg_continuation(
+        self,
+        curr: pd.Series,
+        df: pd.DataFrame,
+        htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        structure: Literal["BULL", "BEAR", "FLAT"],
+        active_fvgs: List[Dict],
+        vwap_trend: str,
+    ) -> Optional[Dict]:
+        """
+        Setup 3: Trades failed FVGs (Inversions) aligning with VWAP trend continuation.
+        """
+        bos = structure.get("bos")
+        atr_buffer = curr["atr"] * 0.2
+
+        if bos == "BULL" and vwap_trend == "BULL" and htf_trend == "BULL":
+            recent_low = df["low"].tail(4).min()
+            # If a BEAR FVG is below price and price bounces off its upper boundary -> IFVG
+            tapped_ifvg = any(
+                recent_low <= fvg["high"] and curr["close"] > fvg["high"]
+                for fvg in active_fvgs
+                if fvg["type"] == "BEAR"
+            )
+            if tapped_ifvg:
+                return {
+                    "strategy": "IFVG Continuation",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 84.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_low - atr_buffer,
+                }
+
+        if bos == "BEAR" and vwap_trend == "BEAR" and htf_trend == "BEAR":
+            recent_high = df["high"].tail(4).max()
+            # If a BULL FVG is above price and price rejects off its lower boundary -> IFVG
+            tapped_ifvg = any(
+                recent_high >= fvg["low"] and curr["close"] < fvg["low"] for fvg in active_fvgs if fvg["type"] == "BULL"
+            )
+            if tapped_ifvg:
+                return {
+                    "strategy": "IFVG Continuation",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 84.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_high + atr_buffer,
+                }
+
+        return None
+
+    def _vwap_bounce(
+        self,
+        curr: pd.Series,
+        df: pd.DataFrame,
+        htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        structure: Literal["BULL", "BEAR", "FLAT"],
+        vwap_trend: str,
+    ) -> Optional[Dict]:
+        """
+        Setup 7: Price taps daily VWAP, holds it, and confirms with a structural shift.
+        """
+        bos = structure.get("bos")
+        choch = structure.get("choch")
+
+        if not (bos or choch):
             return None
 
-        # Get earliest candle of today
-        first_4h_candle = today_4h.iloc[0]
-        zone_high = first_4h_candle["high"]
-        zone_low = first_4h_candle["low"]
+        atr_buffer = curr["atr"] * 0.2
 
-        # 2. Check 5M conditions (Breakout + Retest)
-        prev_5m = df_5m.iloc[-2]
+        if (bos == "BULL" or choch == "BULL") and htf_trend == "BULL":
+            vwap_val = curr.get("vwap", 0)
+            recent_low = df["low"].tail(4).min()
+            if recent_low <= vwap_val and curr["close"] > vwap_val:
+                return {
+                    "strategy": "VWAP Bounce + Confirmation",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 83.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_low - atr_buffer,
+                }
 
-        atr_5m = curr_5m["atr"]
-
-        # --- LONG CONDITION ---
-        # Did price previously break BELOW the 4H low, and now the current 5M candle body re-entered ABOVE it?
-        if prev_5m["low"] < zone_low and curr_5m["close"] > zone_low and curr_5m["open"] < curr_5m["close"]:
-            sl = min(curr_5m["low"], prev_5m["low"]) - (atr_5m * 0.2)
-            risk = curr_5m["close"] - sl
-            if risk <= 0:
-                return None
-
-            return {
-                "strategy": "4H Zone Retest Scalp",
-                "signal": "BUY",
-                "direction": "LONG",
-                "confidence": 88.0,
-                "order_type": "MARKET",
-                "suggested_sl": sl,
-                "suggested_tp": curr_5m["close"] + (risk * 2.0),  # Enforces Minimum 2R
-            }
-
-        # --- SHORT CONDITION ---
-        # Did price previously break ABOVE the 4H high, and now the current 5M candle body re-entered BELOW it?
-        elif prev_5m["high"] > zone_high and curr_5m["close"] < zone_high and curr_5m["open"] > curr_5m["close"]:
-            sl = max(curr_5m["high"], prev_5m["high"]) + (atr_5m * 0.2)
-            risk = sl - curr_5m["close"]
-            if risk <= 0:
-                return None
-
-            return {
-                "strategy": "4H Zone Retest Scalp",
-                "signal": "SELL",
-                "direction": "SHORT",
-                "confidence": 88.0,
-                "order_type": "MARKET",
-                "suggested_sl": sl,
-                "suggested_tp": curr_5m["close"] - (risk * 2.0),  # Enforces Minimum 2R
-            }
+        if (bos == "BEAR" or choch == "BEAR") and htf_trend == "BEAR":
+            vwap_val = curr.get("vwap", float("inf"))
+            recent_high = df["high"].tail(4).max()
+            if recent_high >= vwap_val and curr["close"] < vwap_val:
+                return {
+                    "strategy": "VWAP Bounce + Confirmation",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 83.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": recent_high + atr_buffer,
+                }
 
         return None

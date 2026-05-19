@@ -4,7 +4,7 @@ import math
 import time
 import uuid
 
-from src.config import TIMEFRAME
+from src.config import CANDLE_LIMIT, TIMEFRAME
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class OfflineManager:
         entry = signal["price"]
         is_long = signal["direction"] == "LONG"
         order_type = signal.get("order_type", "MARKET")
-        trade_duration = 14400
+        trade_duration = 14400  # Max tracking 4 hours
 
         outcome = None
         pnl = 0.0
@@ -84,8 +84,8 @@ class OfflineManager:
             self.engine.ai_engine.register_active_trade(symbol)
 
             elapsed = time.time() - start_time
-            candles_needed = math.ceil(elapsed / 900) + 5
-            klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, min(candles_needed, 1000))
+            candles_needed = math.ceil(elapsed / 60) + 5
+            klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, min(candles_needed, CANDLE_LIMIT))
 
             outcome, pnl, filled = self._calculate_offline_result(signal, start_time, klines)
 

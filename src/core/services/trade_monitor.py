@@ -7,14 +7,14 @@ logger = logging.getLogger(__name__)
 
 
 class TradeMonitor:
-    """Trading monitor for all active trades."""
+    """Trading monitor for all active trades based on pure price action ticks."""
 
     def __init__(self, engine):
         self.engine = engine
 
     async def _ghost_track_tp3(self, symbol: str, entry: float, tp3: float, is_long: bool, point: float):
-        """Silently tracks if TP3 is eventually hit after an early exit."""
-        logger.info(f"👻 Ghost tracking {symbol} for TP3 hit...")
+        """Silently tracks if TP3 is eventually hit after an early Breakeven/TP1 exit."""
+        logger.info(f"👻 Ghost tracking {symbol} for TP3 hit ...")
         start = time.time()
         while time.time() - start < 14400 and self.engine.is_running:  # Track up to 4 hrs
             tick = await self.engine.provider.get_current_tick(symbol)
@@ -35,8 +35,9 @@ class TradeMonitor:
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
         """
-        Monitors price and Logs Data for ML.
+        Monitors live market ticks against SMC dynamic targets and logs the outcome.
         """
+
         logger.info(f"👀 Monitoring trade {symbol} for outcome...")
         await self.engine.db.save_active_trade(symbol, signal)
 
@@ -80,9 +81,8 @@ class TradeMonitor:
                 current_bid = tick.bid
                 current_ask = tick.ask
 
-                # --- 1. TRADE MONITORING (FILLED) ---
+                #   --- 1. TRADE MONITORING (FILLED)   ---
                 curr_price = current_bid if is_long else current_ask
-
                 curr_dist = (current_bid - entry) if is_long else (entry - current_ask)
                 max_favorable_dist = max(max_favorable_dist, curr_dist)
 
@@ -101,7 +101,7 @@ class TradeMonitor:
                     final_pnl = points_lost * tick_value * lot_size
                     break
 
-                # 2. Multi-TP Milestone Tracking
+                # 2. Multi-TP Milestone Tracking (Trailing logic)
                 if not tp1_hit and tp1 is not None:
                     hit_tp1 = curr_price >= tp1 if is_long else curr_price <= tp1
                     if hit_tp1:
@@ -109,7 +109,7 @@ class TradeMonitor:
                         be_stage = max(be_stage, 1)
                         # Move SL to Breakeven (+ slight buffer)
                         sl = entry + (20 * point) if is_long else entry - (20 * point)
-                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP1!* Moving SL to Breakeven.")
+                        self.engine.notifier.send_message(f"💰 *{symbol} Hit TP1!* Moving SL to Breakeven.")
 
                 if tp1_hit and not tp2_hit and tp2 is not None:
                     hit_tp2 = curr_price >= tp2 if is_long else curr_price <= tp2
@@ -118,7 +118,7 @@ class TradeMonitor:
                         be_stage = max(be_stage, 2)
                         # Move SL to TP1
                         sl = tp1
-                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP2!* Trailing SL to TP1.")
+                        self.engine.notifier.send_message(f"💰 *{symbol} Hit TP2!* Trailing SL to TP1.")
 
                 # 3. Final TP Evaluation (TP3)
                 if tp3 is not None:
@@ -134,7 +134,7 @@ class TradeMonitor:
 
                 await asyncio.sleep(interval)
 
-            # --- POST TRADE PROCESSING ---
+            #   --- POST TRADE PROCESSING   ---
             await self.engine.db.delete_active_trade(symbol)
             self.engine.active_signals = [s for s in self.engine.active_signals if s["symbol"] != symbol]
 
@@ -157,7 +157,7 @@ class TradeMonitor:
             if is_filled:
                 self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won, final_pnl, currency)
 
-                # Ghost Tracking for TP3
+                # Initiate Ghost Tracking for Early Exits
                 if "Stopped in Profit/BE" in outcome:
                     asyncio.create_task(self._ghost_track_tp3(symbol, entry, tp3, is_long, point))
 

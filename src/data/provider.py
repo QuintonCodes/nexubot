@@ -81,8 +81,7 @@ class DataProvider:
                 logger.error(f"❌ MT5 Path not found: {self._path}")
                 return False
 
-            # 2. Initialize with Timeout (Fix for IPC Timeout)
-            # We give it 60 seconds to launch and connect.
+            # 2. Initialize with Timeout
             if not mt5.initialize(path=self._path, timeout=60000):
                 logger.warning("⚠️ MT5 Init failed. Attempting to restart terminal...")
                 self._kill_terminal()
@@ -110,38 +109,14 @@ class DataProvider:
     def _sync_get_market_watch_symbols(self) -> Dict:
         """
         Fetches all symbols currently visible in MT5 Market Watch.
-        Categorizes them into Crypto and Forex based on simple heuristics.
+        Strictly filters to only include the highly targeted assets defined in config.
         """
+
         if not self.connected:
             return {}
 
-        # Fallbacks from Config (Prioritized)
-        priority_crypto = set(FALLBACK_CRYPTO)
-        priority_forex = set(FALLBACK_FOREX)
-        priority_indices = set(FALLBACK_INDICES)
-        priority_metals = set(FALLBACK_METALS)
-
-        # Also allow major pairs explicitly
-        major_forex_bases = [
-            "EURUSD",
-            "GBPUSD",
-            "USDJPY",
-            "USDCAD",
-            "AUDUSD",
-            "XAUUSD",
-            "XAGUSD",
-            "GBPJPY",
-            "NZDUSD",
-            "BTCJPY",
-            "CHFJPY",
-            "EURJPY",
-            "AUDJPY",
-            "CADJPY",
-            "EURAUD",
-        ]
-        major_crypto_bases = ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BTCUSDT", "ETHUSDT"]
-        major_indices_bases = ["US30", "NAS100", "GER30", "SPX500", "UK100", "JPN225"]
-        major_metal_bases = ["XAGUSD", "XAUUSD"]
+        # Combine all strictly allowed targets from config
+        allowed_symbols = set(FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
 
         # Get only selected symbols (Market Watch)
         symbols = mt5.symbols_get(selected=True)
@@ -152,20 +127,16 @@ class DataProvider:
 
         for s in symbols:
             name = s.name.upper()
+
             # 1. Ignore Trash
             if s.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED or not s.visible:
                 continue
             if any(ign in name for ign in IGNORED_CURRENCIES):
                 continue
 
-            # 2. Strict Filtering Logic
-            is_priority = (name in priority_crypto) or (name in priority_forex)
-            is_major = any(m in name for m in major_forex_bases) or any(m in name for m in major_crypto_bases)
-            is_index = any(m in name for m in major_indices_bases)
-            is_metal = any(m in name for m in major_metal_bases)
-
-            # Only add if it's in our Priority List or is a Major Pair
-            if not (is_priority or is_major or is_index or is_metal):
+            # Strict Targeting: Only process symbols explicitly defined in config
+            is_allowed = name in allowed_symbols or any(a in name for a in allowed_symbols)
+            if not is_allowed:
                 continue
 
             category = self.get_symbol_type(s.name)
@@ -178,18 +149,17 @@ class DataProvider:
             else:
                 categorized["forex"].append(s.name)
 
-        # Fallback if empty (Force default list)
+        # Fallback if Market Watch is empty or missing them
         if not categorized["crypto"] and not categorized["forex"] and not categorized["metals"]:
-            categorized["crypto"] = list(priority_crypto)
-            categorized["forex"] = list(priority_forex)
-            categorized["indices"] = list(priority_indices)
-            categorized["metals"] = list(priority_metals)
+            categorized["crypto"] = list(FALLBACK_CRYPTO)
+            categorized["forex"] = list(FALLBACK_FOREX)
+            categorized["indices"] = list(FALLBACK_INDICES)
+            categorized["metals"] = list(FALLBACK_METALS)
 
         return categorized
 
     def _sync_get_rates(self, symbol: str, timeframe: int, limit: int) -> List[Dict]:
         """Fetches candles with Synchronization Check."""
-        # 1. Select symbol in Market Watch to trigger sync
         if not self.connected:
             return []
 
@@ -204,7 +174,7 @@ class DataProvider:
             logger.warning(f"Symbol {symbol} not found in Market Watch.")
             return []
 
-        # 2. Attempt to fetch data with retries
+        # Attempt to fetch data with retries
         rates = None
         for _ in range(3):
             rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, limit)

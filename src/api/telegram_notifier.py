@@ -5,7 +5,7 @@ from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from src.analysis.indicators import TechnicalAnalyzer
-from src.config import VERSION
+from src.config import VERSION, TIMEFRAME
 
 logger = logging.getLogger(__name__)
 
@@ -13,13 +13,17 @@ logger = logging.getLogger(__name__)
 class TelegramNotifier:
     """
     Handles all asynchronous Telegram communication.
-    Responsible for broadcasting signals, analyzing markets on demand, and daily reports.
+    Responsible for broadcasting signals, analyzing markets on demand, and session focus control.
     """
 
     def __init__(self, engine=None):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.engine = engine
+
+        # Initialize focused_symbols dynamically for the scanner to read
+        if self.engine:
+            self.engine.focused_symbols = []
 
         self.app = (
             Application.builder()
@@ -36,6 +40,7 @@ class TelegramNotifier:
         # Register commands
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("analyze", self.cmd_analyze))
+        self.app.add_handler(CommandHandler("focus", self.cmd_focus))
         self.app.add_error_handler(self._error_handler)
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -53,7 +58,31 @@ class TelegramNotifier:
             logger.warning(f"Failed to send Telegram message: {e}")
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("🚀 *Nexubot Online*\nUse `/analyze [SYMBOL]` to scan.", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🚀 *Nexubot {VERSION} Online*\n"
+            f"• `/analyze [SYMBOL]` to run a deep SMC scan.\n"
+            f"• `/focus [SYMBOLS]` to isolate specific pairs (e.g., `/focus XAUUSDm EURUSDm`).\n"
+            f"• `/focus ALL` to resume full market scanning.",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Allows the user to select specific symbols to focus the scanner on."""
+        if not self.engine:
+            return
+
+        if not context.args or context.args[0].upper() == "ALL":
+            self.engine.focused_symbols = []
+            await update.message.reply_text(
+                "🌐 *Focus Mode Disabled:* Scanning ALL allowed symbols.", parse_mode="Markdown"
+            )
+        else:
+            symbols = [s.upper() for s in context.args]
+            self.engine.focused_symbols = symbols
+            await update.message.reply_text(
+                f"🎯 *Focus Mode Active:*\nThe engine is now exclusively hunting setups on: *{', '.join(symbols)}*",
+                parse_mode="Markdown",
+            )
 
     async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args or not self.engine:
@@ -61,32 +90,27 @@ class TelegramNotifier:
             return
 
         symbol = context.args[0]
-        await update.message.reply_text(f"🔍 *Deep Scanning {symbol}...*", parse_mode="Markdown")
+        await update.message.reply_text(f"🔍 *Deep SMC Scanning {symbol} ...*", parse_mode="Markdown")
 
         try:
-            klines = await self.engine.provider.fetch_klines(symbol, "M15", 200)
+            klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, 500)
             if not klines:
                 await update.message.reply_text(f"❌ Could not fetch data for {symbol}.")
                 return
 
-            df = self.engine.ai_engine.prepare_data(klines, heavy=True)
+            df = self.engine.ai_engine.prepare_data(klines)
             curr = df.iloc[-1]
             htf_trend = await self.engine.ai_engine._get_htf_trend(symbol, self.engine.provider)
             structure = TechnicalAnalyzer.detect_structure(df)
 
-            avg_atr = df["atr"].tail(24).mean()
-            vol_ratio = curr["atr"] / avg_atr if avg_atr > 0 else 1.0
-            dist_vwap = (curr["close"] - curr["vwap"]) / curr["vwap"] if curr["vwap"] != 0 else 0.0
-
             active_fvgs = []
             active_obs = []
-            active_breakers = []
 
             if len(df) >= 20:
                 for i in range(len(df) - 20, len(df) - 1):
                     c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
 
-                    # --- FVG Detection ---
+                    #   --- FVG Detection   ---
                     if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
                         fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
                         if not any(df.iloc[j]["low"] < fvg["low"] for j in range(i + 1, len(df))):
@@ -96,7 +120,7 @@ class TelegramNotifier:
                         if not any(df.iloc[j]["high"] > fvg["high"] for j in range(i + 1, len(df))):
                             active_fvgs.append(fvg)
 
-                    # --- OB & Breaker Detection ---
+                    #   --- OB & Breaker Detection   ---
                     ob_c1, ob_c2 = df.iloc[i - 1], df.iloc[i]
                     if (
                         ob_c1["close"] < ob_c1["open"]
@@ -108,10 +132,6 @@ class TelegramNotifier:
                         for j in range(i + 1, len(df)):
                             if df.iloc[j]["low"] < ob["low"]:
                                 is_broken = True
-                                # Failed Bullish OB becomes a Bearish Breaker
-                                breaker = {"type": "BEAR", "high": ob["high"], "low": ob["low"]}
-                                if not any(df.iloc[k]["high"] > breaker["high"] for k in range(j + 1, len(df))):
-                                    active_breakers.append(breaker)
                                 break
                         if not is_broken:
                             active_obs.append(ob)
@@ -126,39 +146,44 @@ class TelegramNotifier:
                         for j in range(i + 1, len(df)):
                             if df.iloc[j]["high"] > ob["high"]:
                                 is_broken = True
-                                # Failed Bearish OB becomes a Bullish Breaker
-                                breaker = {"type": "BULL", "high": ob["high"], "low": ob["low"]}
-                                if not any(df.iloc[k]["low"] < breaker["low"] for k in range(j + 1, len(df))):
-                                    active_breakers.append(breaker)
                                 break
                         if not is_broken:
                             active_obs.append(ob)
 
-            # Calculate precise distances
-            dist_nearest_fvg = 0.0
-            if active_fvgs:
-                nearest = min(active_fvgs, key=lambda x: abs(x["high"] - curr["close"]))
-                dist_nearest_fvg = abs(nearest["high"] - curr["close"]) / curr["close"]
+            # Calculate precise distances to liquidity
+            all_pois = active_fvgs + active_obs
+            dist_nearest_poi = 0.0
+            in_fvg = 0
+            in_ob = 0
 
-            is_in_breaker_val = 0.0
-            if any(b["low"] <= curr["close"] <= b["high"] for b in active_breakers):
-                is_in_breaker_val = 1.0
+            if all_pois:
+                nearest = min(
+                    all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"]))
+                )
+                dist_nearest_poi = (
+                    min(abs(nearest["high"] - curr["close"]), abs(nearest["low"] - curr["close"])) / curr["close"]
+                )
+
+            if any(fvg["low"] <= curr["close"] <= fvg["high"] for fvg in active_fvgs):
+                in_fvg = 1
+            if any(ob["low"] <= curr["close"] <= ob["high"] for ob in active_obs):
+                in_ob = 1
+
+            vol_spike = 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0
+            vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
 
             features = {
-                "dist_to_vwap": dist_vwap,
-                "mtf_trend_alignment": 1 if htf_trend == structure["structure"] else -1,
-                "hour_norm": 0.5,
-                "volatility_ratio": vol_ratio,
-                "dist_to_nearest_fvg": dist_nearest_fvg,
-                "is_in_breaker": is_in_breaker_val,
-                "htf_adx_strength": curr["adx"],
-                "poi_status": 1.0 if len(active_fvgs) > 0 or len(active_obs) > 0 else 0.0,
+                "is_htf_aligned": 1 if (htf_trend == structure["structure"] and htf_trend != "FLAT") else -1,
+                "is_liquidity_swept": 0,  # Reserved for active sweep detection
+                "is_in_fvg": in_fvg,
+                "is_in_orderblock": in_ob,
+                "structural_break": 1 if structure["bos"] else (2 if structure["choch"] else 0),
+                "session_volume_spike": vol_spike,
+                "distance_to_poi": dist_nearest_poi,
             }
 
             nn_result = self.engine.ai_engine.nn_brain.predict(features)
             win_prob = nn_result["prob"] * 100
-
-            vol_msg = "⚠️ High Volatility (Expansion Phase)" if vol_ratio > 1.5 else "🌊 Stable (Consolidation Phase)"
 
             if win_prob > 80:
                 ai_thought = "Highly favorable setup forming. Aligning with HTF institutional flow."
@@ -168,12 +193,14 @@ class TelegramNotifier:
                 ai_thought = "Poor conditions. High probability of chop or false breakouts. Avoiding."
 
             msg = (
-                f"🧠 *Deep AI Analysis: {symbol}*\n\n"
-                f"📊 *HTF Flow:* {htf_trend}\n"
-                f"🧭 *Local Structure:* {structure['structure']} (Last BOS: {structure.get('bos', 'None')})\n"
-                f"🌊 *Market Condition:* {vol_msg}\n"
-                f"📈 *ADX Momentum:* {curr['adx']:.1f}\n\n"
+                f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
+                f"📊 *HTF Flow (1H):* {htf_trend}\n"
+                f"🧭 *Local Structure ({TIMEFRAME}):* {structure['structure']} (Last Break: {structure.get('bos') or structure.get('choch') or 'None'})\n"
+                f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_obs)} OBs Active\n"
+                f"🌊 *VWAP State:* {vwap_trend}\n"
+                f"🔥 *Volume Anomaly:* {'Detected' if vol_spike else 'Normal'}\n\n"
                 f"🤖 *Neural Output:*\n"
+                f"• _Trend Alignment:_ {'Aligned ✅' if features['is_htf_aligned'] == 1 else 'Counter ⚠️'}\n"
                 f"• _Calculated Win Probability:_ *{win_prob:.1f}%*\n"
                 f"• _AI Conclusion:_ {ai_thought}"
             )
@@ -216,6 +243,7 @@ class TelegramNotifier:
             f"{header}\n\n"
             f"📈 *Pair:* {symbol}\n"
             f"🧭 *Direction:* {direction}\n"
+            f"🧩 *Setup:* {signal.get('strategy', 'SMC Execution')}\n"
             f"{volatility_warning}\n"
             f"🧠 *AI Confidence:* {signal['confidence']:.1f}%\n\n"
             f"🎯 *Entry:* {signal['price']:.5f}\n"
@@ -233,7 +261,7 @@ class TelegramNotifier:
             f"🤖 *Engine Status:* Deep Learning Linked\n"
             f"📊 *Historical Win Rate:* {win_rate:.1f}%\n"
             f"🔄 *Total Trades Analyzed:* {total_trades}\n\n"
-            f"📡 _Scanning live markets for high-probability setups..._"
+            f"📡 _Scanning live markets for high-probability setups ..._"
         )
         self.send_message(msg)
 
