@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Union
 
 
 class StrategyAnalyzer:
@@ -9,68 +9,102 @@ class StrategyAnalyzer:
 
     def analyze_router(
         self,
-        curr: pd.Series,
+        curr: Union[pd.Series, dict],
         df: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
         active_fvgs: List[Dict],
         active_obs: List[Dict],
-        structure: Literal["BULL", "BEAR", "FLAT"],
+        structure: dict,
     ) -> Optional[Dict]:
         """
         Unified SMC Strategy Router.
         Enforces HTF alignment and executes strictly on structural confirmations.
         """
-
-        # 1. Calculate Daily Liquidity (PDH / PDL) for Setup 6
+        # 1. Calculate Daily Liquidity (PDH / PDL)
         pdh, pdl = None, None
-        if "time" in df.columns:
-            df_temp = df.copy()
-            df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
-            today = df_temp["date"].iloc[-1]
-            prev_days = df_temp[df_temp["date"] < today]
-            if not prev_days.empty:
-                last_day = prev_days["date"].iloc[-1]
-                yesterday_df = prev_days[prev_days["date"] == last_day]
-                pdh = yesterday_df["high"].max()
-                pdl = yesterday_df["low"].min()
+        if isinstance(curr, dict):
+            # Backtest: Extremely fast O(1) precalculated fetching
+            pdh = curr.get("pdh")
+            pdl = curr.get("pdl")
+        else:
+            # Live Execution: Calculate dynamically
+            if "time" in df.columns:
+                df_temp = df.copy()
+                df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
+                today = df_temp["date"].iloc[-1]
+                prev_days = df_temp[df_temp["date"] < today]
+                if not prev_days.empty:
+                    last_day = prev_days["date"].iloc[-1]
+                    yesterday_df = prev_days[prev_days["date"] == last_day]
+                    pdh = yesterday_df["high"].max()
+                    pdl = yesterday_df["low"].min()
 
         daily_levels = {"pdh": pdh, "pdl": pdl}
 
         # 2. Establish VWAP Trend State
-        vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
+        vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
+        close_price = curr["close"]
+        vwap_trend = "BULL" if close_price > vwap_val else "BEAR"
 
-        #   -----------------------------------------------------------------
-        # Evaluate SMC Setups
-        #   -----------------------------------------------------------------
+        # 3. GLOBAL LIQUIDITY SWEEP DETECTION
+        # Ensures accuracy regardless of which strategy ultimately triggers
+        recent_low_5 = (
+            curr.get("recent_low_5")
+            if isinstance(curr, dict) and curr.get("recent_low_5") is not None
+            else df["low"].tail(5).min()
+        )
+        recent_high_5 = (
+            curr.get("recent_high_5")
+            if isinstance(curr, dict) and curr.get("recent_high_5") is not None
+            else df["high"].tail(5).max()
+        )
+
+        is_liquidity_swept = 0
+        last_low = structure.get("last_low")
+        last_high = structure.get("last_high")
+
+        # 2 = Major Sweep (Daily), 1 = Internal Sweep (Local Structure)
+        if pdl and recent_low_5 < pdl and close_price > pdl:
+            is_liquidity_swept = 2
+        elif pdh and recent_high_5 > pdh and close_price < pdh:
+            is_liquidity_swept = 2
+        elif last_low and recent_low_5 < last_low and close_price > last_low:
+            is_liquidity_swept = 1
+        elif last_high and recent_high_5 > last_high and close_price < last_high:
+            is_liquidity_swept = 1
+
+        # 4. Evaluate SMC Setups
+        signal = None
 
         # Setups 2 & 6: Liquidity Sweeps (Local Pivots & Daily S/R)
-        res = self._smc_liquidity_sweep(curr, df, htf_trend, structure, daily_levels)
-        if res:
-            return res
+        if not signal:
+            signal = self._smc_liquidity_sweep(curr, df, htf_trend, structure, daily_levels)
 
         # Setups 1 & 4: POI Reversals (Order Blocks & FVGs + Structural Confirmation)
-        res = self._smc_poi_reversal(curr, df, htf_trend, structure, active_fvgs, active_obs, vwap_trend)
-        if res:
-            return res
+        if not signal:
+            signal = self._smc_poi_reversal(curr, df, htf_trend, structure, active_fvgs, active_obs, vwap_trend)
 
         # Setup 3: IFVG Continuation
-        res = self._ifvg_continuation(curr, df, htf_trend, structure, active_fvgs, vwap_trend)
-        if res:
-            return res
+        if not signal:
+            signal = self._ifvg_continuation(curr, df, htf_trend, structure, active_fvgs, vwap_trend)
 
         # Setup 7: VWAP Bounce
-        res = self._vwap_bounce(curr, df, htf_trend, structure, vwap_trend)
-        if res:
-            return res
+        if not signal:
+            signal = self._vwap_bounce(curr, df, htf_trend, structure, vwap_trend)
+
+        # 5. Inject Global Liquidity Truth into the Final Signal
+        if signal:
+            signal["is_liquidity_swept"] = is_liquidity_swept
+            return signal
 
         return None
 
     def _smc_liquidity_sweep(
         self,
-        curr: pd.Series,
+        curr: dict,
         df: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
-        structure: Literal["BULL", "BEAR", "FLAT"],
+        structure: dict,
         daily_levels: dict,
     ) -> Optional[Dict]:
         """
@@ -88,13 +122,19 @@ class StrategyAnalyzer:
         pdh = daily_levels.get("pdh")
         atr_buffer = curr["atr"] * 0.2
 
-        # Lookback window to verify the sweep happened right before the BOS
-        recent_low = df["low"].tail(5).min()
-        recent_high = df["high"].tail(5).max()
+        recent_low = (
+            curr.get("recent_low_5")
+            if isinstance(curr, dict) and curr.get("recent_low_5") is not None
+            else df["low"].tail(5).min()
+        )
+        recent_high = (
+            curr.get("recent_high_5")
+            if isinstance(curr, dict) and curr.get("recent_high_5") is not None
+            else df["high"].tail(5).max()
+        )
 
         #   --- BULLISH SWEEPS   ---
         if bos == "BULL" or choch == "BULL":
-            # Setup 6: Daily Sweep + Structural Shift
             if pdl and recent_low < pdl and curr["close"] > pdl:
                 return {
                     "strategy": "Daily Liquidity Sweep",
@@ -105,7 +145,6 @@ class StrategyAnalyzer:
                     "suggested_sl": recent_low - atr_buffer,
                 }
 
-            # Setup 2: Immediate Trap (Local Pivot Sweep + CHoCH/BOS)
             if last_low and recent_low < last_low and curr["close"] > last_low:
                 return {
                     "strategy": "Local Sweep Trap",
@@ -118,7 +157,6 @@ class StrategyAnalyzer:
 
         #   --- BEARISH SWEEPS   ---
         if bos == "BEAR" or choch == "BEAR":
-            # Setup 6: Daily Sweep + Structural Shift
             if pdh and recent_high > pdh and curr["close"] < pdh:
                 return {
                     "strategy": "Daily Liquidity Sweep",
@@ -129,7 +167,6 @@ class StrategyAnalyzer:
                     "suggested_sl": recent_high + atr_buffer,
                 }
 
-            # Setup 2: Immediate Trap (Local Pivot Sweep + CHoCH/BOS)
             if last_high and recent_high > last_high and curr["close"] < last_high:
                 return {
                     "strategy": "Local Sweep Trap",
@@ -144,10 +181,10 @@ class StrategyAnalyzer:
 
     def _smc_poi_reversal(
         self,
-        curr: pd.Series,
+        curr: Union[pd.Series, dict],
         df: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
-        structure: Literal["BULL", "BEAR", "FLAT"],
+        structure: dict,
         active_fvgs: List[Dict],
         active_obs: List[Dict],
         vwap_trend: str,
@@ -161,13 +198,20 @@ class StrategyAnalyzer:
         if not (bos or choch):
             return None
 
-        recent_low = df["low"].tail(4).min()
-        recent_high = df["high"].tail(4).max()
+        recent_low = (
+            curr.get("recent_low_4")
+            if isinstance(curr, dict) and curr.get("recent_low_4") is not None
+            else df["low"].tail(4).min()
+        )
+        recent_high = (
+            curr.get("recent_high_4")
+            if isinstance(curr, dict) and curr.get("recent_high_4") is not None
+            else df["high"].tail(4).max()
+        )
         atr_buffer = curr["atr"] * 0.2
 
         #   --- BULLISH CONFIRMATIONS   ---
         if (bos == "BULL" or choch == "BULL") and htf_trend == "BULL":
-            # Setup 1: OB Sweep/Tap + BOS
             tapped_ob = any(recent_low <= ob["high"] for ob in active_obs if ob["type"] == "BULL")
             if tapped_ob:
                 return {
@@ -179,7 +223,6 @@ class StrategyAnalyzer:
                     "suggested_sl": recent_low - atr_buffer,
                 }
 
-            # Setup 4: FVG Bounce (Must align with VWAP for continuations)
             if vwap_trend == "BULL":
                 tapped_fvg = any(recent_low <= fvg["high"] for fvg in active_fvgs if fvg["type"] == "BULL")
                 if tapped_fvg:
@@ -194,7 +237,6 @@ class StrategyAnalyzer:
 
         #   --- BEARISH CONFIRMATIONS   ---
         if (bos == "BEAR" or choch == "BEAR") and htf_trend == "BEAR":
-            # Setup 1: OB Sweep/Tap + BOS
             tapped_ob = any(recent_high >= ob["low"] for ob in active_obs if ob["type"] == "BEAR")
             if tapped_ob:
                 return {
@@ -206,7 +248,6 @@ class StrategyAnalyzer:
                     "suggested_sl": recent_high + atr_buffer,
                 }
 
-            # Setup 4: FVG Bounce (Must align with VWAP for continuations)
             if vwap_trend == "BEAR":
                 tapped_fvg = any(recent_high >= fvg["low"] for fvg in active_fvgs if fvg["type"] == "BEAR")
                 if tapped_fvg:
@@ -223,10 +264,10 @@ class StrategyAnalyzer:
 
     def _ifvg_continuation(
         self,
-        curr: pd.Series,
+        curr: Union[pd.Series, dict],
         df: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
-        structure: Literal["BULL", "BEAR", "FLAT"],
+        structure: dict,
         active_fvgs: List[Dict],
         vwap_trend: str,
     ) -> Optional[Dict]:
@@ -237,8 +278,11 @@ class StrategyAnalyzer:
         atr_buffer = curr["atr"] * 0.2
 
         if bos == "BULL" and vwap_trend == "BULL" and htf_trend == "BULL":
-            recent_low = df["low"].tail(4).min()
-            # If a BEAR FVG is below price and price bounces off its upper boundary -> IFVG
+            recent_low = (
+                curr.get("recent_low_4")
+                if isinstance(curr, dict) and curr.get("recent_low_4") is not None
+                else df["low"].tail(4).min()
+            )
             tapped_ifvg = any(
                 recent_low <= fvg["high"] and curr["close"] > fvg["high"]
                 for fvg in active_fvgs
@@ -255,8 +299,11 @@ class StrategyAnalyzer:
                 }
 
         if bos == "BEAR" and vwap_trend == "BEAR" and htf_trend == "BEAR":
-            recent_high = df["high"].tail(4).max()
-            # If a BULL FVG is above price and price rejects off its lower boundary -> IFVG
+            recent_high = (
+                curr.get("recent_high_4")
+                if isinstance(curr, dict) and curr.get("recent_high_4") is not None
+                else df["high"].tail(4).max()
+            )
             tapped_ifvg = any(
                 recent_high >= fvg["low"] and curr["close"] < fvg["low"] for fvg in active_fvgs if fvg["type"] == "BULL"
             )
@@ -274,10 +321,10 @@ class StrategyAnalyzer:
 
     def _vwap_bounce(
         self,
-        curr: pd.Series,
+        curr: Union[pd.Series, dict],
         df: pd.DataFrame,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
-        structure: Literal["BULL", "BEAR", "FLAT"],
+        structure: dict,
         vwap_trend: str,
     ) -> Optional[Dict]:
         """
@@ -290,10 +337,14 @@ class StrategyAnalyzer:
             return None
 
         atr_buffer = curr["atr"] * 0.2
+        vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
 
         if (bos == "BULL" or choch == "BULL") and htf_trend == "BULL":
-            vwap_val = curr.get("vwap", 0)
-            recent_low = df["low"].tail(4).min()
+            recent_low = (
+                curr.get("recent_low_4")
+                if isinstance(curr, dict) and curr.get("recent_low_4") is not None
+                else df["low"].tail(4).min()
+            )
             if recent_low <= vwap_val and curr["close"] > vwap_val:
                 return {
                     "strategy": "VWAP Bounce + Confirmation",
@@ -305,8 +356,11 @@ class StrategyAnalyzer:
                 }
 
         if (bos == "BEAR" or choch == "BEAR") and htf_trend == "BEAR":
-            vwap_val = curr.get("vwap", float("inf"))
-            recent_high = df["high"].tail(4).max()
+            recent_high = (
+                curr.get("recent_high_4")
+                if isinstance(curr, dict) and curr.get("recent_high_4") is not None
+                else df["high"].tail(4).max()
+            )
             if recent_high >= vwap_val and curr["close"] < vwap_val:
                 return {
                     "strategy": "VWAP Bounce + Confirmation",

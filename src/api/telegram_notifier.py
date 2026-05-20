@@ -51,11 +51,17 @@ class TelegramNotifier:
         """Helper to return the correct currency symbol based on account base."""
         return "R" if currency.upper() == "ZAR" else "$"
 
-    async def _safe_send(self, chat_id, text):
-        try:
-            await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Failed to send Telegram message: {e}")
+    async def _safe_send(self, chat_id, text, retries=3):
+        """Attempts to send a message multiple times if the network drops."""
+        for i in range(retries):
+            try:
+                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                return
+            except Exception as e:
+                if i < retries - 1:
+                    await asyncio.sleep(5)  # Wait 5 seconds before retrying
+                else:
+                    logger.warning(f"Failed to send Telegram messageafter {retries} attempts: {e.__class__.__name__}")
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(

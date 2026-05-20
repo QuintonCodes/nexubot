@@ -28,7 +28,7 @@ class SafeEncoder(json.JSONEncoder):
 
 
 # --- RETRY DECORATOR ---
-def db_retry(retries=3, delay=1):
+def db_retry(retries=3, delay=2):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -36,21 +36,29 @@ def db_retry(retries=3, delay=1):
                 try:
                     return await func(*args, **kwargs)
                 except Exception as e:
-                    # Filter out network noise
-                    if "getaddrinfo" in str(e) or "connection" in str(e).lower():
+                    error_msg = str(e).lower()
+                    if (
+                        "getaddrinfo" in error_msg
+                        or "connection" in error_msg
+                        or "timeout" in error_msg
+                        or "readerror" in error_msg
+                    ):
                         if i < retries - 1:
                             await asyncio.sleep(delay)
                             continue
-                        logger.error(f"DB Error in {func.__name__}: {e}")
+                        logger.error(f"DB Error in {func.__name__}: {e.__class__.__name__}")
                         break
                     else:
-                        logger.error(f"DB Critical Error in {func.__name__}: {e}")
+                        logger.error(f"DB Error in {func.__name__}: {e.__class__.__name__} - {e}")
                         break
             # Return default empty values on failure
-            if "get_total" in func.__name__ or "performance" in func.__name__:
+            func_name = func.__name__
+            if "get_total" in func_name or "performance" in func_name:
                 return 0.0
-            if "get_active" in func.__name__ or "get_history" in func.__name__:
+            if "get_active" in func_name or "get_history" in func_name:
                 return []
+            if "check" in func_name:
+                return False
             return None
 
         return wrapper
@@ -122,10 +130,9 @@ class DatabaseManager:
             pool_pre_ping=True,
         )
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
-
-        # {symbol: (win_rate, timestamp)}
         self._performance_cache = {}
 
+    @db_retry()
     async def check_recent_loss(self, symbol: str) -> bool:
         """
         Returns True if the symbol had a loss recently (Cool-down check).
@@ -152,6 +159,7 @@ class DatabaseManager:
             except Exception:
                 return False
 
+    @db_retry()
     async def cleanup_db(self):
         """Removes logs older than 30 days."""
         if not self.engine:
@@ -174,6 +182,7 @@ class DatabaseManager:
             await self.engine.dispose()
             logger.info("🔒 Database Connection Closed.")
 
+    @db_retry()
     async def delete_active_trade(self, symbol: str):
         """Deletes an active trade from DB"""
         if not self.engine:
@@ -201,6 +210,7 @@ class DatabaseManager:
             logger.error(f"Failed to fetch active trades: {e}")
             return []
 
+    @db_retry()
     async def get_pair_performance(self, symbol: str) -> float:
         """
         Returns win rate for a specific pair.
@@ -271,6 +281,7 @@ class DatabaseManager:
             logger.error(f"Failed to fetch historical win rate: {e}")
             return 0.0
 
+    @db_retry()
     async def init_database(self):
         """Creates tables if they don't exist"""
         if not self.engine:
@@ -284,6 +295,7 @@ class DatabaseManager:
         except Exception as e:
             logger.warning(f"⚠️ DB Connection failed: {e}")
 
+    @db_retry()
     async def log_session(self, session_id: str, start_time: float, stats: dict):
         """Logs session summary on shutdown"""
         if not self.engine:
@@ -335,6 +347,7 @@ class DatabaseManager:
             logger.error(f"Failed to log trade: {e}")
             await session.rollback()
 
+    @db_retry()
     async def save_active_trade(self, symbol: str, signal: dict):
         """Saves an active trade to DB"""
         if not self.engine:

@@ -58,6 +58,7 @@ def setup_logging():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
     logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
     return logger

@@ -13,16 +13,15 @@ logger = logging.getLogger(__name__)
 async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = None):
     """
     Simulates historical price action to build a reliable ML dataset
-    using the new SMC logic and strict feature sets.
+    using highly optimized state-tracking and vectorized preprocessing.
     """
+
     collector = DataCollector()
     total_rows_collected = 0
     max_total_rows = 14000
-    max_rows_per_symbol = 2000
+    max_rows_per_symbol = 1000
 
-    # Prioritize focused targets
     symbols = target_symbols or (FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
-
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
 
     for symbol in symbols:
@@ -47,98 +46,171 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = pd.DataFrame(klines_main).sort_values("time").reset_index(drop=True)
         df_htf = pd.DataFrame(klines_htf).sort_values("time").reset_index(drop=True)
 
-        # Pre-calculate indicators
+        # 1. Pre-calculate indicators
         df_full = TechnicalAnalyzer.calculate_indicators(df_full)
         df_htf = TechnicalAnalyzer.calculate_indicators(df_htf)
 
-        symbol_rows_collected = 0
+        # 2. Vectorized HTF Trend Mapping (Fixes is_htf_aligned = -1 issue)
+        htf_trends = []
+        last_hs, last_ls = [], []
+        curr_htf = "FLAT"
+        for row in df_htf.itertuples():
+            if row.pivot_high:
+                last_hs.append(row.high)
+            if row.pivot_low:
+                last_ls.append(row.low)
+            if len(last_hs) >= 2 and len(last_ls) >= 2:
+                if last_hs[-1] > last_hs[-2] and last_ls[-1] > last_ls[-2]:
+                    curr_htf = "BULL"
+                elif last_hs[-1] < last_hs[-2] and last_ls[-1] < last_ls[-2]:
+                    curr_htf = "BEAR"
+            htf_trends.append(curr_htf)
 
-        # Iterate through historical data
-        # Start at 200 to allow warming up, end 200 early to allow forward-looking for outcome
-        for i in range(200, len(df_full) - 50):
+        df_htf["htf_trend"] = htf_trends
+        df_full = pd.merge_asof(df_full, df_htf[["time", "htf_trend"]], on="time", direction="backward")
+        df_full["htf_trend"] = df_full["htf_trend"].fillna("FLAT")
+
+        # 3. Vectorized Daily Levels (Avoids O(N^2) dataframe copying)
+        df_full["date"] = pd.to_datetime(df_full["time"], unit="s").dt.date
+        daily_highs = df_full.groupby("date")["high"].max().shift(1)
+        daily_lows = df_full.groupby("date")["low"].min().shift(1)
+        df_full["pdh"] = df_full["date"].map(daily_highs)
+        df_full["pdl"] = df_full["date"].map(daily_lows)
+
+        # 4. Precalculate Local Structure for O(1) Lookups
+        bos_list, choch_list, struct_list = [], [], []
+        last_hs_m1, last_ls_m1 = [], []
+        prev_h, last_h, prev_l, last_l = None, None, None, None
+
+        for i in range(len(df_full)):
+            if i >= 5:
+                conf_row = df_full.iloc[i - 5]
+                if conf_row["pivot_high"]:
+                    prev_h, last_h = last_h, conf_row["high"]
+                if conf_row["pivot_low"]:
+                    prev_l, last_l = last_l, conf_row["low"]
+
+            bos, choch, structure = None, None, "FLAT"
+            if prev_h is not None and prev_l is not None:
+                if last_h > prev_h and last_l > prev_l:
+                    structure = "BULL"
+                elif last_h < prev_h and last_l < prev_l:
+                    structure = "BEAR"
+
+                curr_close = df_full["close"].iloc[i]
+                if structure == "BULL":
+                    if curr_close > last_h:
+                        bos = "BULL"
+                    elif curr_close < last_l:
+                        choch = "BEAR"
+                elif structure == "BEAR":
+                    if curr_close < last_l:
+                        bos = "BEAR"
+                    elif curr_close > last_h:
+                        choch = "BULL"
+
+            bos_list.append(bos)
+            choch_list.append(choch)
+            struct_list.append(structure)
+            last_hs_m1.append(last_h)
+            last_ls_m1.append(last_l)
+
+        df_full["bos"] = bos_list
+        df_full["choch"] = choch_list
+        df_full["structure"] = struct_list
+        df_full["last_high"] = last_hs_m1
+        df_full["last_low"] = last_ls_m1
+
+        df_full["recent_low_5"] = df_full["low"].rolling(5).min()
+        df_full["recent_high_5"] = df_full["high"].rolling(5).max()
+        df_full["recent_low_4"] = df_full["low"].rolling(4).min()
+        df_full["recent_high_4"] = df_full["high"].rolling(4).max()
+        df_full["vol_mean_20"] = df_full["volume"].rolling(20).mean()
+
+        records = df_full.to_dict("records")
+
+        symbol_rows_collected = 0
+        active_fvgs = []
+        active_obs = []
+
+        for i in range(2, len(records) - 50):
             if symbol_rows_collected >= max_rows_per_symbol:
                 logger.info(f"✅ {symbol} reached {max_rows_per_symbol} row cap.")
                 break
 
-            window = df_full.iloc[:i].copy()
-            curr = window.iloc[-1]
+            c1 = records[i - 2]
+            c2 = records[i - 1]
+            curr = records[i]
 
-            #   -----------------------------------------------------------------
-            # 1. Stateless SMC Detection (Mirrors Live Engine)
-            #   -----------------------------------------------------------------
-            active_fvgs = []
-            active_obs = []
+            curr_low, curr_high = curr["low"], curr["high"]
+            active_fvgs = [
+                f
+                for f in active_fvgs
+                if not (f["type"] == "BULL" and curr_low < f["low"])
+                and not (f["type"] == "BEAR" and curr_high > f["high"])
+            ]
+            active_obs = [
+                o
+                for o in active_obs
+                if not (o["type"] == "BULL" and curr_low < o["low"])
+                and not (o["type"] == "BEAR" and curr_high > o["high"])
+            ]
 
-            if len(window) >= 20:
-                for j in range(len(window) - 20, len(window) - 1):
-                    c1, c2, c3 = window.iloc[j - 2], window.iloc[j - 1], window.iloc[j]
+            # Detect new FVG
+            if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
+                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"]})
+            elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
+                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
 
-                    #   --- FVG Detection   ---
-                    if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
-                        fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
-                        if not any(window.iloc[k]["low"] < fvg["low"] for k in range(j + 1, len(window))):
-                            active_fvgs.append(fvg)
-                    elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
-                        fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
-                        if not any(window.iloc[k]["high"] > fvg["high"] for k in range(j + 1, len(window))):
-                            active_fvgs.append(fvg)
+            # Detect new OB
+            if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
+                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"]})
+            elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
+                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"]})
 
-                    #   --- OB & Breaker Detection   ---
-                    ob_c1, ob_c2 = window.iloc[j - 1], window.iloc[j]
-                    if (
-                        ob_c1["close"] < ob_c1["open"]
-                        and ob_c2["close"] > ob_c2["open"]
-                        and ob_c2["close"] > ob_c1["high"]
-                    ):
-                        ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
-                        is_broken = False
-                        for k in range(j + 1, len(window)):
-                            if window.iloc[k]["low"] < ob["low"]:
-                                is_broken = True
-                                break
-                        if not is_broken:
-                            active_obs.append(ob)
+            # Skip signal processing during warmup
+            if i < 200:
+                continue
 
-                    elif (
-                        ob_c1["close"] > ob_c1["open"]
-                        and ob_c2["close"] < ob_c2["open"]
-                        and ob_c2["close"] < ob_c1["low"]
-                    ):
-                        ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
-                        is_broken = False
-                        for k in range(j + 1, len(window)):
-                            if window.iloc[k]["high"] > ob["high"]:
-                                is_broken = True
-                                break
-                        if not is_broken:
-                            active_obs.append(ob)
-            #   -----------------------------------------------------------------
-            # 2. Extract Data & Route
-            #   -----------------------------------------------------------------
-            structure_info = TechnicalAnalyzer.detect_structure(window)
+            # Fast Analysis Router Override
+            structure_info = {
+                "bos": curr["bos"],
+                "choch": curr["choch"],
+                "structure": curr["structure"],
+                "last_high": curr["last_high"],
+                "last_low": curr["last_low"],
+            }
+            daily_levels = {"pdh": curr["pdh"], "pdl": curr["pdl"]}
+            vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
+            htf_trend = curr["htf_trend"]
 
-            # Align HTF trend by timestamp
-            curr_time = curr["time"]
-            htf_window = df_htf[df_htf["time"] <= curr_time]
-            htf_trend = TechnicalAnalyzer.get_htf_trend(htf_window) if not htf_window.empty else "FLAT"
+            df_dummy = pd.DataFrame()
 
-            signal = engine.strategy_analyzer.analyze_router(
-                curr,
-                window,
-                htf_trend,
-                active_fvgs,
-                active_obs,
-                structure_info,
+            signal = engine.strategy_analyzer._smc_liquidity_sweep(
+                curr, df_dummy, htf_trend, structure_info, daily_levels
             )
+
+            if not signal:
+                signal = engine.strategy_analyzer._smc_poi_reversal(
+                    curr, df_dummy, htf_trend, structure_info, active_fvgs, active_obs, vwap_trend
+                )
+            if not signal:
+                signal = engine.strategy_analyzer._ifvg_continuation(
+                    curr, df_dummy, htf_trend, structure_info, active_fvgs, vwap_trend
+                )
+            if not signal:
+                signal = engine.strategy_analyzer._vwap_bounce(curr, df_dummy, htf_trend, structure_info, vwap_trend)
 
             if not signal:
                 continue
 
-            #   -----------------------------------------------------------------
-            # 3. ML Feature Extraction
-            #   -----------------------------------------------------------------
+            # Precise Feature Extraction
             all_pois = active_fvgs + active_obs
             dist_nearest_poi = 0.0
+
+            in_fvg = 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0
+            in_ob = 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0
+
             if all_pois:
                 nearest = min(
                     all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"]))
@@ -148,7 +220,6 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 )
 
             strat_name = signal.get("strategy", "")
-
             features = {
                 "is_htf_aligned": (
                     1
@@ -156,18 +227,16 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                     or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
                     else -1
                 ),
-                "is_liquidity_swept": 1 if "Sweep" in strat_name else 0,
-                "is_in_fvg": 1 if "FVG" in strat_name else 0,
-                "is_in_orderblock": 1 if "OB" in strat_name else 0,
+                "is_liquidity_swept": signal.get("is_liquidity_swept", 0),
+                "is_in_fvg": in_fvg,
+                "is_in_orderblock": in_ob,
                 "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
-                "session_volume_spike": 1 if curr["volume"] > window["volume"].tail(20).mean() * 1.5 else 0,
+                "session_volume_spike": 1 if curr["volume"] > (curr["vol_mean_20"] * 1.5) else 0,
                 "distance_to_poi": dist_nearest_poi,
             }
 
-            # -----------------------------------------------------------------
-            # 4. Forward Simulation (Outcome resolution on M1)
-            # -----------------------------------------------------------------
-            future_window = df_full.iloc[i : i + 200]  # Look ahead next 200 candles (~3 hours)
+            # Forward Simulation
+            future_window = records[i : i + 200]  # Look ahead next 200 candles (~3 hours)
             entry_price = curr["close"]
             atr = curr["atr"]
 
@@ -176,43 +245,49 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 "suggested_sl",
                 entry_price - (atr * 1.5) if signal["direction"] == "LONG" else entry_price + (atr * 1.5),
             )
-
-            # Simulated 2:1 RR
             tp_dist = abs(entry_price - sl) * 2.0
             tp = entry_price + tp_dist if signal["direction"] == "LONG" else entry_price - tp_dist
 
             won = 0
-            pnl = 0.0
             max_favorable = 0.0
 
-            # Step through the future to find what gets hit first
-            for _, f_curr in future_window.iterrows():
+            for f_curr in future_window:
                 if signal["direction"] == "LONG":
                     max_favorable = max(max_favorable, f_curr["high"] - entry_price)
                     if f_curr["low"] <= sl:
                         won = 0
-                        pnl = sl - entry_price
                         break
                     if f_curr["high"] >= tp:
                         won = 1
-                        pnl = tp - entry_price
                         break
                 else:
                     max_favorable = max(max_favorable, entry_price - f_curr["low"])
                     if f_curr["high"] >= sl:
                         won = 0
-                        pnl = entry_price - sl
                         break
                     if f_curr["low"] <= tp:
                         won = 1
-                        pnl = entry_price - tp
                         break
+
+            # Realistic PnL Normalization
+            if entry_price < 2:  # Major Forex (e.g. EURUSD ~ 1.1)
+                multiplier = 100000
+            elif entry_price < 200:  # JPY Pairs / Metals (e.g. USDJPY ~ 150)
+                multiplier = 1000
+            else:  # Crypto / Indices (e.g. BTCUSD ~ 60000, US30 ~ 38000)
+                multiplier = 1
+
+            lot_size = 0.01
+
+            if won == 1:
+                gross_profit_points = abs(tp - entry_price)
+                pnl = gross_profit_points * multiplier * lot_size
+            else:
+                gross_loss_points = abs(sl - entry_price)
+                pnl = -gross_loss_points * multiplier * lot_size
 
             target_excursion = max_favorable / atr if atr > 0 else 0.0
 
-            #   -----------------------------------------------------------------
-            # 6. Log Validated Data
-            #   -----------------------------------------------------------------
             collector.log_training_data(symbol, features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1

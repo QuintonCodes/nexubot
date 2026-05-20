@@ -447,6 +447,10 @@ class AITradingEngine:
         # 8. ML Prediction (Feature Extraction)
         all_pois = active_fvgs + active_obs
         dist_nearest_poi = 0.0
+
+        in_fvg = 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0
+        in_ob = 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0
+
         if all_pois:
             nearest = min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))
             dist_nearest_poi = (
@@ -462,9 +466,9 @@ class AITradingEngine:
                 or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
                 else -1
             ),
-            "is_liquidity_swept": 1 if "Sweep" in strat_name else 0,
-            "is_in_fvg": 1 if "FVG" in strat_name else 0,
-            "is_in_orderblock": 1 if "OB" in strat_name else 0,
+            "is_liquidity_swept": final_signal.get("is_liquidity_swept", 0),
+            "is_in_fvg": in_fvg,
+            "is_in_orderblock": in_ob,
             "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
             "session_volume_spike": 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0,
             "distance_to_poi": dist_nearest_poi,
