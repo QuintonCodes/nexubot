@@ -53,20 +53,20 @@ class OfflineManager:
                 if is_long:
                     if k["low"] <= sl:
                         outcome = "LOSS (SL Offline)"
-                        pnl = -signal["risk_zar"]
+                        pnl = -signal.get("risk_account", signal.get("risk_zar", 0))
                         break
                     if k["high"] >= tp:
                         outcome = "WIN (TP Offline)"
-                        pnl = signal["profit_zar"]
+                        pnl = signal.get("profit_account", signal.get("profit_zar", 0))
                         break
                 else:
                     if k["high"] >= sl:
                         outcome = "LOSS (SL Offline)"
-                        pnl = -signal["risk_zar"]
+                        pnl = -signal.get("risk_account", signal.get("risk_zar", 0))
                         break
                     if k["low"] <= tp:
                         outcome = "WIN (TP Offline)"
-                        pnl = signal["profit_zar"]
+                        pnl = signal.get("profit_account", signal.get("profit_zar", 0))
                         break
 
         return outcome, pnl, filled_offline
@@ -89,10 +89,13 @@ class OfflineManager:
 
             outcome, pnl, filled = self._calculate_offline_result(signal, start_time, klines)
 
+            currency = self.engine.session_stats.get("currency", "USD")
+            curr_sym = "R" if currency == "ZAR" else "$"
+
             # Case 1: Trade finished (TP or SL hit)
             if outcome and "TIMEOUT" not in outcome:
                 won = pnl > 0
-                logger.info(f"🔔 Offline Result ({symbol}): {outcome} | PnL: R{pnl:.2f}")
+                logger.info(f"🔔 Offline Result ({symbol}): {outcome} | PnL: {curr_sym}{pnl:.2f}")
                 unique_id = f"{symbol}_OFFLINE_{int(time.time())}_{uuid.uuid4().hex[:6]}"
                 await self.engine.db.log_trade(
                     {
@@ -130,7 +133,7 @@ class OfflineManager:
                     won = pnl > 0
 
                     outcome_str = "WIN (Timeout)" if won else "LOSS (Timeout)"
-                    logger.info(f"🔔 Offline Result ({symbol}): {outcome_str} | PnL: R{pnl:.2f}")
+                    logger.info(f"🔔 Offline Result ({symbol}): {outcome_str} | PnL: {curr_sym}{pnl:.2f}")
 
                     unique_id = f"{symbol}_TIMEOUT_{int(time.time())}_{uuid.uuid4().hex[:6]}"
                     await self.engine.db.log_trade(

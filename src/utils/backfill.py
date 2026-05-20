@@ -30,9 +30,15 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             break
 
         logger.info(f"⏳ Backfilling {symbol}...")
-
-        # Force MT5 to recognize the symbol in Market Watch
         mt5.symbol_select(symbol, True)
+
+        symbol_info = await provider.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"⚠️ Could not fetch MT5 specs for {symbol}. Skipping.")
+            continue
+
+        point = symbol_info.get("point", 0.00001)
+        tick_value = symbol_info.get("trade_tick_value", 0.0)
 
         # Fetch M1 Data (Main execution TF) and H1 Data (HTF Bias)
         klines_main = await provider.fetch_klines(symbol, TIMEFRAME, 50000)
@@ -172,7 +178,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             if i < 200:
                 continue
 
-            # Fast Analysis Router Override
+            # Unified Analysis Router
             structure_info = {
                 "bos": curr["bos"],
                 "choch": curr["choch"],
@@ -180,26 +186,13 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 "last_high": curr["last_high"],
                 "last_low": curr["last_low"],
             }
-            daily_levels = {"pdh": curr["pdh"], "pdl": curr["pdl"]}
-            vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
             htf_trend = curr["htf_trend"]
 
             df_dummy = pd.DataFrame()
 
-            signal = engine.strategy_analyzer._smc_liquidity_sweep(
-                curr, df_dummy, htf_trend, structure_info, daily_levels
+            signal = engine.strategy_analyzer.analyze_router(
+                curr, df_dummy, htf_trend, active_fvgs, active_obs, structure_info
             )
-
-            if not signal:
-                signal = engine.strategy_analyzer._smc_poi_reversal(
-                    curr, df_dummy, htf_trend, structure_info, active_fvgs, active_obs, vwap_trend
-                )
-            if not signal:
-                signal = engine.strategy_analyzer._ifvg_continuation(
-                    curr, df_dummy, htf_trend, structure_info, active_fvgs, vwap_trend
-                )
-            if not signal:
-                signal = engine.strategy_analyzer._vwap_bounce(curr, df_dummy, htf_trend, structure_info, vwap_trend)
 
             if not signal:
                 continue
@@ -219,7 +212,6 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                     min(abs(nearest["high"] - curr["close"]), abs(nearest["low"] - curr["close"])) / curr["close"]
                 )
 
-            strat_name = signal.get("strategy", "")
             features = {
                 "is_htf_aligned": (
                     1
@@ -269,22 +261,14 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                         won = 1
                         break
 
-            # Realistic PnL Normalization
-            if entry_price < 2:  # Major Forex (e.g. EURUSD ~ 1.1)
-                multiplier = 100000
-            elif entry_price < 200:  # JPY Pairs / Metals (e.g. USDJPY ~ 150)
-                multiplier = 1000
-            else:  # Crypto / Indices (e.g. BTCUSD ~ 60000, US30 ~ 38000)
-                multiplier = 1
-
             lot_size = 0.01
 
             if won == 1:
-                gross_profit_points = abs(tp - entry_price)
-                pnl = gross_profit_points * multiplier * lot_size
+                gross_points = abs(tp - entry_price) / point
+                pnl = gross_points * tick_value * lot_size
             else:
-                gross_loss_points = abs(sl - entry_price)
-                pnl = -gross_loss_points * multiplier * lot_size
+                gross_points = abs(sl - entry_price) / point
+                pnl = -gross_points * tick_value * lot_size
 
             target_excursion = max_favorable / atr if atr > 0 else 0.0
 

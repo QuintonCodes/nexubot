@@ -44,37 +44,6 @@ class TechnicalAnalyzer:
         return df.fillna(0)
 
     @staticmethod
-    def get_htf_trend(df: pd.DataFrame) -> Literal["BULL", "BEAR", "FLAT"]:
-        """
-        Determines the Higher Timeframe trend purely using Market Structure.
-        Evaluates the sequence of recent pivot highs and lows to determine order flow.
-        """
-        if df.empty or len(df) < 20:
-            return "FLAT"
-
-        # Calculate basic pivots for the HTF context
-        ph = df["high"] == df["high"].rolling(5, center=True).max()
-        pl = df["low"] == df["low"].rolling(5, center=True).min()
-
-        highs = df[ph]["high"].values
-        lows = df[pl]["low"].values
-
-        if len(highs) < 2 or len(lows) < 2:
-            return "FLAT"
-
-        # Get the last two confirmed swing points
-        last_high, prev_high = highs[-1], highs[-2]
-        last_low, prev_low = lows[-1], lows[-2]
-
-        # Structure Logic: HH + HL = Bullish | LH + LL = Bearish
-        if last_high > prev_high and last_low > prev_low:
-            return "BULL"
-        elif last_high < prev_high and last_low < prev_low:
-            return "BEAR"
-
-        return "FLAT"  # Consolidation / Choppy Market
-
-    @staticmethod
     def detect_structure(df: pd.DataFrame) -> Dict:
         """
         Detects Break of Structure (BOS) and Change of Character (CHoCH)
@@ -118,3 +87,83 @@ class TechnicalAnalyzer:
                 choch = "BULL"  # Price broke the Lower High -> Reversal Character
 
         return {"bos": bos, "choch": choch, "structure": structure, "last_high": last_high, "last_low": last_low}
+
+    @staticmethod
+    def extract_active_pois(df: pd.DataFrame):
+        """
+        Unifies POI (FVG/OB) detection for live engines,
+        mirroring the state-tracking loop.
+        """
+        active_fvgs = []
+        active_obs = []
+
+        if len(df) < 3:
+            return active_fvgs, active_obs
+
+        records = df.to_dict("records")
+
+        for i in range(2, len(records)):
+            c1 = records[i - 2]
+            c2 = records[i - 1]
+            curr = records[i]
+
+            curr_low, curr_high = curr["low"], curr["high"]
+
+            # 1. Invalidate mitigated POIs
+            active_fvgs = [
+                f
+                for f in active_fvgs
+                if not (f["type"] == "BULL" and curr_low < f["low"])
+                and not (f["type"] == "BEAR" and curr_high > f["high"])
+            ]
+            active_obs = [
+                o
+                for o in active_obs
+                if not (o["type"] == "BULL" and curr_low < o["low"])
+                and not (o["type"] == "BEAR" and curr_high > o["high"])
+            ]
+
+            # 2. Detect new FVG
+            if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
+                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"]})
+            elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
+                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
+
+            # 3. Detect new OB
+            if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
+                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"]})
+            elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
+                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"]})
+
+        return active_fvgs, active_obs
+
+    @staticmethod
+    def get_htf_trend(df: pd.DataFrame) -> Literal["BULL", "BEAR", "FLAT"]:
+        """
+        Determines the Higher Timeframe trend purely using Market Structure.
+        Evaluates the sequence of recent pivot highs and lows to determine order flow.
+        """
+        if df.empty or len(df) < 20:
+            return "FLAT"
+
+        # Calculate basic pivots for the HTF context
+        ph = df["high"] == df["high"].rolling(5, center=True).max()
+        pl = df["low"] == df["low"].rolling(5, center=True).min()
+
+        highs = df[ph]["high"].values
+        lows = df[pl]["low"].values
+
+        if len(highs) < 2 or len(lows) < 2:
+            return "FLAT"
+
+        # Get the last two confirmed swing points
+        last_high, prev_high = highs[-1], highs[-2]
+        last_low, prev_low = lows[-1], lows[-2]
+
+        # Structure Logic: HH + HL = Bullish | LH + LL = Bearish
+        if last_high > prev_high and last_low > prev_low:
+            return "BULL"
+        elif last_high < prev_high and last_low < prev_low:
+            return "BEAR"
+
+        return "FLAT"  # Consolidation / Choppy Market

@@ -373,50 +373,8 @@ class AITradingEngine:
         if spread_price > max_allowed_spread:
             return None
 
-        # 6. Stateless SMC Detection
-        active_fvgs = []
-        active_obs = []
-
-        if len(df) >= 20:
-            for i in range(len(df) - 20, len(df) - 1):
-                c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
-
-                #   --- FVG Detection   ---
-                if c1["high"] < c3["low"] and c2["close"] > c2["open"]:
-                    fvg = {"type": "BULL", "high": c3["low"], "low": c1["high"]}
-                    if not any(df.iloc[j]["low"] < fvg["low"] for j in range(i + 1, len(df))):
-                        active_fvgs.append(fvg)
-                elif c1["low"] > c3["high"] and c2["close"] < c2["open"]:
-                    fvg = {"type": "BEAR", "high": c1["low"], "low": c3["high"]}
-                    if not any(df.iloc[j]["high"] > fvg["high"] for j in range(i + 1, len(df))):
-                        active_fvgs.append(fvg)
-
-                #   --- Order Block (OB) Detection   ---
-                ob_c1, ob_c2 = df.iloc[i - 1], df.iloc[i]
-
-                # Bullish OB / Bearish Breaker
-                if ob_c1["close"] < ob_c1["open"] and ob_c2["close"] > ob_c2["open"] and ob_c2["close"] > ob_c1["high"]:
-                    ob = {"type": "BULL", "high": ob_c1["high"], "low": ob_c1["low"]}
-                    is_broken = False
-                    for j in range(i + 1, len(df)):
-                        if df.iloc[j]["low"] < ob["low"]:
-                            is_broken = True
-                            break
-                    if not is_broken:
-                        active_obs.append(ob)
-
-                # Bearish OB / Bullish Breaker
-                elif (
-                    ob_c1["close"] > ob_c1["open"] and ob_c2["close"] < ob_c2["open"] and ob_c2["close"] < ob_c1["low"]
-                ):
-                    ob = {"type": "BEAR", "high": ob_c1["high"], "low": ob_c1["low"]}
-                    is_broken = False
-                    for j in range(i + 1, len(df)):
-                        if df.iloc[j]["high"] > ob["high"]:
-                            is_broken = True
-                            break
-                    if not is_broken:
-                        active_obs.append(ob)
+        # 6. Unified SMC POI Detection
+        active_fvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
 
         # 7. Check Loss Cooldown (Database)
         try:
