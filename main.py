@@ -39,31 +39,29 @@ async def main():
     # 1. Lock the system status BEFORE connecting so the scanner pauses immediately
     engine.system_status = "TRAINING"
 
-    # Initialize Headless Connection
     is_connected = await engine.initialize_connection(login, server, password, path)
 
     if is_connected:
-        # Start the Telegram async polling loop
         await notifier.initialize()
 
-        # 2. Auto-Train Neural Network on Boot
+        # 2. Send Startup message FIRST so Telegram gets the notification immediately
+        win_rate = await engine.db.get_total_historical_win_rate()
+        recent_trades = await engine.db.get_recent_trades(limit=1000)
+        total_trades = len(recent_trades)
+        await notifier.send_startup_message(win_rate, total_trades)
+
+        # 3. Auto-Train Neural Network while Scanner is paused
         if not os.path.exists("training_data.csv"):
             print("⚠️ WARNING: 'training_data.csv' not found. Run 'python run_backfill.py' first.")
             notifier.send_message("⚠️ *Warning:* No ML training data found. Please run backfill.")
         else:
             print("⚙️ Running Pre-Flight ML Optimization...")
+            notifier.send_message("⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly.")
             await asyncio.to_thread(engine.ai_engine.nn_brain.train_network)
 
-        # 3. Unlock the system status now that training is finished
+        # 4. Unlock the system status to IDLE -> Scanner can now fire
         engine.system_status = "IDLE"
-
-        # 4. Fetch Initial DB Stats for Startup Message
-        win_rate = await engine.db.get_total_historical_win_rate()
-        recent_trades = await engine.db.get_recent_trades(limit=1000)
-        total_trades = len(recent_trades)
-
-        # 5. Send Startup message as the very first Telegram notification
-        await notifier.send_startup_message(win_rate, total_trades)
+        print("✅ Training Complete. Scanner Activated.")
 
         try:
             while True:
@@ -72,8 +70,6 @@ async def main():
             print("Received Cancellation Signal.")
         finally:
             print("Initiating Graceful Shutdown ...")
-
-            # Send Final Report Before Shutdown
             stats = engine.session_stats
             notifier.send_daily_report(
                 stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")

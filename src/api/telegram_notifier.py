@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import pandas as pd
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -64,6 +65,7 @@ class TelegramNotifier:
                     logger.warning(f"Failed to send Telegram messageafter {retries} attempts: {e.__class__.__name__}")
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Sends a welcome message with instructions on how to use the bot's features."""
         await update.message.reply_text(
             f"🚀 *Nexubot {VERSION} Online*\n"
             f"• `/analyze [SYMBOL]` to run a deep SMC scan.\n"
@@ -91,6 +93,7 @@ class TelegramNotifier:
             )
 
     async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Runs a manual, deep SMC analysis matching the exact AI Engine logic."""
         if not context.args or not self.engine:
             await update.message.reply_text("⚠️ Usage: `/analyze XAUUSDm`")
             return
@@ -109,60 +112,105 @@ class TelegramNotifier:
             htf_trend = await self.engine.ai_engine._get_htf_trend(symbol, self.engine.provider)
             structure = TechnicalAnalyzer.detect_structure(df)
 
-            active_fvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
 
             # Calculate precise distances to liquidity
-            all_pois = active_fvgs + active_obs
-            dist_nearest_poi = 0.0
-            in_fvg = 0
-            in_ob = 0
-
-            if all_pois:
-                nearest = min(
-                    all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"]))
+            all_pois = active_fvgs + active_ifvgs + active_obs
+            dist_nearest_poi = (
+                min(
+                    abs(
+                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                            "high"
+                        ]
+                        - curr["close"]
+                    ),
+                    abs(
+                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                            "low"
+                        ]
+                        - curr["close"]
+                    ),
                 )
-                dist_nearest_poi = (
-                    min(abs(nearest["high"] - curr["close"]), abs(nearest["low"] - curr["close"])) / curr["close"]
-                )
+                / curr["close"]
+                if all_pois
+                else 0.0
+            )
 
-            if any(fvg["low"] <= curr["close"] <= fvg["high"] for fvg in active_fvgs):
-                in_fvg = 1
-            if any(ob["low"] <= curr["close"] <= ob["high"] for ob in active_obs):
-                in_ob = 1
+            # 3-Tier Sweep Detection Data Prep
+            df_temp = df.copy()
+            df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
+            prev_days = df_temp[df_temp["date"] < df_temp["date"].iloc[-1]]
+            if not prev_days.empty:
+                last_day = prev_days["date"].iloc[-1]
+                yesterday_df = prev_days[prev_days["date"] == last_day]
+                pdh, pdl = yesterday_df["high"].max(), yesterday_df["low"].min()
+            else:
+                pdh, pdl = None, None
+
+            daily_levels = {"pdh": pdh, "pdl": pdl}
+            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df, structure, daily_levels)
+
+            sweep_text = "None"
+            if is_liquidity_swept == 3:
+                sweep_text = "Daily High/Low Swept 🔥"
+            elif is_liquidity_swept == 2:
+                sweep_text = "Major Swing (50p) Swept ⚡"
+            elif is_liquidity_swept == 1:
+                sweep_text = "Internal Pivot Swept"
 
             vol_spike = 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0
-            vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
 
             features = {
                 "is_htf_aligned": 1 if (htf_trend == structure["structure"] and htf_trend != "FLAT") else -1,
-                "is_liquidity_swept": 0,  # Reserved for active sweep detection
-                "is_in_fvg": in_fvg,
-                "is_in_orderblock": in_ob,
+                "is_liquidity_swept": is_liquidity_swept,
+                "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
+                "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
+                "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
                 "structural_break": 1 if structure["bos"] else (2 if structure["choch"] else 0),
                 "session_volume_spike": vol_spike,
                 "distance_to_poi": dist_nearest_poi,
             }
 
-            nn_result = self.engine.ai_engine.nn_brain.predict(features)
-            win_prob = nn_result["prob"] * 100
+            vwap_trend = "BULL" if curr["close"] > curr.get("vwap", 0) else "BEAR"
 
+            # Run Neural Predictor
+            nn_result = self.engine.ai_engine.nn_brain.predict(features)
+            raw_prob = nn_result["prob"]
+
+            # Incorporate Session Awareness & Historical DB Performance for accurate manual read
+            session_info = self.engine.ai_engine._get_session_status(symbol)
+            base_conf = 60.0
+            trend_bonus = 5 if features["is_htf_aligned"] == 1 else 0
+            nn_factor = (raw_prob - 0.5) * 40
+
+            hist_win_rate = await self.engine.db.get_pair_performance(symbol) if self.engine.db else 0.5
+            history_factor = -10 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
+
+            final_conf = (base_conf + trend_bonus + history_factor + nn_factor) * session_info["multiplier"]
+            win_prob = max(0.0, min(99.0, final_conf))
+
+            # Interpretation Logic
             if win_prob > 80:
-                ai_thought = "Highly favorable setup forming. Aligning with HTF institutional flow."
-            elif win_prob > 50:
-                ai_thought = "Neutral environment. Awaiting clear liquidity sweep or structural break."
+                ai_thought = (
+                    "Highly favorable setup forming. Aligning with HTF institutional flow and Session momentum."
+                )
+            elif win_prob > 60:
+                ai_thought = "Viable environment. Awaiting clear liquidity sweep or decisive structural confirmation."
             else:
                 ai_thought = "Poor conditions. High probability of chop or false breakouts. Avoiding."
 
             msg = (
                 f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
-                f"📊 *HTF Flow (1H):* {htf_trend}\n"
+                f"🌍 *Session Flow:* {session_info['active_session']} (Volatility: {session_info['multiplier']}x)\n"
+                f"📊 *HTF Bias (1H):* {htf_trend}\n"
                 f"🧭 *Local Structure ({TIMEFRAME}):* {structure['structure']} (Last Break: {structure.get('bos') or structure.get('choch') or 'None'})\n"
-                f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_obs)} OBs Active\n"
+                f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs Active\n"
+                f"🧹 *Sweep Status:* {sweep_text}\n"
                 f"🌊 *VWAP State:* {vwap_trend}\n"
                 f"🔥 *Volume Anomaly:* {'Detected' if vol_spike else 'Normal'}\n\n"
                 f"🤖 *Neural Output:*\n"
                 f"• _Trend Alignment:_ {'Aligned ✅' if features['is_htf_aligned'] == 1 else 'Counter ⚠️'}\n"
-                f"• _Calculated Win Probability:_ *{win_prob:.1f}%*\n"
+                f"• _Calculated AI Confidence:_ *{win_prob:.1f}%*\n"
                 f"• _AI Conclusion:_ {ai_thought}"
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
@@ -179,10 +227,12 @@ class TelegramNotifier:
         logger.info("✅ Async Telegram Listener Started")
 
     def send_message(self, text):
+        """Sends a message to the configured Telegram chat asynchronously."""
         if self.bot_token and self.chat_id:
             asyncio.create_task(self._safe_send(self.chat_id, text))
 
     async def send_shutdown_message(self):
+        """Sends a final shutdown message with a summary of the bot's state."""
         msg = (
             f"🛑 *NEXUBOT SHUTDOWN INITIATED*\n\n"
             f"💾 Saving active trades to secure memory...\n"
@@ -193,6 +243,7 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_signal_alert(self, symbol: str, signal: dict):
+        """Formats and sends a detailed signal alert to Telegram."""
         if signal["signal"] == "BUY":
             header = "🟢 *BUY SIGNAL DETECTED* 🟢"
         else:
@@ -217,6 +268,7 @@ class TelegramNotifier:
         self.send_message(msg)
 
     async def send_startup_message(self, win_rate: float, total_trades: int):
+        """Sends a startup message with the latest performance metrics."""
         msg = (
             f"🚀 *NEXUBOT {VERSION} ONLINE*\n\n"
             f"🤖 *Engine Status:* Deep Learning Linked\n"
@@ -227,6 +279,7 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_trade_result(self, symbol: str, outcome: str, pips: float, won: bool, pnl: float, currency: str):
+        """Sends a trade result summary to Telegram with clear win/loss indicators and performance metrics."""
         result_emoji = "🏆" if won else "💔"
         curr_sym = self._get_currency_symbol(currency)
 
@@ -239,6 +292,7 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_daily_report(self, wins: int, losses: int, total: int, pnl: float, currency: str):
+        """Sends a comprehensive daily performance report to Telegram with win/loss breakdown and net PnL."""
         win_rate = (wins / total * 100) if total > 0 else 0.0
         curr_sym = self._get_currency_symbol(currency)
 

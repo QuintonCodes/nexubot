@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.0.0"
+VERSION = "v1.1.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -18,9 +18,9 @@ MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
 
-# ---------------------------------------------------------
+#  ---------------------------------------------------------
 # DATABASE & FALLBACKS
-# ---------------------------------------------------------
+#  ---------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 FALLBACK_CRYPTO: list[str] = ["BTCUSDm", "ETHUSDm"]
@@ -28,18 +28,20 @@ FALLBACK_FOREX: list[str] = ["EURUSDm"]
 FALLBACK_METALS: list[str] = ["XAUUSDm", "XAGUSDm"]
 FALLBACK_INDICES: list[str] = ["US30m"]
 
-# Used by the engine to relax strict risk parameters during expansion phases
 HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "US30"]
 
-# ---------------------------------------------------------
+#  ---------------------------------------------------------
 # SESSION & TIME FILTERS (SAST - South African Standard Time)
-# ---------------------------------------------------------
+# Advanced Session Awareness Configured:
+# The engine will dynamically adjust confidence multipliers based on the active session.
+# Example: XAUUSD & US30 get a boost during NY Session, EUR/GBP during London.
+#  ---------------------------------------------------------
 SESSION_CONFIG = {
-    "ASIAN_START": 2,  # 02:00 SAST
+    "ASIAN_START": 2,  # 02:00 SAST (JPY, AUD, NZD Volatility)
     "ASIAN_END": 11,  # 11:00 SAST
-    "LONDON_START": 9,  # 09:00 SAST
+    "LONDON_START": 9,  # 09:00 SAST (EUR, GBP Volatility)
     "LONDON_END": 18,  # 18:00 SAST
-    "NY_START": 14,  # 14:00 SAST
+    "NY_START": 14,  # 14:00 SAST (USD, XAU, US30, NAS Volatility)
     "NY_END": 23,  # 23:00 SAST
 }
 
@@ -50,7 +52,7 @@ TIMEFRAME = "M1"
 CANDLE_LIMIT = 500
 DEFAULT_MIN_CONFIDENCE = 60.0
 DEFAULT_RISK_PCT = 2.0
-DEFAULT_MAX_LOT = 0.1
+DEFAULT_MAX_LOT = 5.0
 
 SCAN_INTERVAL_CRYPTO = 30
 SCAN_INTERVAL_FOREX = 30
@@ -69,13 +71,14 @@ EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
 
 FEATURE_COLS = [
-    "is_htf_aligned",  # 1 if aligned with HTF bias, -1 if against
-    "is_liquidity_swept",  # 1 if recent sweep detected, 0 otherwise
-    "is_in_fvg",  # 1 if currently inside an unmitigated FVG
-    "is_in_orderblock",  # 1 if tapping a valid OB
-    "structural_break",  # 1 for BOS, 2 for CHoCH, 0 for neither
-    "session_volume_spike",  # 1 if massive body displacement detected
-    "distance_to_poi",  # % distance to nearest liquidity pool
+    "is_htf_aligned",
+    "is_liquidity_swept",
+    "is_in_fvg",
+    "is_in_ifvg",
+    "is_in_orderblock",
+    "structural_break",
+    "session_volume_spike",
+    "distance_to_poi",
 ]
 
 

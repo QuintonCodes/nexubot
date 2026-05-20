@@ -54,6 +54,7 @@ class AITradingEngine:
         signal: dict,
         nn_prob: float,
         htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        session_multiplier: float,
     ) -> Dict:
         """
         Calculates realistic confidence score.
@@ -61,11 +62,12 @@ class AITradingEngine:
         base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
         # 1. MTF Trend Alignment (Strictly enforced by router, but rewarded here)
-        trend_bonus = 0
-        if htf_trend == "BULL" and signal["direction"] == "LONG":
-            trend_bonus = 5
-        elif htf_trend == "BEAR" and signal["direction"] == "SHORT":
-            trend_bonus = 5
+        trend_bonus = (
+            5
+            if (htf_trend == "BULL" and signal["direction"] == "LONG")
+            or (htf_trend == "BEAR" and signal["direction"] == "SHORT")
+            else 0
+        )
 
         # 2. Historical Performance
         hist_win_rate = 0.5
@@ -78,8 +80,8 @@ class AITradingEngine:
         # 3. Neural Network Weighting
         nn_factor = (nn_prob - 0.5) * 40
 
-        # Final Calculation
-        final_conf = base_conf + trend_bonus + history_factor + nn_factor
+        # Apply Advanced Session Multiplier
+        final_conf = (base_conf + trend_bonus + history_factor + nn_factor) * session_multiplier
         final_conf = max(0.0, min(99.0, final_conf))
 
         signal["confidence"] = final_conf
@@ -105,11 +107,8 @@ class AITradingEngine:
             usdzar_rate = await provider.get_usdzar_rate()
 
         ask, bid = tick.ask, tick.bid
-        point = info["point"]
-        tick_value = info.get("trade_tick_value", 0)
-        min_vol = info.get("min_vol", 0.01)
-        max_vol = info.get("max_vol", 100.0)
-        vol_step = info.get("vol_step", 0.01)
+        point, tick_value = info["point"], info.get("trade_tick_value", 0)
+        min_vol, max_vol, vol_step = info.get("min_vol", 0.01), info.get("max_vol", 100.0), info.get("vol_step", 0.01)
         digits = info.get("digits", 5)
         atr = float(curr["atr"])
 
@@ -117,27 +116,6 @@ class AITradingEngine:
         current_market_price = ask if signal["direction"] == "LONG" else bid
         order_type = signal.get("order_type", "MARKET")
         entry_price = signal.get("price", current_market_price)
-
-        if order_type == "MARKET":
-            entry_price = current_market_price
-            signal_close_price = curr["close"]
-            pct_diff = abs(current_market_price - signal_close_price) / signal_close_price
-
-            # Stricter thresholds
-            symbol_type = provider.get_symbol_type(symbol)
-            if symbol_type == "CRYPTO":
-                max_diff = 0.005  # 0.5% tolerance for Crypto
-            elif symbol_type == "INDICES":
-                max_diff = 0.003  # 0.3% tolerance for Indices
-            else:
-                max_diff = 0.001  # 0.1% tolerance for Forex
-
-            if pct_diff > max_diff:
-                self._log_once(
-                    f"runaway_{symbol}",
-                    f"Skipping {symbol}: Price Runaway. Signal: {signal_close_price} vs Now: {current_market_price}",
-                )
-                return None
 
         # Dynamic TP / SL calculation
         is_volatile_asset = self._is_high_volatility_symbol(symbol)
@@ -159,20 +137,12 @@ class AITradingEngine:
         rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
         expected_ev = prob * rr - (1.0 - prob)
 
-        # Kelly-informed adjustment (small, capped multiplier)
-        kelly = prob - ((1 - prob) / (rr + 1e-9))
-        kelly_factor = min(1.5, max(0.5, 1.0 + (kelly * 2.0))) if kelly > 0 else 0.5
+        # If EV is clearly negative, skip
+        if expected_ev < -0.25:
+            self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
+            return None
 
-        # If EV is clearly negative, reduce risk_mult / skip
-        if expected_ev < 0:
-            nn_result["risk_mult"] = max(0.25, nn_result.get("risk_mult", 1.0) * 0.5)
-            if expected_ev < -0.25:
-                self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
-                return None
-
-        tp1_dist = tp_dist * 0.33
-        tp2_dist = tp_dist * 0.66
-        tp3_dist = tp_dist
+        tp1_dist, tp2_dist, tp3_dist = tp_dist * 0.33, tp_dist * 0.66, tp_dist
 
         # Absolute Prices
         if signal["signal"] == "BUY":
@@ -188,8 +158,8 @@ class AITradingEngine:
             tp2_price = ref_price - tp2_dist
             tp3_price = ref_price - tp3_dist
 
-        # Risk sizing
-        risk_mult = nn_result.get("risk_mult", 1.0) * kelly_factor
+        # Dynamic Sizing ensuring small tight stops result in larger relative lot sizes natively
+        risk_mult = nn_result.get("risk_mult", 1.0)
         target_risk_account = self.user_balance_account * ((self.risk_pct * risk_mult) / 100)
         points_risk = sl_dist / point
         risk_per_lot = points_risk * tick_value
@@ -243,10 +213,7 @@ class AITradingEngine:
                     return None
 
         # Profit Calculation
-        points_profit = tp_dist / point
-        profit_account = points_profit * tick_value * lots
-
-        # Final Conversion for Reporting (Always provide ZAR for UI)
+        profit_account = (tp_dist / point) * tick_value * lots
         actual_risk_zar = actual_risk_account * usdzar_rate if self.currency == "USD" else actual_risk_account
         profit_zar = profit_account * usdzar_rate if self.currency == "USD" else profit_account
 
@@ -258,7 +225,7 @@ class AITradingEngine:
                 "tp1": round(tp1_price, digits),
                 "tp2": round(tp2_price, digits),
                 "tp3": round(tp3_price, digits),
-                "lot_size": round(lots, 2),
+                "lot_size": lots,
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
                 "risk_account": round(actual_risk_account, 2),
@@ -266,7 +233,7 @@ class AITradingEngine:
                 "tick_value": tick_value,
                 "point": point,
                 "atr": atr,
-                "is_high_risk": self._is_high_volatility_symbol(symbol),
+                "is_high_risk": is_volatile_asset,
                 "order_type": order_type,
             }
         )
@@ -290,15 +257,14 @@ class AITradingEngine:
         klines = await provider.fetch_klines(symbol, htf_tf, 200)
         trend = "FLAT"
         if klines:
-            df = pd.DataFrame(klines)
-            df = TechnicalAnalyzer.calculate_indicators(df)
+            df = TechnicalAnalyzer.calculate_indicators(pd.DataFrame(klines))
             trend = TechnicalAnalyzer.get_htf_trend(df)
 
         self.htf_cache[symbol] = {"trend": trend, "time": now}
         return trend
 
-    def _get_session_status(self) -> Dict:
-        """Returns allowed strategy types based on SAST time."""
+    def _get_session_status(self, symbol: str) -> Dict:
+        """Determines active session and assigns volatility multipliers per symbol class."""
         now = datetime.now()
         hour = now.hour
 
@@ -307,16 +273,34 @@ class AITradingEngine:
         is_london = SESSION_CONFIG["LONDON_START"] <= hour < SESSION_CONFIG["LONDON_END"]
         is_ny = SESSION_CONFIG["NY_START"] <= hour < SESSION_CONFIG["NY_END"]
 
-        allow_trade = is_asian or is_london or is_ny
+        active_session = "NONE"
+        if is_ny:
+            active_session = "NY"
+        elif is_london:
+            active_session = "LONDON"
+        elif is_asian:
+            active_session = "ASIAN"
 
-        return {"allow_trade": allow_trade}
+        # Apply Session-Specific Volatility Boosts for target instruments
+        session_multiplier = 1.0
+        if any(x in symbol for x in ["XAU", "US30", "NAS", "USD"]):
+            if active_session == "NY":
+                session_multiplier = 1.15
+        elif any(x in symbol for x in ["EUR", "GBP"]):
+            if active_session == "LONDON":
+                session_multiplier = 1.15
+        elif any(x in symbol for x in ["JPY", "AUD", "NZD"]):
+            if active_session == "ASIAN":
+                session_multiplier = 1.15
+
+        allow_trade = is_asian or is_london or is_ny
+        return {"allow_trade": allow_trade, "active_session": active_session, "multiplier": session_multiplier}
 
     def _log_once(self, key: str, message: str, level=logging.INFO):
         """Prevents log spamming for the same event within 5 minutes."""
         now = time.time()
-        if key in self._log_throttle:
-            if now - self._log_throttle[key] < 300:
-                return
+        if key in self._log_throttle and now - self._log_throttle[key] < 300:
+            return
 
         self._log_throttle[key] = now
         logger.log(level, message)
@@ -345,18 +329,16 @@ class AITradingEngine:
             return None
 
         # 3. Session Info
-        session_info = self._get_session_status()
+        session_info = self._get_session_status(symbol)
         if not session_info.get("allow_trade", True):
             return None
 
         # 4. Data Preparation
         df = await asyncio.to_thread(self.prepare_data, klines)
-
         if df is None or df.empty:
             return None
 
         curr = df.iloc[-1]
-
         if curr["atr"] <= 0:
             return None
 
@@ -374,7 +356,7 @@ class AITradingEngine:
             return None
 
         # 6. Unified SMC POI Detection
-        active_fvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
+        active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
 
         # 7. Check Loss Cooldown (Database)
         try:
@@ -387,13 +369,21 @@ class AITradingEngine:
         structure_info = TechnicalAnalyzer.detect_structure(df)
         htf_trend = await self._get_htf_trend(symbol, provider)
 
+        # Utilize Unified Sweep logic
+        pdl, pdh = None, None
+        df_temp = df.copy()
+        df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
+        prev_days = df_temp[df_temp["date"] < df_temp["date"].iloc[-1]]
+        if not prev_days.empty:
+            last_day = prev_days["date"].iloc[-1]
+            yesterday_df = prev_days[prev_days["date"] == last_day]
+            pdh, pdl = yesterday_df["high"].max(), yesterday_df["low"].min()
+
+        daily_levels = {"pdh": pdh, "pdl": pdl}
+        is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df, structure_info, daily_levels)
+
         final_signal = self.strategy_analyzer.analyze_router(
-            curr,
-            df,
-            htf_trend,
-            active_fvgs,
-            active_obs,
-            structure_info,
+            curr, df, htf_trend, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
         )
 
         if not final_signal:
@@ -403,19 +393,26 @@ class AITradingEngine:
         final_signal["is_high_risk"] = is_volatile_pair
 
         # 8. ML Prediction (Feature Extraction)
-        all_pois = active_fvgs + active_obs
-        dist_nearest_poi = 0.0
-
-        in_fvg = 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0
-        in_ob = 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0
-
-        if all_pois:
-            nearest = min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))
-            dist_nearest_poi = (
-                min(abs(nearest["high"] - curr["close"]), abs(nearest["low"] - curr["close"])) / curr["close"]
+        all_pois = active_fvgs + active_ifvgs + active_obs
+        dist_nearest_poi = (
+            min(
+                abs(
+                    min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                        "high"
+                    ]
+                    - curr["close"]
+                ),
+                abs(
+                    min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                        "low"
+                    ]
+                    - curr["close"]
+                ),
             )
-
-        strat_name = final_signal.get("strategy", "")
+            / curr["close"]
+            if all_pois
+            else 0.0
+        )
 
         features = {
             "is_htf_aligned": (
@@ -424,9 +421,10 @@ class AITradingEngine:
                 or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
                 else -1
             ),
-            "is_liquidity_swept": final_signal.get("is_liquidity_swept", 0),
-            "is_in_fvg": in_fvg,
-            "is_in_orderblock": in_ob,
+            "is_liquidity_swept": is_liquidity_swept,
+            "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
+            "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
+            "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
             "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
             "session_volume_spike": 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0,
             "distance_to_poi": dist_nearest_poi,
@@ -436,7 +434,9 @@ class AITradingEngine:
         nn_result = self.nn_brain.predict(features)
 
         # Confidence Adjustment
-        final_signal = await self._adjust_confidence(symbol, final_signal, nn_result["prob"], htf_trend)
+        final_signal = await self._adjust_confidence(
+            symbol, final_signal, nn_result["prob"], htf_trend, session_info["multiplier"]
+        )
         if final_signal["confidence"] < self.min_confidence:
             return None
 

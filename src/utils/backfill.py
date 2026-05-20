@@ -19,7 +19,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
     collector = DataCollector()
     total_rows_collected = 0
     max_total_rows = 14000
-    max_rows_per_symbol = 1000
+    max_rows_per_symbol = 1500
 
     symbols = target_symbols or (FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
@@ -56,7 +56,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = TechnicalAnalyzer.calculate_indicators(df_full)
         df_htf = TechnicalAnalyzer.calculate_indicators(df_htf)
 
-        # 2. Vectorized HTF Trend Mapping (Fixes is_htf_aligned = -1 issue)
+        # 2. Vectorized HTF Trend Mapping
         htf_trends = []
         last_hs, last_ls = [], []
         curr_htf = "FLAT"
@@ -76,7 +76,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = pd.merge_asof(df_full, df_htf[["time", "htf_trend"]], on="time", direction="backward")
         df_full["htf_trend"] = df_full["htf_trend"].fillna("FLAT")
 
-        # 3. Vectorized Daily Levels (Avoids O(N^2) dataframe copying)
+        # 3. Vectorized Daily Levels
         df_full["date"] = pd.to_datetime(df_full["time"], unit="s").dt.date
         daily_highs = df_full.groupby("date")["high"].max().shift(1)
         daily_lows = df_full.groupby("date")["low"].min().shift(1)
@@ -137,6 +137,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
 
         symbol_rows_collected = 0
         active_fvgs = []
+        active_ifvgs = []
         active_obs = []
 
         for i in range(2, len(records) - 50):
@@ -149,12 +150,24 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             curr = records[i]
 
             curr_low, curr_high = curr["low"], curr["high"]
-            active_fvgs = [
-                f
-                for f in active_fvgs
-                if not (f["type"] == "BULL" and curr_low < f["low"])
-                and not (f["type"] == "BEAR" and curr_high > f["high"])
+
+            # 1. Manage FVGs & IFVGs
+            for f in active_fvgs[:]:
+                if f["type"] == "BULL" and curr_low < f["low"]:
+                    active_ifvgs.append({"type": "BEAR", "high": f["high"], "low": f["low"]})
+                    active_fvgs.remove(f)
+                elif f["type"] == "BEAR" and curr_high > f["high"]:
+                    active_ifvgs.append({"type": "BULL", "high": f["high"], "low": f["low"]})
+                    active_fvgs.remove(f)
+
+            active_ifvgs = [
+                i_f
+                for i_f in active_ifvgs
+                if not (i_f["type"] == "BULL" and curr_low < i_f["low"])
+                and not (i_f["type"] == "BEAR" and curr_high > i_f["high"])
             ]
+
+            # Invalidate OBs
             active_obs = [
                 o
                 for o in active_obs
@@ -168,11 +181,14 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
                 active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
 
-            # Detect new OB
+            # Detect new OB and Tier
+            is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
+            ob_tier = "MAJOR" if is_pivot else "INTERNAL"
+
             if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
-                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"]})
+                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
             elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
-                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"]})
+                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
 
             # Skip signal processing during warmup
             if i < 200:
@@ -187,30 +203,42 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 "last_low": curr["last_low"],
             }
             htf_trend = curr["htf_trend"]
+            daily_levels = {"pdh": curr.get("pdh"), "pdl": curr.get("pdl")}
 
+            # Provide a bounded dataframe slice for 50-period sweep detection
+            df_slice = df_full.iloc[max(0, i - 100) : i + 1]
+
+            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df_slice, structure_info, daily_levels)
             df_dummy = pd.DataFrame()
 
             signal = engine.strategy_analyzer.analyze_router(
-                curr, df_dummy, htf_trend, active_fvgs, active_obs, structure_info
+                curr, df_slice, htf_trend, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
             )
 
             if not signal:
                 continue
 
             # Precise Feature Extraction
-            all_pois = active_fvgs + active_obs
-            dist_nearest_poi = 0.0
-
-            in_fvg = 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0
-            in_ob = 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0
-
-            if all_pois:
-                nearest = min(
-                    all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"]))
+            all_pois = active_fvgs + active_ifvgs + active_obs
+            dist_nearest_poi = (
+                min(
+                    abs(
+                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                            "high"
+                        ]
+                        - curr["close"]
+                    ),
+                    abs(
+                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
+                            "low"
+                        ]
+                        - curr["close"]
+                    ),
                 )
-                dist_nearest_poi = (
-                    min(abs(nearest["high"] - curr["close"]), abs(nearest["low"] - curr["close"])) / curr["close"]
-                )
+                / curr["close"]
+                if all_pois
+                else 0.0
+            )
 
             features = {
                 "is_htf_aligned": (
@@ -219,9 +247,10 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                     or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
                     else -1
                 ),
-                "is_liquidity_swept": signal.get("is_liquidity_swept", 0),
-                "is_in_fvg": in_fvg,
-                "is_in_orderblock": in_ob,
+                "is_liquidity_swept": is_liquidity_swept,
+                "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
+                "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
+                "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
                 "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
                 "session_volume_spike": 1 if curr["volume"] > (curr["vol_mean_20"] * 1.5) else 0,
                 "distance_to_poi": dist_nearest_poi,
