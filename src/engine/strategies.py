@@ -33,15 +33,15 @@ class StrategyAnalyzer:
         if not signal:
             signal = self._smc_counter_reversion(curr, df, htf_trend, structure, is_liquidity_swept)
 
-        # 2. IFVG Continuation (Requires established structure memory)
+        # 3. IFVG Continuation (Requires established structure memory)
         if not signal:
             signal = self._ifvg_mitigation(curr, df, htf_trend, structure, active_ifvgs)
 
-        # 3. POI Reversals (Pullbacks to Order Blocks & FVGs)
+        # 4. POI Reversals (Pullbacks to Order Blocks & FVGs)
         if not signal:
             signal = self._smc_poi_reversal(curr, df, htf_trend, structure, active_fvgs, active_obs)
 
-        # 4. VWAP Bounce (Wick below, close above)
+        # 5. VWAP Bounce (Wick below, close above)
         if not signal:
             signal = self._vwap_bounce(curr, df, htf_trend, structure, vwap_val)
 
@@ -55,10 +55,15 @@ class StrategyAnalyzer:
         self, curr: dict, df: pd.DataFrame, htf_trend: str, structure: dict, is_liquidity_swept: int
     ) -> Optional[Dict]:
         """
-        Detects powerful liquidity sweeps that trigger CHoCH and align with HTF trend.
+        Detects powerful liquidity sweeps that trigger a structural break (CHoCH or BOS) and align with HTF trend.
         """
         choch = structure.get("choch")
-        if not choch or is_liquidity_swept == 0:
+        bos = structure.get("bos")
+
+        # Valid break is either a Reversal (CHoCH) or Continuation (BOS)
+        struct_break = choch if choch else bos
+
+        if not struct_break or is_liquidity_swept == 0:
             return None
 
         atr_buffer = curr["atr"] * 0.2
@@ -77,7 +82,7 @@ class StrategyAnalyzer:
             conf = 86.0
 
         #   --- BULLISH SWEEPS   ---
-        if choch == "BULL" and htf_trend == "BULL":
+        if struct_break == "BULL" and htf_trend == "BULL":
             return {
                 "strategy": strat_name,
                 "signal": "BUY",
@@ -88,7 +93,7 @@ class StrategyAnalyzer:
             }
 
         #   --- BEARISH SWEEPS   ---
-        if choch == "BEAR" and htf_trend == "BEAR":
+        if struct_break == "BEAR" and htf_trend == "BEAR":
             return {
                 "strategy": strat_name,
                 "signal": "SELL",
@@ -108,9 +113,12 @@ class StrategyAnalyzer:
         Triggers strictly on Major (Tier 2) or Daily (Tier 3) Liquidity Sweeps where local structure reverses.
         """
         choch = structure.get("choch")
+        bos = structure.get("bos")
 
-        # Require a CHoCH and a major liquidity sweep to validate trading against the HTF
-        if not choch or is_liquidity_swept < 2:
+        struct_break = choch if choch else bos
+
+        # Require a structural break and a major liquidity sweep to validate trading against the HTF
+        if not struct_break or is_liquidity_swept < 2:
             return None
 
         atr_buffer = curr["atr"] * 0.2
@@ -120,8 +128,8 @@ class StrategyAnalyzer:
         strat_name = "Daily Reversion (Counter)" if is_liquidity_swept == 3 else "Major Sweep (Counter)"
         conf = 82.0 if is_liquidity_swept == 3 else 76.0
 
-        # BEARISH Reversion: Market pumps, sweeps a major high, prints a bearish CHoCH, but HTF is BULL/FLAT
-        if choch == "BEAR" and htf_trend in ["BULL", "FLAT"]:
+        # BEARISH Reversion: Market pumps, sweeps a major high, prints a bearish break, but HTF is BULL/FLAT
+        if struct_break == "BEAR" and htf_trend in ["BULL", "FLAT"]:
             return {
                 "strategy": strat_name,
                 "signal": "SELL",
@@ -132,7 +140,7 @@ class StrategyAnalyzer:
             }
 
         # BULLISH Reversion: Market dumps, sweeps a major low, prints a bullish CHoCH, but HTF is BEAR/FLAT
-        if choch == "BULL" and htf_trend in ["BEAR", "FLAT"]:
+        if struct_break == "BULL" and htf_trend in ["BEAR", "FLAT"]:
             return {
                 "strategy": strat_name,
                 "signal": "BUY",

@@ -65,7 +65,7 @@ class AITradingEngine:
 
         # 1. MTF Trend Alignment (Strictly enforced by router, but rewarded here)
         trend_bonus = (
-            5
+            15
             if (htf_trend == "BULL" and signal["direction"] == "LONG")
             or (htf_trend == "BEAR" and signal["direction"] == "SHORT")
             or is_counter
@@ -286,12 +286,15 @@ class AITradingEngine:
 
         # Apply Session-Specific Volatility Boosts for target instruments
         session_multiplier = 1.0
-        if any(x in symbol for x in ["XAU", "US30", "NAS", "USD"]):
-            if active_session == "NY":
-                session_multiplier = 1.15
-        elif any(x in symbol for x in ["EUR", "GBP"]):
+        # Catch specific London pairs first
+        if any(x in symbol for x in ["EUR", "GBP"]):
             if active_session == "LONDON":
                 session_multiplier = 1.15
+        # Then catch NY-specific pairs and indices
+        elif any(x in symbol for x in ["XAU", "US30", "NAS", "USD", "BTC", "ETH"]):
+            if active_session in ["NY", "LONDON"]:
+                session_multiplier = 1.15
+        # Asian pairs
         elif any(x in symbol for x in ["JPY", "AUD", "NZD"]):
             if active_session == "ASIAN":
                 session_multiplier = 1.15
