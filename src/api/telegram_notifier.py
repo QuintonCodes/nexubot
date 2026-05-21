@@ -204,7 +204,7 @@ class TelegramNotifier:
                 f"🌍 *Session Flow:* {session_info['active_session']} (Volatility: {session_info['multiplier']}x)\n"
                 f"📊 *HTF Bias (1H):* {htf_trend}\n"
                 f"🧭 *Local Structure ({TIMEFRAME}):* {structure['structure']} (Last Break: {structure.get('bos') or structure.get('choch') or 'None'})\n"
-                f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs Active\n"
+                f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs Active\n"
                 f"🧹 *Sweep Status:* {sweep_text}\n"
                 f"🌊 *VWAP State:* {vwap_trend}\n"
                 f"🔥 *Volume Anomaly:* {'Detected' if vol_spike else 'Normal'}\n\n"

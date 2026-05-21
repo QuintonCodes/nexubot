@@ -66,9 +66,9 @@ class TechnicalAnalyzer:
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
-            is_swept = 2
+            is_swept = 3
         elif pdh and recent_high_5 > pdh and close_price < pdh:
-            is_swept = 2
+            is_swept = 3
 
         # Tier 2: Major 50-Period Sweeps
         elif major_low_50 and recent_low_5 < major_low_50 and close_price > major_low_50:
@@ -199,8 +199,8 @@ class TechnicalAnalyzer:
             return "FLAT"
 
         # Calculate basic pivots for the HTF context
-        ph = df["high"] == df["high"].rolling(5, center=True).max()
-        pl = df["low"] == df["low"].rolling(5, center=True).min()
+        ph = df["high"] == df["high"].rolling(20, center=True).max()
+        pl = df["low"] == df["low"].rolling(20, center=True).min()
 
         highs = df[ph]["high"].values
         lows = df[pl]["low"].values
@@ -212,10 +212,10 @@ class TechnicalAnalyzer:
         last_high, prev_high = highs[-1], highs[-2]
         last_low, prev_low = lows[-1], lows[-2]
 
-        # Structure Logic: HH + HL = Bullish | LH + LL = Bearish
-        if last_high > prev_high and last_low > prev_low:
+        # Structure Logic: Tolerate equal lows/highs to keep trend active during complex pullbacks
+        if last_high > prev_high and last_low >= prev_low:
             return "BULL"
-        elif last_high < prev_high and last_low < prev_low:
+        elif last_high < prev_high and last_low <= prev_low:
             return "BEAR"
 
         return "FLAT"  # Consolidation / Choppy Market
