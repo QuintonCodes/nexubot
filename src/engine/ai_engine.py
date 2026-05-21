@@ -61,11 +61,14 @@ class AITradingEngine:
         """
         base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
+        is_counter = "Counter" in signal.get("strategy", "")
+
         # 1. MTF Trend Alignment (Strictly enforced by router, but rewarded here)
         trend_bonus = (
             5
             if (htf_trend == "BULL" and signal["direction"] == "LONG")
             or (htf_trend == "BEAR" and signal["direction"] == "SHORT")
+            or is_counter
             else 0
         )
 
@@ -414,11 +417,15 @@ class AITradingEngine:
             else 0.0
         )
 
+        # Detect if this is a deliberate counter-trend strategy
+        is_counter = "Counter" in final_signal.get("strategy", "")
+
         features = {
             "is_htf_aligned": (
                 1
                 if (final_signal["direction"] == "LONG" and htf_trend == "BULL")
                 or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
+                or is_counter
                 else -1
             ),
             "is_liquidity_swept": is_liquidity_swept,

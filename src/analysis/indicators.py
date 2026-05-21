@@ -38,8 +38,8 @@ class TechnicalAnalyzer:
         df["daily_open"] = df.groupby("date_group")["open"].transform("first")
 
         # 4. Internal Pivot Tracking (For local structure and liquidity pools)
-        df["pivot_high"] = df["high"] == df["high"].rolling(10, center=True).max()
-        df["pivot_low"] = df["low"] == df["low"].rolling(10, center=True).min()
+        df["pivot_high"] = df["high"] == df["high"].rolling(6, center=True).max()
+        df["pivot_low"] = df["low"] == df["low"].rolling(6, center=True).min()
 
         return df.fillna(0)
 
@@ -93,8 +93,12 @@ class TechnicalAnalyzer:
         if len(df) < 20:
             return {"bos": None, "choch": None, "structure": "FLAT"}
 
-        # Exclude the last 5 candles.
-        confirmed_df = df.iloc[:-5]
+        recent_df = df.tail(
+            200
+        )  # Analyze the last 200 candles for structure, but only confirm pivots from the earlier portion to avoid noise at the live edge.
+
+        # Exclude the last 3 candles.
+        confirmed_df = recent_df.iloc[:-3]
 
         # Extract actual pivot prices
         highs = confirmed_df[confirmed_df["pivot_high"]]["high"].values

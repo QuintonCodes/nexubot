@@ -79,13 +79,13 @@ class TelegramNotifier:
         if not self.engine:
             return
 
-        if not context.args or context.args[0].upper() == "ALL":
+        if not context.args or context.args[0] == "ALL":
             self.engine.focused_symbols = []
             await update.message.reply_text(
                 "🌐 *Focus Mode Disabled:* Scanning ALL allowed symbols.", parse_mode="Markdown"
             )
         else:
-            symbols = [s.upper() for s in context.args]
+            symbols = [s for s in context.args]
             self.engine.focused_symbols = symbols
             await update.message.reply_text(
                 f"🎯 *Focus Mode Active:*\nThe engine is now exclusively hunting setups on: *{', '.join(symbols)}*",

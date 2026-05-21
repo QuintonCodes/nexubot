@@ -240,11 +240,14 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 else 0.0
             )
 
+            is_counter = "Counter" in signal.get("strategy", "")
+
             features = {
                 "is_htf_aligned": (
                     1
                     if (signal["direction"] == "LONG" and htf_trend == "BULL")
                     or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
+                    or is_counter
                     else -1
                 ),
                 "is_liquidity_swept": is_liquidity_swept,

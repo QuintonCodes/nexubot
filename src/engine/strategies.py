@@ -23,12 +23,15 @@ class StrategyAnalyzer:
         Enforces HTF alignment and executes strictly on structural confirmations.
         """
         vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
-
         signal = None
 
         # 1. Liquidity Sweeps (Requires CHoCH to confirm reversal)
         if not signal:
             signal = self._smc_liquidity_sweep(curr, df, htf_trend, structure, is_liquidity_swept)
+
+        # 2. Counter-Trend Mean Reversion
+        if not signal:
+            signal = self._smc_counter_reversion(curr, df, htf_trend, structure, is_liquidity_swept)
 
         # 2. IFVG Continuation (Requires established structure memory)
         if not signal:
@@ -93,6 +96,50 @@ class StrategyAnalyzer:
                 "confidence": conf,
                 "order_type": "MARKET",
                 "suggested_sl": recent_high + atr_buffer,
+            }
+
+        return None
+
+    def _smc_counter_reversion(
+        self, curr: dict, df: pd.DataFrame, htf_trend: str, structure: dict, is_liquidity_swept: int
+    ) -> Optional[Dict]:
+        """
+        Counter-Trend Mean Reversion.
+        Triggers strictly on Major (Tier 2) or Daily (Tier 3) Liquidity Sweeps where local structure reverses.
+        """
+        choch = structure.get("choch")
+
+        # Require a CHoCH and a major liquidity sweep to validate trading against the HTF
+        if not choch or is_liquidity_swept < 2:
+            return None
+
+        atr_buffer = curr["atr"] * 0.2
+        recent_low = curr.get("recent_low_5", df["low"].tail(5).min())
+        recent_high = curr.get("recent_high_5", df["high"].tail(5).max())
+
+        strat_name = "Daily Reversion (Counter)" if is_liquidity_swept == 3 else "Major Sweep (Counter)"
+        conf = 82.0 if is_liquidity_swept == 3 else 76.0
+
+        # BEARISH Reversion: Market pumps, sweeps a major high, prints a bearish CHoCH, but HTF is BULL/FLAT
+        if choch == "BEAR" and htf_trend in ["BULL", "FLAT"]:
+            return {
+                "strategy": strat_name,
+                "signal": "SELL",
+                "direction": "SHORT",
+                "confidence": conf,
+                "order_type": "MARKET",
+                "suggested_sl": recent_high + atr_buffer,
+            }
+
+        # BULLISH Reversion: Market dumps, sweeps a major low, prints a bullish CHoCH, but HTF is BEAR/FLAT
+        if choch == "BULL" and htf_trend in ["BEAR", "FLAT"]:
+            return {
+                "strategy": strat_name,
+                "signal": "BUY",
+                "direction": "LONG",
+                "confidence": conf,
+                "order_type": "MARKET",
+                "suggested_sl": recent_low - atr_buffer,
             }
 
         return None
