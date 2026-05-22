@@ -1,11 +1,9 @@
 import joblib
 import logging
-import numpy as np
 import os
 import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.class_weight import compute_class_weight
 from keras.callbacks import EarlyStopping
 from typing import Dict
 
@@ -102,12 +100,6 @@ class NeuralPredictor:
                 ]
             )
 
-            # Automatically calculate weights to penalize the majority class (losses)
-            # and heavily reward the minority class (wins)
-            class_weights = compute_class_weight(class_weight="balanced", classes=np.unique(y_entry), y=y_entry)
-            weight_dict = dict(enumerate(class_weights))
-            logger.info(f"⚖️ Applied ML Class Weights to balance dataset: {weight_dict}")
-
             entry_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
             entry_model.fit(
                 X_scaled,
@@ -117,7 +109,6 @@ class NeuralPredictor:
                 verbose=1,
                 validation_split=0.15,
                 callbacks=[early_stop],
-                class_weight=weight_dict,
             )
             entry_model.save(ENTRY_MODEL_FILE)
 

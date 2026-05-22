@@ -240,16 +240,20 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 else 0.0
             )
 
-            is_counter = "Counter" in signal.get("strategy", "")
+            # Determine strict HTF alignment of the simulated trade direction
+            alignment = 0
+            if htf_trend != "FLAT":
+                alignment = (
+                    1
+                    if (
+                        (signal["direction"] == "LONG" and htf_trend == "BULL")
+                        or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
+                    )
+                    else -1
+                )
 
             features = {
-                "is_htf_aligned": (
-                    1
-                    if (signal["direction"] == "LONG" and htf_trend == "BULL")
-                    or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
-                    or is_counter
-                    else -1
-                ),
+                "is_htf_aligned": alignment,
                 "is_liquidity_swept": is_liquidity_swept,
                 "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
                 "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,

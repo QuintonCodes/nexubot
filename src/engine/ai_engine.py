@@ -131,6 +131,15 @@ class AITradingEngine:
             if (atr * 0.3) < suggested_dist < (atr * 5.0):
                 sl_dist = suggested_dist
 
+        # Excursion / Stop-Loss Cap Filter
+        max_sl_cap = atr * 3.5  # Hard cap to discard crazy excursions
+        if sl_dist > max_sl_cap:
+            self._log_once(
+                f"excursion_{symbol}",
+                f"Skipping {symbol}: Setup requires SL ({sl_dist:.5f}) exceeding max ATR cap ({max_sl_cap:.5f})",
+            )
+            return None
+
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
         pred_exit_atr = max(1, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
@@ -228,6 +237,7 @@ class AITradingEngine:
                 "tp1": round(tp1_price, digits),
                 "tp2": round(tp2_price, digits),
                 "tp3": round(tp3_price, digits),
+                "digits": digits,
                 "lot_size": lots,
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
@@ -420,17 +430,19 @@ class AITradingEngine:
             else 0.0
         )
 
-        # Detect if this is a deliberate counter-trend strategy
-        is_counter = "Counter" in final_signal.get("strategy", "")
+        alignment = 0
+        if htf_trend != "FLAT":
+            alignment = (
+                1
+                if (
+                    (final_signal["direction"] == "LONG" and htf_trend == "BULL")
+                    or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
+                )
+                else -1
+            )
 
         features = {
-            "is_htf_aligned": (
-                1
-                if (final_signal["direction"] == "LONG" and htf_trend == "BULL")
-                or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
-                or is_counter
-                else -1
-            ),
+            "is_htf_aligned": alignment,
             "is_liquidity_swept": is_liquidity_swept,
             "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
             "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
@@ -447,7 +459,12 @@ class AITradingEngine:
         final_signal = await self._adjust_confidence(
             symbol, final_signal, nn_result["prob"], htf_trend, session_info["multiplier"]
         )
-        if final_signal["confidence"] < self.min_confidence:
+
+        required_conf = self.min_confidence
+        if is_volatile_pair:
+            required_conf -= 5.0
+
+        if final_signal["confidence"] < required_conf:
             return None
 
         # 9. Execution & Final Risk Sizing

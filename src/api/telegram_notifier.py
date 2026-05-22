@@ -160,8 +160,12 @@ class TelegramNotifier:
 
             vol_spike = 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0
 
+            alignment = 0
+            if htf_trend != "FLAT":
+                alignment = 1 if htf_trend == structure["structure"] else -1
+
             features = {
-                "is_htf_aligned": 1 if (htf_trend == structure["structure"] and htf_trend != "FLAT") else -1,
+                "is_htf_aligned": alignment,
                 "is_liquidity_swept": is_liquidity_swept,
                 "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
                 "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
@@ -251,6 +255,16 @@ class TelegramNotifier:
         direction = "LONG" if signal["signal"] == "BUY" else "SHORT"
         volatility_warning = "⚠️ *VOLATILE ASSET*" if signal.get("is_high_risk", False) else ""
 
+        # Dynamic Decimal Formatting
+        digits = signal.get("digits", 5)
+        fmt = f"{{:.{digits}f}}"
+
+        entry_str = fmt.format(signal["price"])
+        sl_str = fmt.format(signal["sl"])
+        tp1_str = fmt.format(signal["tp1"])
+        tp2_str = fmt.format(signal["tp2"])
+        tp3_str = fmt.format(signal["tp3"])
+
         msg = (
             f"{header}\n\n"
             f"📈 *Pair:* {symbol}\n"
@@ -258,11 +272,11 @@ class TelegramNotifier:
             f"🧩 *Setup:* {signal.get('strategy', 'SMC Execution')}\n"
             f"{volatility_warning}\n"
             f"🧠 *AI Confidence:* {signal['confidence']:.1f}%\n\n"
-            f"🎯 *Entry:* {signal['price']:.5f}\n"
-            f"🛑 *Stop Loss:* {signal['sl']:.5f}\n"
-            f"💰 *TP1:* {signal['tp1']:.5f}\n"
-            f"💰 *TP2:* {signal['tp2']:.5f}\n"
-            f"💰 *TP3:* {signal['tp3']:.5f}\n\n"
+            f"🎯 *Entry:* {entry_str}\n"
+            f"🛑 *Stop Loss:* {sl_str}\n"
+            f"💰 *TP1:* {tp1_str}\n"
+            f"💰 *TP2:* {tp2_str}\n"
+            f"💰 *TP3:* {tp3_str}\n\n"
             f"⚖️ *Recommended Lot:* {signal.get('lot_size', 0.01)}"
         )
         self.send_message(msg)
