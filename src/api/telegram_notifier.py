@@ -148,7 +148,7 @@ class TelegramNotifier:
                 pdh, pdl = None, None
 
             daily_levels = {"pdh": pdh, "pdl": pdl}
-            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df, structure, daily_levels)
+            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, structure, daily_levels)
 
             sweep_text = "None"
             if is_liquidity_swept == 3:
@@ -158,7 +158,7 @@ class TelegramNotifier:
             elif is_liquidity_swept == 1:
                 sweep_text = "Internal Pivot Swept"
 
-            vol_spike = 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0
+            vol_spike = 1 if curr["volume"] > (curr.get("vol_sma_20", 0) * 1.5) else 0
 
             alignment = 0
             if htf_trend != "FLAT":

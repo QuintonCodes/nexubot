@@ -5,21 +5,29 @@ from typing import List, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
 from src.data.collector import DataCollector
-from src.config import FALLBACK_CRYPTO, FALLBACK_FOREX, FALLBACK_INDICES, FALLBACK_METALS, TIMEFRAME
+from src.config import (
+    FALLBACK_CRYPTO,
+    FALLBACK_FOREX,
+    FALLBACK_INDICES,
+    FALLBACK_METALS,
+    HIGH_VOLATILITY_IDENTIFIERS,
+    TIMEFRAME,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = None):
     """
-    Simulates historical price action to build a reliable ML dataset
-    using highly optimized state-tracking and vectorized preprocessing.
+    Simulates historical price action to build a reliable ML dataset.
+    Fully synchronized with live structural TP capping and RR filters.
     """
 
     collector = DataCollector()
     total_rows_collected = 0
     max_total_rows = 14000
     max_rows_per_symbol = 1500
+    future_window_size = 150
 
     symbols = target_symbols or (FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
@@ -38,7 +46,8 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             continue
 
         point = symbol_info.get("point", 0.00001)
-        tick_value = symbol_info.get("trade_tick_value", 0.0)
+        tick_value = symbol_info.get("trade_tick_value", 1.0)
+        is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
         # Fetch M1 Data (Main execution TF) and H1 Data (HTF Bias)
         klines_main = await provider.fetch_klines(symbol, TIMEFRAME, 50000)
@@ -48,11 +57,10 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             logger.warning(f"⚠️ Not enough data for {symbol}. Skipping.")
             continue
 
-        # Load into DataFrame and pre-calculate indicators for blazing fast simulation
         df_full = pd.DataFrame(klines_main).sort_values("time").reset_index(drop=True)
         df_htf = pd.DataFrame(klines_htf).sort_values("time").reset_index(drop=True)
 
-        # 1. Pre-calculate indicators
+        # 1. Pre-calculate all indicators (Now includes Lookback Windows)
         df_full = TechnicalAnalyzer.calculate_indicators(df_full)
         df_htf = TechnicalAnalyzer.calculate_indicators(df_htf)
 
@@ -127,74 +135,19 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full["last_high"] = last_hs_m1
         df_full["last_low"] = last_ls_m1
 
-        df_full["recent_low_5"] = df_full["low"].rolling(5).min()
-        df_full["recent_high_5"] = df_full["high"].rolling(5).max()
-        df_full["recent_low_4"] = df_full["low"].rolling(4).min()
-        df_full["recent_high_4"] = df_full["high"].rolling(4).max()
-        df_full["vol_mean_20"] = df_full["volume"].rolling(20).mean()
-
         records = df_full.to_dict("records")
-
         symbol_rows_collected = 0
-        active_fvgs = []
-        active_ifvgs = []
-        active_obs = []
 
-        for i in range(2, len(records) - 50):
+        for i in range(200, len(records) - future_window_size):
             if symbol_rows_collected >= max_rows_per_symbol:
                 logger.info(f"✅ {symbol} reached {max_rows_per_symbol} row cap.")
                 break
 
-            c1 = records[i - 2]
-            c2 = records[i - 1]
             curr = records[i]
 
-            curr_low, curr_high = curr["low"], curr["high"]
+            records_slice = records[max(0, i - 100) : i + 1]
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(records_slice)
 
-            # 1. Manage FVGs & IFVGs
-            for f in active_fvgs[:]:
-                if f["type"] == "BULL" and curr_low < f["low"]:
-                    active_ifvgs.append({"type": "BEAR", "high": f["high"], "low": f["low"]})
-                    active_fvgs.remove(f)
-                elif f["type"] == "BEAR" and curr_high > f["high"]:
-                    active_ifvgs.append({"type": "BULL", "high": f["high"], "low": f["low"]})
-                    active_fvgs.remove(f)
-
-            active_ifvgs = [
-                i_f
-                for i_f in active_ifvgs
-                if not (i_f["type"] == "BULL" and curr_low < i_f["low"])
-                and not (i_f["type"] == "BEAR" and curr_high > i_f["high"])
-            ]
-
-            # Invalidate OBs
-            active_obs = [
-                o
-                for o in active_obs
-                if not (o["type"] == "BULL" and curr_low < o["low"])
-                and not (o["type"] == "BEAR" and curr_high > o["high"])
-            ]
-
-            # Detect new FVG
-            if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
-                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"]})
-            elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
-                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
-
-            # Detect new OB and Tier
-            is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
-            ob_tier = "MAJOR" if is_pivot else "INTERNAL"
-
-            if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
-                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
-            elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
-                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
-
-            # Skip signal processing during warmup
-            if i < 200:
-                continue
-
-            # Unified Analysis Router
             structure_info = {
                 "bos": curr["bos"],
                 "choch": curr["choch"],
@@ -205,17 +158,71 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             htf_trend = curr["htf_trend"]
             daily_levels = {"pdh": curr.get("pdh"), "pdl": curr.get("pdl")}
 
-            # Provide a bounded dataframe slice for 50-period sweep detection
-            df_slice = df_full.iloc[max(0, i - 100) : i + 1]
-
-            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df_slice, structure_info, daily_levels)
-            df_dummy = pd.DataFrame()
+            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, structure_info, daily_levels)
 
             signal = engine.strategy_analyzer.analyze_router(
-                curr, df_slice, htf_trend, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
+                curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
             )
 
             if not signal:
+                continue
+
+            # Determine strict HTF alignment of the simulated trade direction
+            alignment = 0
+            if htf_trend != "FLAT":
+                alignment = (
+                    1
+                    if (
+                        (signal["direction"] == "LONG" and htf_trend == "BULL")
+                        or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
+                    )
+                    else -1
+                )
+
+            entry_price = curr["close"]
+            atr = curr["atr"]
+
+            # --- SYNCHRONIZED RISK & TP CAPPING ---
+            sl_multiplier = 1.3 if (is_volatile_asset or atr > (curr["close"] * 0.005)) else 1.0
+            sl_dist = max(atr * sl_multiplier, point * 50)
+
+            if "suggested_sl" in signal:
+                suggested_dist = abs(signal["suggested_sl"] - entry_price)
+                if (atr * 0.2) < suggested_dist < (atr * 6.0):
+                    sl_dist = suggested_dist
+
+            all_zones = active_fvgs + active_ifvgs + active_obs
+            opposing_pois = []
+            if signal["direction"] == "LONG":
+                opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > entry_price]
+            else:
+                opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < entry_price]
+
+            nearest_opposing_poi = (
+                min(opposing_pois)
+                if signal["direction"] == "LONG" and opposing_pois
+                else (max(opposing_pois) if signal["direction"] == "SHORT" and opposing_pois else None)
+            )
+            base_tp_dist = max(atr * 3.0, sl_dist * 1.2)
+
+            if signal["direction"] == "LONG":
+                sl = entry_price - sl_dist
+                max_structural_tp = (
+                    (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (entry_price + base_tp_dist)
+                )
+                tp = min(entry_price + base_tp_dist, max_structural_tp)
+                actual_tp_dist = tp - entry_price
+            else:
+                sl = entry_price + sl_dist
+                max_structural_tp = (
+                    (nearest_opposing_poi + point * 15) if nearest_opposing_poi else (entry_price - base_tp_dist)
+                )
+                tp = max(entry_price - base_tp_dist, max_structural_tp)
+                actual_tp_dist = entry_price - tp
+
+            # --- HARD RR FILTER ---
+            rr = (actual_tp_dist / sl_dist) if sl_dist > 0 else 1.0
+            if rr < 1.5:
                 continue
 
             # Precise Feature Extraction
@@ -240,18 +247,6 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 else 0.0
             )
 
-            # Determine strict HTF alignment of the simulated trade direction
-            alignment = 0
-            if htf_trend != "FLAT":
-                alignment = (
-                    1
-                    if (
-                        (signal["direction"] == "LONG" and htf_trend == "BULL")
-                        or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
-                    )
-                    else -1
-                )
-
             features = {
                 "is_htf_aligned": alignment,
                 "is_liquidity_swept": is_liquidity_swept,
@@ -259,22 +254,12 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
                 "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
                 "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
-                "session_volume_spike": 1 if curr["volume"] > (curr["vol_mean_20"] * 1.5) else 0,
+                "session_volume_spike": 1 if curr["volume"] > (curr.get("vol_sma_20", 0) * 1.5) else 0,
                 "distance_to_poi": dist_nearest_poi,
             }
 
-            # Forward Simulation
-            future_window = records[i : i + 200]  # Look ahead next 200 candles (~3 hours)
-            entry_price = curr["close"]
-            atr = curr["atr"]
-
-            # Dynamic SL based on strategy suggestion
-            sl = signal.get(
-                "suggested_sl",
-                entry_price - (atr * 1.5) if signal["direction"] == "LONG" else entry_price + (atr * 1.5),
-            )
-            tp_dist = abs(entry_price - sl) * 2.0
-            tp = entry_price + tp_dist if signal["direction"] == "LONG" else entry_price - tp_dist
+            # Forward Simulation (Tracking exactly next 150 candles)
+            future_window = records[i + 1 : i + 1 + future_window_size]
 
             won = 0
             max_favorable = 0.0

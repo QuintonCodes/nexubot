@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal, Optional, Tuple, Union
 
 
 class TechnicalAnalyzer:
@@ -37,14 +37,25 @@ class TechnicalAnalyzer:
         # 3. Daily Open (SMC Premium/Discount Baseline)
         df["daily_open"] = df.groupby("date_group")["open"].transform("first")
 
-        # 4. Internal Pivot Tracking (For local structure and liquidity pools)
+        # 4. Internal Pivot Tracking
         df["pivot_high"] = df["high"] == df["high"].rolling(6, center=True).max()
         df["pivot_low"] = df["low"] == df["low"].rolling(6, center=True).min()
+
+        # 5. Volume Profile for Institutional Displacement
+        df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=1).mean()
+
+        # 6. Lookback Windows (Centralized to prevent eager evaluation bugs)
+        df["recent_low_5"] = df["low"].rolling(5).min()
+        df["recent_high_5"] = df["high"].rolling(5).max()
+        df["recent_low_4"] = df["low"].rolling(4).min()
+        df["recent_high_4"] = df["high"].rolling(4).max()
+        df["major_low_50"] = df["low"].rolling(50).min().shift(5)
+        df["major_high_50"] = df["high"].rolling(50).max().shift(5)
 
         return df.fillna(0)
 
     @staticmethod
-    def detect_liquidity_sweeps(curr: dict, df: pd.DataFrame, structure: dict, daily_levels: dict) -> int:
+    def detect_liquidity_sweeps(curr: Union[pd.Series, dict], structure: dict, daily_levels: dict) -> int:
         """
         Unified Liquidity Sweep Logic.
         Returns: 3 (Daily Sweep), 2 (Major 50p Sweep), 1 (Internal Sweep), 0 (None)
@@ -55,12 +66,10 @@ class TechnicalAnalyzer:
         last_high = structure.get("last_high")
         close_price = curr["close"]
 
-        recent_low_5 = curr.get("recent_low_5", df["low"].tail(5).min())
-        recent_high_5 = curr.get("recent_high_5", df["high"].tail(5).max())
-
-        # Major 50-period swing highs/lows (offsetting the last 5 to ensure we are grabbing established swings)
-        major_low_50 = df["low"].iloc[-55:-5].min() if len(df) >= 55 else None
-        major_high_50 = df["high"].iloc[-55:-5].max() if len(df) >= 55 else None
+        recent_low_5 = curr.get("recent_low_5", 0)
+        recent_high_5 = curr.get("recent_high_5", 0)
+        major_low_50 = curr.get("major_low_50", None)
+        major_high_50 = curr.get("major_high_50", None)
 
         is_swept = 0
 
@@ -88,16 +97,11 @@ class TechnicalAnalyzer:
     def detect_structure(df: pd.DataFrame) -> Dict:
         """
         Detects Break of Structure (BOS) and Change of Character (CHoCH)
-        using recent confirmed pivot highs and lows.
         """
         if len(df) < 20:
             return {"bos": None, "choch": None, "structure": "FLAT"}
 
-        recent_df = df.tail(
-            200
-        )  # Analyze the last 200 candles for structure, but only confirm pivots from the earlier portion to avoid noise at the live edge.
-
-        # Exclude the last 3 candles.
+        recent_df = df.tail(200)
         confirmed_df = recent_df.iloc[:-3]
 
         # Extract actual pivot prices
@@ -133,16 +137,20 @@ class TechnicalAnalyzer:
         return {"bos": bos, "choch": choch, "structure": structure, "last_high": last_high, "last_low": last_low}
 
     @staticmethod
-    def extract_active_pois(df: pd.DataFrame) -> Tuple[list, list, list]:
+    def extract_active_pois(data: Union[pd.DataFrame, list]) -> Tuple[list, list, list]:
         """
         Extracts FVGs, converts mitigated FVGs into IFVGs, and detects Major/Internal OBs.
         """
         active_fvgs, active_ifvgs, active_obs = [], [], []
 
-        if len(df) < 3:
-            return active_fvgs, active_ifvgs, active_obs
-
-        records = df.to_dict("records")
+        if isinstance(data, pd.DataFrame):
+            if len(data) < 3:
+                return active_fvgs, active_ifvgs, active_obs
+            records = data.to_dict("records")
+        else:
+            if len(data) < 3:
+                return active_fvgs, active_ifvgs, active_obs
+            records = data
 
         for i in range(2, len(records)):
             c1, c2, curr = records[i - 2], records[i - 1], records[i]
@@ -181,15 +189,33 @@ class TechnicalAnalyzer:
             elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
                 active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
 
-            # 3. Detect New Order Blocks (Major vs Internal)
-            # A Major OB aligns with a Pivot, an Internal OB forms during flow.
+            # 3. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
             is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
             ob_tier = "MAJOR" if is_pivot else "INTERNAL"
 
+            vol_sma = c2.get("vol_sma_20", 1)
+            vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
+
             if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
-                active_obs.append({"type": "BULL", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
+                active_obs.append(
+                    {
+                        "type": "BULL",
+                        "high": c1["high"],
+                        "low": c1["low"],
+                        "tier": ob_tier,
+                        "vol_strength": vol_strength,
+                    }
+                )
             elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
-                active_obs.append({"type": "BEAR", "high": c1["high"], "low": c1["low"], "tier": ob_tier})
+                active_obs.append(
+                    {
+                        "type": "BEAR",
+                        "high": c1["high"],
+                        "low": c1["low"],
+                        "tier": ob_tier,
+                        "vol_strength": vol_strength,
+                    }
+                )
 
         return active_fvgs, active_ifvgs, active_obs
 
@@ -197,7 +223,6 @@ class TechnicalAnalyzer:
     def get_htf_trend(df: pd.DataFrame) -> Literal["BULL", "BEAR", "FLAT"]:
         """
         Determines the Higher Timeframe trend purely using Market Structure.
-        Evaluates the sequence of recent pivot highs and lows to determine order flow.
         """
         if df.empty or len(df) < 20:
             return "FLAT"

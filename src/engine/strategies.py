@@ -1,18 +1,16 @@
 import pandas as pd
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Optional, Union
 
 
 class StrategyAnalyzer:
     """
     Pure SMC Strategy Engine.
-    Loosened rules to allow the Neural Engine to dictate probabilities.
+    Filters entries based on Volume Profiles and Institutional Order Flow.
     """
 
     def analyze_router(
         self,
         curr: Union[pd.Series, dict],
-        df: pd.DataFrame,
-        htf_trend: Literal["BULL", "BEAR", "FLAT"],
         active_fvgs: List[Dict],
         active_ifvgs: List[Dict],
         active_obs: List[Dict],
@@ -27,23 +25,23 @@ class StrategyAnalyzer:
 
         # 1. Liquidity Sweeps
         if not signal:
-            signal = self._smc_liquidity_sweep(curr, df, structure, is_liquidity_swept)
+            signal = self._smc_liquidity_sweep(curr, structure, is_liquidity_swept)
 
         # 2. Counter-Trend Mean Reversion
         if not signal:
-            signal = self._smc_counter_reversion(curr, df, structure, is_liquidity_swept)
+            signal = self._smc_counter_reversion(curr, structure, is_liquidity_swept)
 
         # 3. IFVG Continuation (Direction dictated by the IFVG itself)
         if not signal:
-            signal = self._ifvg_mitigation(curr, df, active_ifvgs)
+            signal = self._ifvg_mitigation(curr, active_ifvgs)
 
         # 4. POI Reversals (Pullbacks to Order Blocks & FVGs)
         if not signal:
-            signal = self._smc_poi_reversal(curr, df, active_fvgs, active_obs)
+            signal = self._smc_poi_reversal(curr, active_fvgs, active_obs)
 
         # 5. VWAP Bounce
         if not signal:
-            signal = self._vwap_bounce(curr, df, vwap_val)
+            signal = self._vwap_bounce(curr, vwap_val)
 
         if signal:
             signal["is_liquidity_swept"] = is_liquidity_swept
@@ -52,19 +50,18 @@ class StrategyAnalyzer:
         return None
 
     def _smc_liquidity_sweep(
-        self, curr: dict, df: pd.DataFrame, structure: dict, is_liquidity_swept: int
+        self, curr: Union[pd.Series, dict], structure: dict, is_liquidity_swept: int
     ) -> Optional[Dict]:
         """
         Detects liquidity sweeps that trigger a structural break.
         """
         struct_break = structure.get("choch") if structure.get("choch") else structure.get("bos")
-
         if not struct_break or is_liquidity_swept == 0:
             return None
 
         atr_buffer = curr["atr"] * 0.2
-        recent_low = curr.get("recent_low_5", df["low"].tail(5).min())
-        recent_high = curr.get("recent_high_5", df["high"].tail(5).max())
+        recent_low = curr.get("recent_low_5", 0)
+        recent_high = curr.get("recent_high_5", 0)
 
         # Determine Strategy Name and Confidence based on Sweep Tier
         if is_liquidity_swept == 3:
@@ -102,7 +99,7 @@ class StrategyAnalyzer:
         return None
 
     def _smc_counter_reversion(
-        self, curr: dict, df: pd.DataFrame, structure: dict, is_liquidity_swept: int
+        self, curr: Union[pd.Series, dict], structure: dict, is_liquidity_swept: int
     ) -> Optional[Dict]:
         """
         Counter-Trend Mean Reversion on Major sweeps.
@@ -113,8 +110,8 @@ class StrategyAnalyzer:
             return None
 
         atr_buffer = curr["atr"] * 0.2
-        recent_low = curr.get("recent_low_5", df["low"].tail(5).min())
-        recent_high = curr.get("recent_high_5", df["high"].tail(5).max())
+        recent_low = curr.get("recent_low_5", 0)
+        recent_high = curr.get("recent_high_5", 0)
 
         strat_name = "Daily Reversion (Counter)" if is_liquidity_swept == 3 else "Major Sweep (Counter)"
         conf = 82.0 if is_liquidity_swept == 3 else 76.0
@@ -142,13 +139,13 @@ class StrategyAnalyzer:
 
         return None
 
-    def _ifvg_mitigation(self, curr: dict, df: pd.DataFrame, active_ifvgs: List[Dict]) -> Optional[Dict]:
+    def _ifvg_mitigation(self, curr: Union[pd.Series, dict], active_ifvgs: List[Dict]) -> Optional[Dict]:
         """
         Detects bounces off active IFVGs. Direction is HARD OVERRIDDEN by the IFVG nature.
         """
-        atr_buffer = curr["atr"] * 0.2
-        recent_low = curr.get("recent_low_4", df["low"].tail(4).min())
-        recent_high = curr.get("recent_high_4", df["high"].tail(4).max())
+        atr_buffer = curr["atr"] * 0.5
+        recent_low = curr.get("recent_low_4", 0)
+        recent_high = curr.get("recent_high_4", 0)
 
         # Ensure we are actually bouncing (candle is green for longs, red for shorts)
         is_bouncing_up = curr["close"] > curr["open"]
@@ -183,27 +180,33 @@ class StrategyAnalyzer:
     def _smc_poi_reversal(
         self,
         curr: Union[pd.Series, dict],
-        df: pd.DataFrame,
         active_fvgs: List[Dict],
         active_obs: List[Dict],
     ) -> Optional[Dict]:
         """
         Detects bounces off active FVGs and Order Blocks.
         """
-        recent_low = curr.get("recent_low_4", df["low"].tail(4).min())
-        recent_high = curr.get("recent_high_4", df["high"].tail(4).max())
-        atr_buffer = curr["atr"] * 0.2
+        recent_low = curr.get("recent_low_4", 0)
+        recent_high = curr.get("recent_high_4", 0)
+        atr_buffer = curr["atr"] * 0.5
 
         is_bouncing_up = curr["close"] > curr["open"]
         is_bouncing_down = curr["close"] < curr["open"]
 
+        # Filter OBs by minimum displacement volume and sort by strength
+        valid_bull_obs = [ob for ob in active_obs if ob["type"] == "BULL" and ob.get("vol_strength", 1.0) >= 1.1]
+        valid_bull_obs.sort(key=lambda x: x.get("vol_strength", 0), reverse=True)
+
+        valid_bear_obs = [ob for ob in active_obs if ob["type"] == "BEAR" and ob.get("vol_strength", 1.0) >= 1.1]
+        valid_bear_obs.sort(key=lambda x: x.get("vol_strength", 0), reverse=True)
+
         #   --- BULLISH CONFIRMATIONS   ---
         if is_bouncing_up:
-            major_ob = any(
-                recent_low <= ob["high"] for ob in active_obs if ob["type"] == "BULL" and ob.get("tier") == "MAJOR"
+            major_ob = next(
+                (ob for ob in valid_bull_obs if ob.get("tier") == "MAJOR" and recent_low <= ob["high"]), None
             )
-            internal_ob = any(
-                recent_low <= ob["high"] for ob in active_obs if ob["type"] == "BULL" and ob.get("tier") == "INTERNAL"
+            internal_ob = next(
+                (ob for ob in valid_bull_obs if ob.get("tier") == "INTERNAL" and recent_low <= ob["high"]), None
             )
             tapped_fvg = any(recent_low <= fvg["high"] for fvg in active_fvgs if fvg["type"] == "BULL")
 
@@ -238,11 +241,11 @@ class StrategyAnalyzer:
 
         #   --- BEARISH CONFIRMATIONS   ---
         if is_bouncing_down:
-            major_ob = any(
-                recent_high >= ob["low"] for ob in active_obs if ob["type"] == "BEAR" and ob.get("tier") == "MAJOR"
+            major_ob = next(
+                (ob for ob in valid_bear_obs if ob.get("tier") == "MAJOR" and recent_high >= ob["low"]), None
             )
-            internal_ob = any(
-                recent_high >= ob["low"] for ob in active_obs if ob["type"] == "BEAR" and ob.get("tier") == "INTERNAL"
+            internal_ob = next(
+                (ob for ob in valid_bear_obs if ob.get("tier") == "INTERNAL" and recent_high >= ob["low"]), None
             )
             tapped_fvg = any(recent_high >= fvg["low"] for fvg in active_fvgs if fvg["type"] == "BEAR")
 
@@ -280,7 +283,6 @@ class StrategyAnalyzer:
     def _vwap_bounce(
         self,
         curr: Union[pd.Series, dict],
-        df: pd.DataFrame,
         vwap_val: float,
     ) -> Optional[Dict]:
         """
@@ -289,9 +291,18 @@ class StrategyAnalyzer:
         if vwap_val == 0:
             return None
 
-        atr_buffer = curr["atr"] * 0.2
-        recent_low = curr.get("recent_low_4", df["low"].tail(4).min())
-        recent_high = curr.get("recent_high_4", df["high"].tail(4).max())
+        atr_buffer = curr["atr"] * 0.3
+        recent_low = curr.get("recent_low_4", 0)
+        recent_high = curr.get("recent_high_4", 0)
+
+        # Demand institutional volume backing the bounce (20% above average volume)
+        vol_sma = curr.get("vol_sma_20", 1)
+        if vol_sma == 0:
+            vol_sma = 1
+        vol_strength = curr.get("volume", 0) / vol_sma
+
+        if vol_strength < 1.2:
+            return None  # Ignore weak retail bounces, wait for institutional displacement
 
         if recent_low <= vwap_val and curr["close"] > vwap_val and curr["close"] > curr["open"]:
             return {

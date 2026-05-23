@@ -61,14 +61,11 @@ class AITradingEngine:
         """
         base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
-        is_counter = "Counter" in signal.get("strategy", "")
-
         # 1. MTF Trend Alignment (Strictly enforced by router, but rewarded here)
         trend_bonus = (
             15
             if (htf_trend == "BULL" and signal["direction"] == "LONG")
             or (htf_trend == "BEAR" and signal["direction"] == "SHORT")
-            or is_counter
             else 0
         )
 
@@ -91,7 +88,17 @@ class AITradingEngine:
         return signal
 
     async def _calculate_risk_metrics(
-        self, symbol: str, signal: dict, curr: pd.Series, tick, info: dict, nn_result: dict, provider: DataProvider
+        self,
+        symbol: str,
+        signal: dict,
+        curr: pd.Series,
+        tick,
+        info: dict,
+        nn_result: dict,
+        provider: DataProvider,
+        active_fvgs: list,
+        active_ifvgs: list,
+        active_obs: list,
     ) -> Optional[Dict]:
         """
         Calculates Lot Size and Risk (USD/ZAR conversion) and validates entry freshness.
@@ -122,13 +129,13 @@ class AITradingEngine:
 
         # Dynamic TP / SL calculation
         is_volatile_asset = self._is_high_volatility_symbol(symbol)
-        sl_multiplier = 1.4 if (is_volatile_asset or atr > (curr["close"] * 0.005)) else 1.0
+        sl_multiplier = 1.3 if (is_volatile_asset or atr > (curr["close"] * 0.005)) else 1.0
         sl_dist = max(atr * sl_multiplier, point * 50)
 
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
             suggested_dist = abs(signal["suggested_sl"] - entry_price)
-            if (atr * 0.3) < suggested_dist < (atr * 5.0):
+            if (atr * 0.2) < suggested_dist < (atr * 6.0):
                 sl_dist = suggested_dist
 
         # Excursion / Stop-Loss Cap Filter
@@ -140,37 +147,64 @@ class AITradingEngine:
             )
             return None
 
+        # Determine Opposing POIs to dynamically cap Take Profit
+        opposing_pois = []
+        all_zones = active_fvgs + active_ifvgs + active_obs
+        if signal["direction"] == "LONG":
+            opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > entry_price]
+        else:
+            opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < entry_price]
+
+        nearest_opposing_poi = None
+        if opposing_pois:
+            nearest_opposing_poi = min(opposing_pois) if signal["direction"] == "LONG" else max(opposing_pois)
+
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
         pred_exit_atr = max(1, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
         tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
-        tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
-
-        rr = (tp_dist / sl_dist) if sl_dist > 0 else 1.0
-        expected_ev = prob * rr - (1.0 - prob)
-
-        # If EV is clearly negative, skip
-        if expected_ev < -0.25:
-            self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
-            return None
-
-        tp1_dist, tp2_dist, tp3_dist = tp_dist * 0.33, tp_dist * 0.66, tp_dist
+        base_tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
 
         # Absolute Prices
         if signal["signal"] == "BUY":
             ref_price = entry_price if order_type == "LIMIT" else ask
             sl_price = ref_price - sl_dist
-            tp1_price = ref_price + tp1_dist
-            tp2_price = ref_price + tp2_dist
-            tp3_price = ref_price + tp3_dist
+
+            # Cap TP just beneath the nearest opposing liquidity wall
+            max_structural_tp = (
+                (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (ref_price + base_tp_dist)
+            )
+            tp3_price = min(ref_price + base_tp_dist, max_structural_tp)
+            actual_tp_dist = tp3_price - ref_price
+
+            tp1_price = ref_price + (actual_tp_dist * 0.33)
+            tp2_price = ref_price + (actual_tp_dist * 0.66)
         else:
             ref_price = entry_price if order_type == "LIMIT" else bid
             sl_price = ref_price + sl_dist
-            tp1_price = ref_price - tp1_dist
-            tp2_price = ref_price - tp2_dist
-            tp3_price = ref_price - tp3_dist
 
-        # Dynamic Sizing ensuring small tight stops result in larger relative lot sizes natively
+            max_structural_tp = (
+                (nearest_opposing_poi + point * 15) if nearest_opposing_poi else (ref_price - base_tp_dist)
+            )
+            tp3_price = max(ref_price - base_tp_dist, max_structural_tp)
+            actual_tp_dist = ref_price - tp3_price
+
+            tp1_price = ref_price - (actual_tp_dist * 0.33)
+            tp2_price = ref_price - (actual_tp_dist * 0.66)
+
+        # Verify true Risk/Reward against POI blockades
+        rr = (actual_tp_dist / sl_dist) if sl_dist > 0 else 1.0
+        MIN_RR = 1.5
+        if rr < MIN_RR:
+            self._log_once(f"rr_gate_{symbol}", f"Skipping {symbol}: Poor Risk/Reward ratio ({rr:.2f}) < {MIN_RR}")
+            return None
+
+        expected_ev = prob * rr - (1.0 - prob)
+        if expected_ev < -0.25:
+            self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
+            return None
+
+        # Lot Sizing based on the final SL distance
         risk_mult = nn_result.get("risk_mult", 1.0)
         target_risk_account = self.user_balance_account * ((self.risk_pct * risk_mult) / 100)
         points_risk = sl_dist / point
@@ -178,22 +212,20 @@ class AITradingEngine:
         if risk_per_lot == 0:
             return None
 
-        # Lot Sizing
         lots = target_risk_account / risk_per_lot
-
         try:
             steps = math.floor(lots / vol_step)
             lots = steps * vol_step
-        except Exception:
+        except:
             lots = round(lots / vol_step) * vol_step
 
         lots = round(max(min_vol, min(lots, max_vol, self.max_lot)), 2)
         actual_risk_account = risk_per_lot * lots
 
         # Convert Account Balance to USD for tier checks if necessary
-        balance_in_usd = self.user_balance_account
-        if self.currency == "ZAR":
-            balance_in_usd = self.user_balance_account / usdzar_rate
+        balance_in_usd = (
+            self.user_balance_account if self.currency == "USD" else self.user_balance_account / usdzar_rate
+        )
 
         # Safety Cap
         max_allowed_pct = get_account_risk_caps(balance_in_usd, self.currency)
@@ -211,11 +243,8 @@ class AITradingEngine:
             lots = round(lots, 2)
 
             if lots <= min_vol and actual_risk_account > max_allowed_val * 1.2:
-                # Allow micro accounts ($20) to take min lot size on XAUUSD, capping strict failure at 20% risk
                 if is_volatile_asset and (actual_risk_account <= self.user_balance_account * 0.20):
-                    logger.debug(
-                        f"Micro-Account Override: Allowing {symbol} at {lots} lots (Risk: {actual_risk_account:.2f})."
-                    )
+                    pass  # Micro-Account Override
                 else:
                     self._log_once(
                         f"risk_{symbol}",
@@ -225,7 +254,7 @@ class AITradingEngine:
                     return None
 
         # Profit Calculation
-        profit_account = (tp_dist / point) * tick_value * lots
+        profit_account = (actual_tp_dist / point) * tick_value * lots
         actual_risk_zar = actual_risk_account * usdzar_rate if self.currency == "USD" else actual_risk_account
         profit_zar = profit_account * usdzar_rate if self.currency == "USD" else profit_account
 
@@ -303,7 +332,7 @@ class AITradingEngine:
         # Then catch NY-specific pairs and indices
         elif any(x in symbol for x in ["XAU", "US30", "NAS", "USD", "BTC", "ETH"]):
             if active_session in ["NY", "LONDON"]:
-                session_multiplier = 1.15
+                session_multiplier = 1.25
         # Asian pairs
         elif any(x in symbol for x in ["JPY", "AUD", "NZD"]):
             if active_session == "ASIAN":
@@ -396,10 +425,10 @@ class AITradingEngine:
             pdh, pdl = yesterday_df["high"].max(), yesterday_df["low"].min()
 
         daily_levels = {"pdh": pdh, "pdl": pdl}
-        is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, df, structure_info, daily_levels)
+        is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, structure_info, daily_levels)
 
         final_signal = self.strategy_analyzer.analyze_router(
-            curr, df, htf_trend, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
+            curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
         )
 
         if not final_signal:
@@ -448,7 +477,7 @@ class AITradingEngine:
             "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
             "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
             "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
-            "session_volume_spike": 1 if curr["volume"] > df["volume"].tail(20).mean() * 1.5 else 0,
+            "session_volume_spike": 1 if curr["volume"] > (curr.get("vol_sma_20", 0) * 1.5) else 0,
             "distance_to_poi": dist_nearest_poi,
         }
 
@@ -472,7 +501,9 @@ class AITradingEngine:
         if not tick:
             return None
 
-        result = await self._calculate_risk_metrics(symbol, final_signal, curr, tick, symbol_info, nn_result, provider)
+        result = await self._calculate_risk_metrics(
+            symbol, final_signal, curr, tick, symbol_info, nn_result, provider, active_fvgs, active_ifvgs, active_obs
+        )
         if result:
             self.signal_history[symbol] = time.time()
             self.active_features[symbol] = features
