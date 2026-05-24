@@ -476,9 +476,20 @@ class AITradingEngine:
             dist_nearest_poi_atr = raw_distance / atr if atr > 0 else 0.0
             mitigation_count = nearest_poi.get("mitigations", 0)
 
+        # Calculate True Contextual Alignment
+        alignment_score = 0.0
+        if htf_trend != 0.0:
+            is_long_aligned = final_signal["direction"] == "LONG" and htf_trend == 1.0
+            is_short_aligned = final_signal["direction"] == "SHORT" and htf_trend == -1.0
+
+            if is_long_aligned or is_short_aligned:
+                alignment_score = 1.0
+            else:
+                alignment_score = -1.0
+
         # C. Feature Construction (Types are cleanly managed, formatting occurs in collector)
         features = {
-            "is_htf_aligned": htf_trend,
+            "is_htf_aligned": alignment_score,
             "is_liquidity_swept": float(is_liquidity_swept),
             "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
             "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,

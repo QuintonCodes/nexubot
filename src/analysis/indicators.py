@@ -44,13 +44,22 @@ class TechnicalAnalyzer:
         # 5. Volume Profile for Institutional Displacement
         df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=1).mean()
 
-        # 6. Lookback Windows (Centralized to prevent eager evaluation bugs)
+        # 6. Lookback Windows
         df["recent_low_5"] = df["low"].rolling(5).min()
         df["recent_high_5"] = df["high"].rolling(5).max()
         df["recent_low_4"] = df["low"].rolling(4).min()
         df["recent_high_4"] = df["high"].rolling(4).max()
         df["major_low_50"] = df["low"].rolling(50).min().shift(5)
         df["major_high_50"] = df["high"].rolling(50).max().shift(5)
+
+        # 7. HTF Trend (Institutional EMAs)
+        # 50 EMA > 200 EMA = Bullish (1.0) | 50 EMA < 200 EMA = Bearish (-1.0)
+        df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
+        df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
+
+        df["htf_trend"] = 0.0
+        df.loc[df["ema_50"] > df["ema_200"], "htf_trend"] = 1.0
+        df.loc[df["ema_50"] < df["ema_200"], "htf_trend"] = -1.0
 
         return df.fillna(0)
 
@@ -254,46 +263,22 @@ class TechnicalAnalyzer:
     @staticmethod
     def get_htf_trend(df: pd.DataFrame) -> float:
         """
-        Determines HTF trend using pure Fractal (Swing Point) rules and Close prices.
-        Safely tracks up to the live edge without lookahead bias.
-        Returns: 1.0 (Bullish), -1.0 (Bearish), 0.0 (Consolidation)
+        Determines HTF trend dynamically using the 50/200 EMA Cross.
         """
-
-        if df.empty or len(df) < 5:
+        if df.empty:
             return 0.0
 
-        highs = df["high"].values
-        lows = df["low"].values
-        closes = df["close"].values
+        # Read the preserved historical state mapped to this exact candle
+        if "htf_trend" in df.columns:
+            return float(df.iloc[-1]["htf_trend"])
 
-        trend = 0.0
-        last_swing_high = None
-        last_swing_low = None
+        # Live Fallback
+        ema_50 = df["close"].ewm(span=50, adjust=False).mean()
+        ema_200 = df["close"].ewm(span=200, adjust=False).mean()
 
-        # 5-bar fractal detection (Valid swing point needs 2 lower highs/lows on each side)
-        for i in range(4, len(df)):
-            is_swing_high = (
-                highs[i - 2] > highs[i - 3]
-                and highs[i - 2] > highs[i - 4]
-                and highs[i - 2] > highs[i - 1]
-                and highs[i - 2] > highs[i]
-            )
-            is_swing_low = (
-                lows[i - 2] < lows[i - 3]
-                and lows[i - 2] < lows[i - 4]
-                and lows[i - 2] < lows[i - 1]
-                and lows[i - 2] < lows[i]
-            )
+        if ema_50.iloc[-1] > ema_200.iloc[-1]:
+            return 1.0
+        elif ema_50.iloc[-1] < ema_200.iloc[-1]:
+            return -1.0
 
-            if is_swing_high:
-                last_swing_high = highs[i - 2]
-            if is_swing_low:
-                last_swing_low = lows[i - 2]
-
-            # True trend shifts require a body CLOSE beyond the valid fractal
-            if last_swing_high is not None and closes[i] > last_swing_high:
-                trend = 1.0
-            if last_swing_low is not None and closes[i] < last_swing_low:
-                trend = -1.0
-
-        return trend
+        return 0.0

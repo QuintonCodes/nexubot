@@ -164,9 +164,20 @@ class TelegramNotifier:
                 dist_nearest_poi_atr = raw_distance / atr
                 mitigation_count = nearest_poi.get("mitigations", 0)
 
+            # Calculate Theoretical Contextual Alignment (Assuming local structure as signal direction)
+            alignment_score = 0.0
+            if htf_trend != 0.0:
+                is_bull_aligned = structure["structure"] == "BULL" and htf_trend == 1.0
+                is_bear_aligned = structure["structure"] == "BEAR" and htf_trend == -1.0
+
+                if is_bull_aligned or is_bear_aligned:
+                    alignment_score = 1.0
+                else:
+                    alignment_score = -1.0
+
             # Construct the Feature Dictionary exactly as the ML model expects
             features = {
-                "is_htf_aligned": htf_trend,
+                "is_htf_aligned": alignment_score,
                 "is_liquidity_swept": float(is_liquidity_swept),
                 "is_in_fvg": 1.0 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0.0,
                 "is_in_ifvg": 1.0 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0.0,

@@ -65,12 +65,26 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = TechnicalAnalyzer.calculate_indicators(df_full)
         df_htf = TechnicalAnalyzer.calculate_indicators(df_htf)
 
-        # 2. Vectorized Daily Levels (Faster than rolling lookup)
+        # 2. Vectorized Daily Levels
         df_full["date"] = pd.to_datetime(df_full["time"], unit="s").dt.date
         daily_highs = df_full.groupby("date")["high"].max().shift(1)
         daily_lows = df_full.groupby("date")["low"].min().shift(1)
         df_full["pdh"] = df_full["date"].map(daily_highs)
         df_full["pdl"] = df_full["date"].map(daily_lows)
+
+        # 3. Vectorized Timeframe Sync
+        # This stamps every single 1M candle with the active 1H trend mathematically.
+        df_full = df_full.sort_values("time")
+        df_htf = df_htf.sort_values("time")
+
+        df_full = pd.merge_asof(
+            df_full,
+            df_htf[["time", "htf_trend"]].rename(columns={"htf_trend": "htf_trend_mapped"}),
+            on="time",
+            direction="backward",
+        )
+        # Fill any early NaNs before the EMAs initialize
+        df_full["htf_trend_mapped"] = df_full["htf_trend_mapped"].fillna(0.0)
 
         records = df_full.to_dict("records")
         symbol_rows_collected = 0
@@ -93,10 +107,10 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             # 3. Dynamic Data Slices (Prevents Lookahead Bias & Reuses Central Logic)
             df_slice = df_full.iloc[max(0, i - 200) : i + 1]
             records_slice = records[max(0, i - 100) : i + 1]
-            df_htf_slice = df_htf[df_htf["time"] <= curr_time].tail(100)
 
-            # 4. Centralized SMC Engine Calls
-            htf_trend = TechnicalAnalyzer.get_htf_trend(df_htf_slice)
+            # Read the permanently stamped HTF trend instantly
+            htf_trend = curr["htf_trend_mapped"]
+
             structure_info = TechnicalAnalyzer.detect_structure(df_slice)
             active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(records_slice)
 
@@ -157,6 +171,16 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 continue
 
             # --- PRECISE FEATURE EXTRACTION ---
+            # Calculate True Contextual Alignment
+            alignment_score = 0.0
+            if htf_trend != 0.0:
+                is_long_aligned = signal["direction"] == "LONG" and htf_trend == 1.0
+                is_short_aligned = signal["direction"] == "SHORT" and htf_trend == -1.0
+
+                if is_long_aligned or is_short_aligned:
+                    alignment_score = 1.0
+                else:
+                    alignment_score = -1.0
 
             # Killzone Map
             dt_hour = pd.to_datetime(curr["time"], unit="s").hour
@@ -180,7 +204,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 mitigation_count = nearest_poi.get("mitigations", 0)
 
             features = {
-                "is_htf_aligned": htf_trend,
+                "is_htf_aligned": alignment_score,
                 "is_liquidity_swept": float(is_liquidity_swept),
                 "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
                 "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,
