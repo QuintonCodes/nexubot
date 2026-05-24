@@ -11,6 +11,7 @@ from src.config import (
     FALLBACK_INDICES,
     FALLBACK_METALS,
     HIGH_VOLATILITY_IDENTIFIERS,
+    SESSION_CONFIG,
     TIMEFRAME,
 )
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = None):
     """
     Simulates historical price action to build a reliable ML dataset.
-    Fully synchronized with live structural TP capping and RR filters.
+    Fully synchronized with live structural logic (SMC) via centralized indicators.
     """
 
     collector = DataCollector()
@@ -60,143 +61,73 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
         df_full = pd.DataFrame(klines_main).sort_values("time").reset_index(drop=True)
         df_htf = pd.DataFrame(klines_htf).sort_values("time").reset_index(drop=True)
 
-        # 1. Pre-calculate all indicators (Now includes Lookback Windows)
+        # 1. Pre-calculate standard trailing indicators
         df_full = TechnicalAnalyzer.calculate_indicators(df_full)
         df_htf = TechnicalAnalyzer.calculate_indicators(df_htf)
 
-        # 2. Vectorized HTF Trend Mapping
-        htf_trends = []
-        last_hs, last_ls = [], []
-        curr_htf = "FLAT"
-        for row in df_htf.itertuples():
-            if row.pivot_high:
-                last_hs.append(row.high)
-            if row.pivot_low:
-                last_ls.append(row.low)
-            if len(last_hs) >= 2 and len(last_ls) >= 2:
-                if last_hs[-1] > last_hs[-2] and last_ls[-1] > last_ls[-2]:
-                    curr_htf = "BULL"
-                elif last_hs[-1] < last_hs[-2] and last_ls[-1] < last_ls[-2]:
-                    curr_htf = "BEAR"
-            htf_trends.append(curr_htf)
-
-        df_htf["htf_trend"] = htf_trends
-        df_full = pd.merge_asof(df_full, df_htf[["time", "htf_trend"]], on="time", direction="backward")
-        df_full["htf_trend"] = df_full["htf_trend"].fillna("FLAT")
-
-        # 3. Vectorized Daily Levels
+        # 2. Vectorized Daily Levels (Faster than rolling lookup)
         df_full["date"] = pd.to_datetime(df_full["time"], unit="s").dt.date
         daily_highs = df_full.groupby("date")["high"].max().shift(1)
         daily_lows = df_full.groupby("date")["low"].min().shift(1)
         df_full["pdh"] = df_full["date"].map(daily_highs)
         df_full["pdl"] = df_full["date"].map(daily_lows)
 
-        # 4. Precalculate Local Structure for O(1) Lookups
-        bos_list, choch_list, struct_list = [], [], []
-        last_hs_m1, last_ls_m1 = [], []
-        prev_h, last_h, prev_l, last_l = None, None, None, None
-
-        for i in range(len(df_full)):
-            if i >= 5:
-                conf_row = df_full.iloc[i - 5]
-                if conf_row["pivot_high"]:
-                    prev_h, last_h = last_h, conf_row["high"]
-                if conf_row["pivot_low"]:
-                    prev_l, last_l = last_l, conf_row["low"]
-
-            bos, choch, structure = None, None, "FLAT"
-            if prev_h is not None and prev_l is not None:
-                if last_h > prev_h and last_l > prev_l:
-                    structure = "BULL"
-                elif last_h < prev_h and last_l < prev_l:
-                    structure = "BEAR"
-
-                curr_close = df_full["close"].iloc[i]
-                if structure == "BULL":
-                    if curr_close > last_h:
-                        bos = "BULL"
-                    elif curr_close < last_l:
-                        choch = "BEAR"
-                elif structure == "BEAR":
-                    if curr_close < last_l:
-                        bos = "BEAR"
-                    elif curr_close > last_h:
-                        choch = "BULL"
-
-            bos_list.append(bos)
-            choch_list.append(choch)
-            struct_list.append(structure)
-            last_hs_m1.append(last_h)
-            last_ls_m1.append(last_l)
-
-        df_full["bos"] = bos_list
-        df_full["choch"] = choch_list
-        df_full["structure"] = struct_list
-        df_full["last_high"] = last_hs_m1
-        df_full["last_low"] = last_ls_m1
-
         records = df_full.to_dict("records")
         symbol_rows_collected = 0
 
+        # --- SIMULATION ENGINE ---
+        # Begin simulation after 200 bars to allow sufficient warmup for structure
         for i in range(200, len(records) - future_window_size):
             if symbol_rows_collected >= max_rows_per_symbol:
                 logger.info(f"✅ {symbol} reached {max_rows_per_symbol} row cap.")
                 break
 
             curr = records[i]
+            curr_time = curr["time"]
+            close_price = curr["close"]
 
+            atr = float(curr.get("atr", 1.0))
+            if atr <= 0:
+                atr = 1.0
+
+            # 3. Dynamic Data Slices (Prevents Lookahead Bias & Reuses Central Logic)
+            df_slice = df_full.iloc[max(0, i - 200) : i + 1]
             records_slice = records[max(0, i - 100) : i + 1]
+            df_htf_slice = df_htf[df_htf["time"] <= curr_time].tail(100)
+
+            # 4. Centralized SMC Engine Calls
+            htf_trend = TechnicalAnalyzer.get_htf_trend(df_htf_slice)
+            structure_info = TechnicalAnalyzer.detect_structure(df_slice)
             active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(records_slice)
 
-            structure_info = {
-                "bos": curr["bos"],
-                "choch": curr["choch"],
-                "structure": curr["structure"],
-                "last_high": curr["last_high"],
-                "last_low": curr["last_low"],
-            }
-            htf_trend = curr["htf_trend"]
             daily_levels = {"pdh": curr.get("pdh"), "pdl": curr.get("pdl")}
+            is_liquidity_swept, sweep_depth_atr = TechnicalAnalyzer.detect_liquidity_sweeps(
+                curr, structure_info, daily_levels
+            )
 
-            is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, structure_info, daily_levels)
-
+            # 5. Routing
             signal = engine.strategy_analyzer.analyze_router(
-                curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
+                curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept, htf_trend
             )
 
             if not signal:
                 continue
 
-            # Determine strict HTF alignment of the simulated trade direction
-            alignment = 0
-            if htf_trend != "FLAT":
-                alignment = (
-                    1
-                    if (
-                        (signal["direction"] == "LONG" and htf_trend == "BULL")
-                        or (signal["direction"] == "SHORT" and htf_trend == "BEAR")
-                    )
-                    else -1
-                )
-
-            entry_price = curr["close"]
-            atr = curr["atr"]
-
             # --- SYNCHRONIZED RISK & TP CAPPING ---
-            sl_multiplier = 1.3 if (is_volatile_asset or atr > (curr["close"] * 0.005)) else 1.0
+            sl_multiplier = 1.3 if (is_volatile_asset or atr > (close_price * 0.005)) else 1.0
             sl_dist = max(atr * sl_multiplier, point * 50)
 
             if "suggested_sl" in signal:
-                suggested_dist = abs(signal["suggested_sl"] - entry_price)
+                suggested_dist = abs(signal["suggested_sl"] - close_price)
                 if (atr * 0.2) < suggested_dist < (atr * 6.0):
                     sl_dist = suggested_dist
 
             all_zones = active_fvgs + active_ifvgs + active_obs
             opposing_pois = []
             if signal["direction"] == "LONG":
-                opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > entry_price]
+                opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > close_price]
             else:
-                opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < entry_price]
+                opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < close_price]
 
             nearest_opposing_poi = (
                 min(opposing_pois)
@@ -206,67 +137,70 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             base_tp_dist = max(atr * 3.0, sl_dist * 1.2)
 
             if signal["direction"] == "LONG":
-                sl = entry_price - sl_dist
+                sl = close_price - sl_dist
                 max_structural_tp = (
-                    (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (entry_price + base_tp_dist)
+                    (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (close_price + base_tp_dist)
                 )
-                tp = min(entry_price + base_tp_dist, max_structural_tp)
-                actual_tp_dist = tp - entry_price
+                tp = min(close_price + base_tp_dist, max_structural_tp)
+                actual_tp_dist = tp - close_price
             else:
-                sl = entry_price + sl_dist
+                sl = close_price + sl_dist
                 max_structural_tp = (
-                    (nearest_opposing_poi + point * 15) if nearest_opposing_poi else (entry_price - base_tp_dist)
+                    (nearest_opposing_poi + point * 15) if nearest_opposing_poi else (close_price - base_tp_dist)
                 )
-                tp = max(entry_price - base_tp_dist, max_structural_tp)
-                actual_tp_dist = entry_price - tp
+                tp = max(close_price - base_tp_dist, max_structural_tp)
+                actual_tp_dist = close_price - tp
 
             # --- HARD RR FILTER ---
             rr = (actual_tp_dist / sl_dist) if sl_dist > 0 else 1.0
             if rr < 1.5:
                 continue
 
-            # Precise Feature Extraction
-            all_pois = active_fvgs + active_ifvgs + active_obs
-            dist_nearest_poi = (
-                min(
-                    abs(
-                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
-                            "high"
-                        ]
-                        - curr["close"]
-                    ),
-                    abs(
-                        min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
-                            "low"
-                        ]
-                        - curr["close"]
-                    ),
+            # --- PRECISE FEATURE EXTRACTION ---
+
+            # Killzone Map
+            dt_hour = pd.to_datetime(curr["time"], unit="s").hour
+            active_killzone = 0.0
+            if SESSION_CONFIG["ASIAN_START"] <= dt_hour < SESSION_CONFIG["ASIAN_END"]:
+                active_killzone = 1.0
+            elif SESSION_CONFIG["LONDON_START"] <= dt_hour < SESSION_CONFIG["LONDON_END"]:
+                active_killzone = 2.0
+            elif SESSION_CONFIG["NY_START"] <= dt_hour < SESSION_CONFIG["NY_END"]:
+                active_killzone = 3.0
+
+            # Distance & Mitigation Tracking
+            dist_nearest_poi_atr = 0.0
+            mitigation_count = 0
+            if all_zones:
+                nearest_poi = min(
+                    all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price))
                 )
-                / curr["close"]
-                if all_pois
-                else 0.0
-            )
+                raw_distance = min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price))
+                dist_nearest_poi_atr = raw_distance / atr
+                mitigation_count = nearest_poi.get("mitigations", 0)
 
             features = {
-                "is_htf_aligned": alignment,
-                "is_liquidity_swept": is_liquidity_swept,
-                "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
-                "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
-                "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
-                "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
-                "session_volume_spike": 1 if curr["volume"] > (curr.get("vol_sma_20", 0) * 1.5) else 0,
-                "distance_to_poi": dist_nearest_poi,
+                "is_htf_aligned": htf_trend,
+                "is_liquidity_swept": float(is_liquidity_swept),
+                "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
+                "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,
+                "is_in_orderblock": 1.0 if any(o["low"] <= close_price <= o["high"] for o in active_obs) else 0.0,
+                "structural_break": structure_info.get("structural_break", 0.0),
+                "active_killzone": active_killzone,
+                "distance_to_poi": dist_nearest_poi_atr,
+                "pd_array_status": structure_info.get("pd_array", 0.5),
+                "mitigation_count": float(mitigation_count),
+                "sweep_depth_atr": sweep_depth_atr,
             }
 
-            # Forward Simulation (Tracking exactly next 150 candles)
+            # --- FORWARD SIMULATION (Next 150 Candles) ---
             future_window = records[i + 1 : i + 1 + future_window_size]
-
             won = 0
             max_favorable = 0.0
 
             for f_curr in future_window:
                 if signal["direction"] == "LONG":
-                    max_favorable = max(max_favorable, f_curr["high"] - entry_price)
+                    max_favorable = max(max_favorable, f_curr["high"] - close_price)
                     if f_curr["low"] <= sl:
                         won = 0
                         break
@@ -274,7 +208,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                         won = 1
                         break
                 else:
-                    max_favorable = max(max_favorable, entry_price - f_curr["low"])
+                    max_favorable = max(max_favorable, close_price - f_curr["low"])
                     if f_curr["high"] >= sl:
                         won = 0
                         break
@@ -285,10 +219,10 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             lot_size = 0.01
 
             if won == 1:
-                gross_points = abs(tp - entry_price) / point
+                gross_points = abs(tp - close_price) / point
                 pnl = gross_points * tick_value * lot_size
             else:
-                gross_points = abs(sl - entry_price) / point
+                gross_points = abs(sl - close_price) / point
                 pnl = -gross_points * tick_value * lot_size
 
             target_excursion = max_favorable / atr if atr > 0 else 0.0

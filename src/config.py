@@ -77,8 +77,11 @@ FEATURE_COLS = [
     "is_in_ifvg",
     "is_in_orderblock",
     "structural_break",
-    "session_volume_spike",
+    "active_killzone",
     "distance_to_poi",
+    "pd_array_status",
+    "mitigation_count",
+    "sweep_depth_atr",
 ]
 
 

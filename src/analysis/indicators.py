@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, Tuple, Union
 
 
 class TechnicalAnalyzer:
@@ -55,51 +55,63 @@ class TechnicalAnalyzer:
         return df.fillna(0)
 
     @staticmethod
-    def detect_liquidity_sweeps(curr: Union[pd.Series, dict], structure: dict, daily_levels: dict) -> int:
+    def detect_liquidity_sweeps(curr: Union[pd.Series, dict], structure: dict, daily_levels: dict) -> Tuple[int, float]:
         """
         Unified Liquidity Sweep Logic.
-        Returns: 3 (Daily Sweep), 2 (Major 50p Sweep), 1 (Internal Sweep), 0 (None)
+        Returns: (Sweep Tier [0-3], Sweep Depth in ATR)
         """
         pdl = daily_levels.get("pdl")
         pdh = daily_levels.get("pdh")
         last_low = structure.get("last_low")
         last_high = structure.get("last_high")
-        close_price = curr["close"]
 
+        close_price = curr["close"]
         recent_low_5 = curr.get("recent_low_5", 0)
         recent_high_5 = curr.get("recent_high_5", 0)
         major_low_50 = curr.get("major_low_50", None)
         major_high_50 = curr.get("major_high_50", None)
 
+        atr = curr.get("atr", 1.0)
+        if atr == 0:
+            atr = 1.0
+
         is_swept = 0
+        sweep_depth = 0.0
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
             is_swept = 3
+            sweep_depth = (pdl - recent_low_5) / atr
         elif pdh and recent_high_5 > pdh and close_price < pdh:
             is_swept = 3
+            sweep_depth = (recent_high_5 - pdh) / atr
 
         # Tier 2: Major 50-Period Sweeps
         elif major_low_50 and recent_low_5 < major_low_50 and close_price > major_low_50:
             is_swept = 2
+            sweep_depth = (major_low_50 - recent_low_5) / atr
         elif major_high_50 and recent_high_5 > major_high_50 and close_price < major_high_50:
             is_swept = 2
+            sweep_depth = (recent_high_5 - major_high_50) / atr
 
-        # Internal Sweeps (Local Structural Pivots)
+        # Tier 1: Internal Sweeps (Local Structural Pivots)
         elif last_low and recent_low_5 < last_low and close_price > last_low:
             is_swept = 1
+            sweep_depth = (last_low - recent_low_5) / atr
         elif last_high and recent_high_5 > last_high and close_price < last_high:
             is_swept = 1
+            sweep_depth = (recent_high_5 - last_high) / atr
 
-        return is_swept
+        return is_swept, sweep_depth
 
     @staticmethod
     def detect_structure(df: pd.DataFrame) -> Dict:
         """
-        Detects Break of Structure (BOS) and Change of Character (CHoCH)
+        Detects BOS and CHoCH strictly via candle closes.
+        Calculates Premium/Discount Array Status.
         """
         if len(df) < 20:
-            return {"bos": None, "choch": None, "structure": "FLAT"}
+            return {"bos": None, "choch": None, "structure": "FLAT", "structural_break": 0.0, "pd_array": 0.5}
 
         recent_df = df.tail(200)
         confirmed_df = recent_df.iloc[:-3]
@@ -109,7 +121,7 @@ class TechnicalAnalyzer:
         lows = confirmed_df[confirmed_df["pivot_low"]]["low"].values
 
         if len(highs) < 2 or len(lows) < 2:
-            return {"bos": None, "choch": None, "structure": "FLAT"}
+            return {"bos": None, "choch": None, "structure": "FLAT", "structural_break": 0.0, "pd_array": 0.5}
 
         last_high, prev_high = highs[-1], highs[-2]
         last_low, prev_low = lows[-1], lows[-2]
@@ -121,36 +133,53 @@ class TechnicalAnalyzer:
         structure = "BULL" if is_uptrend else ("BEAR" if is_downtrend else "FLAT")
 
         bos, choch = None, None
+        structural_break = 0.0
 
-        # 2. Detect BOS and CHoCH on the live edge
+        # 2. Detect BOS and CHoCH on the live edge (Requires body close)
         if structure == "BULL":
             if current_close > last_high:
-                bos = "BULL"  # Price broke the Higher High -> Continuation
+                bos = "BULL"
+                structural_break = 1.0
             elif current_close < last_low:
-                choch = "BEAR"  # Price broke the Higher Low -> Reversal Character
+                choch = "BEAR"
+                structural_break = -2.0
         elif structure == "BEAR":
             if current_close < last_low:
-                bos = "BEAR"  # Price broke the Lower Low -> Continuation
+                bos = "BEAR"
+                structural_break = -1.0
             elif current_close > last_high:
-                choch = "BULL"  # Price broke the Lower High -> Reversal Character
+                choch = "BULL"
+                structural_break = 2.0
 
-        return {"bos": bos, "choch": choch, "structure": structure, "last_high": last_high, "last_low": last_low}
+        # Premium / Discount Calculation (0.0 to 1.0)
+        # 0.0 = At recent low (Discount), 1.0 = At recent high (Premium)
+        pd_range = last_high - last_low
+        pd_array_status = 0.5
+        if pd_range > 0:
+            pd_array_status = (current_close - last_low) / pd_range
+            pd_array_status = max(0.0, min(1.0, pd_array_status))
+
+        return {
+            "bos": bos,
+            "choch": choch,
+            "structure": structure,
+            "last_high": last_high,
+            "last_low": last_low,
+            "structural_break": structural_break,
+            "pd_array": pd_array_status,
+        }
 
     @staticmethod
     def extract_active_pois(data: Union[pd.DataFrame, list]) -> Tuple[list, list, list]:
         """
-        Extracts FVGs, converts mitigated FVGs into IFVGs, and detects Major/Internal OBs.
+        Extracts POIs, handles conversions, and tracks their Mitigation Count.
         """
+
         active_fvgs, active_ifvgs, active_obs = [], [], []
 
-        if isinstance(data, pd.DataFrame):
-            if len(data) < 3:
-                return active_fvgs, active_ifvgs, active_obs
-            records = data.to_dict("records")
-        else:
-            if len(data) < 3:
-                return active_fvgs, active_ifvgs, active_obs
-            records = data
+        records = data.to_dict("records") if isinstance(data, pd.DataFrame) else data
+        if len(records) < 3:
+            return [], [], []
 
         for i in range(2, len(records)):
             c1, c2, curr = records[i - 2], records[i - 1], records[i]
@@ -160,36 +189,37 @@ class TechnicalAnalyzer:
             for f in active_fvgs[:]:
                 if f["type"] == "BULL" and curr_low < f["low"]:
                     # Broken Bullish FVG -> Bearish IFVG
-                    active_ifvgs.append({"type": "BEAR", "high": f["high"], "low": f["low"]})
+                    active_ifvgs.append({"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0})
                     active_fvgs.remove(f)
                 elif f["type"] == "BEAR" and curr_high > f["high"]:
                     # Broken Bearish FVG -> Bullish IFVG
-                    active_ifvgs.append({"type": "BULL", "high": f["high"], "low": f["low"]})
+                    active_ifvgs.append({"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0})
                     active_fvgs.remove(f)
 
-            # Invalidate IFVGs once they are fully broken in the opposite direction
-            active_ifvgs = [
-                i_f
-                for i_f in active_ifvgs
-                if not (i_f["type"] == "BULL" and curr_low < i_f["low"])
-                and not (i_f["type"] == "BEAR" and curr_high > i_f["high"])
-            ]
+            # 2. Track Mitigations & Invalidate fully broken zones
+            for pool in [active_fvgs, active_ifvgs, active_obs]:
+                for zone in pool[:]:
+                    # Check for mitigation touches (Wick crosses into the POI)
+                    if zone["type"] == "BULL" and curr_low <= zone["high"]:
+                        zone["mitigations"] += 1
+                    elif zone["type"] == "BEAR" and curr_high >= zone["low"]:
+                        zone["mitigations"] += 1
 
-            # Invalidate Order Blocks
-            active_obs = [
-                o
-                for o in active_obs
-                if not (o["type"] == "BULL" and curr_low < o["low"])
-                and not (o["type"] == "BEAR" and curr_high > o["high"])
-            ]
+                    # Remove heavily mitigated/broken zones (Over 3 touches = void)
+                    if (
+                        zone["mitigations"] > 3
+                        or (zone["type"] == "BULL" and curr["close"] < zone["low"])
+                        or (zone["type"] == "BEAR" and curr["close"] > zone["high"])
+                    ):
+                        pool.remove(zone)
 
-            # 2. Detect new FVG
+            # 3. Detect new FVG
             if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
-                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"]})
+                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"], "mitigations": 0})
             elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
-                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"]})
+                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"], "mitigations": 0})
 
-            # 3. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
+            # 4. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
             is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
             ob_tier = "MAJOR" if is_pivot else "INTERNAL"
 
@@ -204,6 +234,7 @@ class TechnicalAnalyzer:
                         "low": c1["low"],
                         "tier": ob_tier,
                         "vol_strength": vol_strength,
+                        "mitigations": 0,
                     }
                 )
             elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
@@ -214,37 +245,55 @@ class TechnicalAnalyzer:
                         "low": c1["low"],
                         "tier": ob_tier,
                         "vol_strength": vol_strength,
+                        "mitigations": 0,
                     }
                 )
 
         return active_fvgs, active_ifvgs, active_obs
 
     @staticmethod
-    def get_htf_trend(df: pd.DataFrame) -> Literal["BULL", "BEAR", "FLAT"]:
+    def get_htf_trend(df: pd.DataFrame) -> float:
         """
-        Determines the Higher Timeframe trend purely using Market Structure.
+        Determines HTF trend using pure Fractal (Swing Point) rules and Close prices.
+        Safely tracks up to the live edge without lookahead bias.
+        Returns: 1.0 (Bullish), -1.0 (Bearish), 0.0 (Consolidation)
         """
-        if df.empty or len(df) < 20:
-            return "FLAT"
 
-        # Calculate basic pivots for the HTF context
-        ph = df["high"] == df["high"].rolling(20, center=True).max()
-        pl = df["low"] == df["low"].rolling(20, center=True).min()
+        if df.empty or len(df) < 5:
+            return 0.0
 
-        highs = df[ph]["high"].values
-        lows = df[pl]["low"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
 
-        if len(highs) < 2 or len(lows) < 2:
-            return "FLAT"
+        trend = 0.0
+        last_swing_high = None
+        last_swing_low = None
 
-        # Get the last two confirmed swing points
-        last_high, prev_high = highs[-1], highs[-2]
-        last_low, prev_low = lows[-1], lows[-2]
+        # 5-bar fractal detection (Valid swing point needs 2 lower highs/lows on each side)
+        for i in range(4, len(df)):
+            is_swing_high = (
+                highs[i - 2] > highs[i - 3]
+                and highs[i - 2] > highs[i - 4]
+                and highs[i - 2] > highs[i - 1]
+                and highs[i - 2] > highs[i]
+            )
+            is_swing_low = (
+                lows[i - 2] < lows[i - 3]
+                and lows[i - 2] < lows[i - 4]
+                and lows[i - 2] < lows[i - 1]
+                and lows[i - 2] < lows[i]
+            )
 
-        # Structure Logic: Tolerate equal lows/highs to keep trend active during complex pullbacks
-        if last_high > prev_high and last_low >= prev_low:
-            return "BULL"
-        elif last_high < prev_high and last_low <= prev_low:
-            return "BEAR"
+            if is_swing_high:
+                last_swing_high = highs[i - 2]
+            if is_swing_low:
+                last_swing_low = lows[i - 2]
 
-        return "FLAT"  # Consolidation / Choppy Market
+            # True trend shifts require a body CLOSE beyond the valid fractal
+            if last_swing_high is not None and closes[i] > last_swing_high:
+                trend = 1.0
+            if last_swing_low is not None and closes[i] < last_swing_low:
+                trend = -1.0
+
+        return trend

@@ -4,7 +4,7 @@ import math
 import pandas as pd
 import time
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Optional
 
 from src.analysis.indicators import TechnicalAnalyzer
 from src.data.collector import DataCollector
@@ -53,7 +53,7 @@ class AITradingEngine:
         symbol: str,
         signal: dict,
         nn_prob: float,
-        htf_trend: Literal["BULL", "BEAR", "FLAT"],
+        htf_trend: float,
         session_multiplier: float,
     ) -> Dict:
         """
@@ -61,11 +61,11 @@ class AITradingEngine:
         """
         base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
-        # 1. MTF Trend Alignment (Strictly enforced by router, but rewarded here)
+        # 1. MTF Trend Alignment (1.0 = Bullish, -1.0 = Bearish)
         trend_bonus = (
             15
-            if (htf_trend == "BULL" and signal["direction"] == "LONG")
-            or (htf_trend == "BEAR" and signal["direction"] == "SHORT")
+            if (htf_trend == 1.0 and signal["direction"] == "LONG")
+            or (htf_trend == -1.0 and signal["direction"] == "SHORT")
             else 0
         )
 
@@ -120,7 +120,10 @@ class AITradingEngine:
         point, tick_value = info["point"], info.get("trade_tick_value", 0)
         min_vol, max_vol, vol_step = info.get("min_vol", 0.01), info.get("max_vol", 100.0), info.get("vol_step", 0.01)
         digits = info.get("digits", 5)
-        atr = float(curr["atr"])
+
+        atr = float(curr.get("atr", 1.0))
+        if atr <= 0:
+            atr = 1.0
 
         # Entry Price Determination
         current_market_price = ask if signal["direction"] == "LONG" else bid
@@ -139,7 +142,7 @@ class AITradingEngine:
                 sl_dist = suggested_dist
 
         # Excursion / Stop-Loss Cap Filter
-        max_sl_cap = atr * 3.5  # Hard cap to discard crazy excursions
+        max_sl_cap = atr * 3.5
         if sl_dist > max_sl_cap:
             self._log_once(
                 f"excursion_{symbol}",
@@ -161,7 +164,7 @@ class AITradingEngine:
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
-        pred_exit_atr = max(1, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
+        pred_exit_atr = max(1.0, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
         tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
         base_tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
 
@@ -281,8 +284,8 @@ class AITradingEngine:
         )
         return signal
 
-    async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> Literal["BULL", "BEAR", "FLAT"]:
-        """Fetches trend from HTF using TechnicalAnalyzer strict logic."""
+    async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> float:
+        """Fetches trend from HTF using TechnicalAnalyzer strict logic. Returns float."""
         htf_tf = "1h"
 
         # Cache Check
@@ -297,7 +300,7 @@ class AITradingEngine:
                 return self.htf_cache[symbol]["trend"]
 
         klines = await provider.fetch_klines(symbol, htf_tf, 200)
-        trend = "FLAT"
+        trend = 0.0
         if klines:
             df = TechnicalAnalyzer.calculate_indicators(pd.DataFrame(klines))
             trend = TechnicalAnalyzer.get_htf_trend(df)
@@ -325,6 +328,7 @@ class AITradingEngine:
 
         # Apply Session-Specific Volatility Boosts for target instruments
         session_multiplier = 1.0
+
         # Catch specific London pairs first
         if any(x in symbol for x in ["EUR", "GBP"]):
             if active_session == "LONDON":
@@ -384,8 +388,12 @@ class AITradingEngine:
             return None
 
         curr = df.iloc[-1]
-        if curr["atr"] <= 0:
+
+        # Centralize highly used row metrics
+        atr = float(curr.get("atr", 1.0))
+        if atr <= 0:
             return None
+        close_price = curr["close"]
 
         # 5. Spread Check
         symbol_info = await provider.get_symbol_info(symbol)
@@ -396,7 +404,7 @@ class AITradingEngine:
         spread_info = await provider.get_spread(symbol)
         spread_price = spread_info.get("spread", 0.0) * point
 
-        max_allowed_spread = max(curr["atr"] * 2.0, point * 50)
+        max_allowed_spread = max(atr * 2.0, point * 50)
         if spread_price > max_allowed_spread:
             return None
 
@@ -411,24 +419,30 @@ class AITradingEngine:
         except:
             pass
 
+        # 8. Structural & HTF Analysis
         structure_info = TechnicalAnalyzer.detect_structure(df)
         htf_trend = await self._get_htf_trend(symbol, provider)
 
-        # Utilize Unified Sweep logic
-        pdl, pdh = None, None
+        # Prepare Daily Levels for Sweep Logic
         df_temp = df.copy()
         df_temp["date"] = pd.to_datetime(df_temp["time"], unit="s").dt.date
         prev_days = df_temp[df_temp["date"] < df_temp["date"].iloc[-1]]
+
+        pdl, pdh = None, None
         if not prev_days.empty:
             last_day = prev_days["date"].iloc[-1]
             yesterday_df = prev_days[prev_days["date"] == last_day]
             pdh, pdl = yesterday_df["high"].max(), yesterday_df["low"].min()
 
         daily_levels = {"pdh": pdh, "pdl": pdl}
-        is_liquidity_swept = TechnicalAnalyzer.detect_liquidity_sweeps(curr, structure_info, daily_levels)
 
+        is_liquidity_swept, sweep_depth_atr = TechnicalAnalyzer.detect_liquidity_sweeps(
+            curr, structure_info, daily_levels
+        )
+
+        # Route through Strategy Engine
         final_signal = self.strategy_analyzer.analyze_router(
-            curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
+            curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept, htf_trend
         )
 
         if not final_signal:
@@ -437,48 +451,44 @@ class AITradingEngine:
         # Set volatility flag for Telegram UI
         final_signal["is_high_risk"] = is_volatile_pair
 
-        # 8. ML Prediction (Feature Extraction)
+        # Feature Extraction calculations
+
+        # A. Determine Killzone Session Logic
+        hour = datetime.now().hour
+        active_killzone = 0.0
+        if SESSION_CONFIG["ASIAN_START"] <= hour < SESSION_CONFIG["ASIAN_END"]:
+            active_killzone = 1.0
+        elif SESSION_CONFIG["LONDON_START"] <= hour < SESSION_CONFIG["LONDON_END"]:
+            active_killzone = 2.0
+        elif SESSION_CONFIG["NY_START"] <= hour < SESSION_CONFIG["NY_END"]:
+            active_killzone = 3.0
+
+        # B. Distance to Nearest Active POI & Mitigation Freshness Tracking
         all_pois = active_fvgs + active_ifvgs + active_obs
-        dist_nearest_poi = (
-            min(
-                abs(
-                    min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
-                        "high"
-                    ]
-                    - curr["close"]
-                ),
-                abs(
-                    min(all_pois, key=lambda x: min(abs(x["high"] - curr["close"]), abs(x["low"] - curr["close"])))[
-                        "low"
-                    ]
-                    - curr["close"]
-                ),
-            )
-            / curr["close"]
-            if all_pois
-            else 0.0
-        )
+        dist_nearest_poi_atr = 0.0
+        mitigation_count = 0
 
-        alignment = 0
-        if htf_trend != "FLAT":
-            alignment = (
-                1
-                if (
-                    (final_signal["direction"] == "LONG" and htf_trend == "BULL")
-                    or (final_signal["direction"] == "SHORT" and htf_trend == "BEAR")
-                )
-                else -1
-            )
+        if all_pois:
+            # Find the absolute closest POI boundary (High or Low edge) to Current Price
+            nearest_poi = min(all_pois, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
+            raw_distance = min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price))
 
+            dist_nearest_poi_atr = raw_distance / atr if atr > 0 else 0.0
+            mitigation_count = nearest_poi.get("mitigations", 0)
+
+        # C. Feature Construction (Types are cleanly managed, formatting occurs in collector)
         features = {
-            "is_htf_aligned": alignment,
-            "is_liquidity_swept": is_liquidity_swept,
-            "is_in_fvg": 1 if any(f["low"] <= curr["close"] <= f["high"] for f in active_fvgs) else 0,
-            "is_in_ifvg": 1 if any(i_f["low"] <= curr["close"] <= i_f["high"] for i_f in active_ifvgs) else 0,
-            "is_in_orderblock": 1 if any(o["low"] <= curr["close"] <= o["high"] for o in active_obs) else 0,
-            "structural_break": 1 if structure_info["bos"] else (2 if structure_info["choch"] else 0),
-            "session_volume_spike": 1 if curr["volume"] > (curr.get("vol_sma_20", 0) * 1.5) else 0,
-            "distance_to_poi": dist_nearest_poi,
+            "is_htf_aligned": htf_trend,
+            "is_liquidity_swept": float(is_liquidity_swept),
+            "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
+            "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,
+            "is_in_orderblock": 1.0 if any(o["low"] <= close_price <= o["high"] for o in active_obs) else 0.0,
+            "structural_break": structure_info.get("structural_break", 0.0),
+            "active_killzone": active_killzone,
+            "distance_to_poi": dist_nearest_poi_atr,
+            "pd_array_status": structure_info.get("pd_array", 0.5),
+            "mitigation_count": float(mitigation_count),
+            "sweep_depth_atr": sweep_depth_atr,
         }
 
         # Inference from read-only bundled model

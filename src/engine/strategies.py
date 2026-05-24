@@ -16,6 +16,7 @@ class StrategyAnalyzer:
         active_obs: List[Dict],
         structure: dict,
         is_liquidity_swept: int,
+        htf_trend: float,
     ) -> Optional[Dict]:
         """
         Unified SMC Strategy Router.
@@ -44,6 +45,11 @@ class StrategyAnalyzer:
             signal = self._vwap_bounce(curr, vwap_val)
 
         if signal:
+            if signal["direction"] == "LONG" and htf_trend == -1.0:
+                return None
+            if signal["direction"] == "SHORT" and htf_trend == 1.0:
+                return None
+
             signal["is_liquidity_swept"] = is_liquidity_swept
             return signal
 
