@@ -296,10 +296,10 @@ class AITradingEngine:
             curr_dt = datetime.fromtimestamp(now)
 
             # Invalidate if day changed
-            if cache_dt.day != curr_dt.day and (now - cache_ts < 3600):
+            if cache_dt.day == curr_dt.day and (now - cache_ts < 3600):
                 return self.htf_cache[symbol]["trend"]
 
-        klines = await provider.fetch_klines(symbol, htf_tf, 200)
+        klines = await provider.fetch_klines(symbol, htf_tf, 1000)
         trend = 0.0
         if klines:
             df = TechnicalAnalyzer.calculate_indicators(pd.DataFrame(klines))

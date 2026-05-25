@@ -52,7 +52,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
 
         # Fetch M1 Data (Main execution TF) and H1 Data (HTF Bias)
         klines_main = await provider.fetch_klines(symbol, TIMEFRAME, 50000)
-        klines_htf = await provider.fetch_klines(symbol, "1h", 1000)
+        klines_htf = await provider.fetch_klines(symbol, "1h", 15000)
 
         if not klines_main or len(klines_main) < 1000:
             logger.warning(f"⚠️ Not enough data for {symbol}. Skipping.")

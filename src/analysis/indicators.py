@@ -53,9 +53,11 @@ class TechnicalAnalyzer:
         df["major_high_50"] = df["high"].rolling(50).max().shift(5)
 
         # 7. HTF Trend (Institutional EMAs)
-        # 50 EMA > 200 EMA = Bullish (1.0) | 50 EMA < 200 EMA = Bearish (-1.0)
-        df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
-        df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
+        # Cast to float to ensure mathematical calculation avoids object-type bugs
+        close_series = df["close"].astype(float)
+
+        df["ema_50"] = close_series.ewm(span=50, adjust=False).mean()
+        df["ema_200"] = close_series.ewm(span=200, adjust=False).mean()
 
         df["htf_trend"] = 0.0
         df.loc[df["ema_50"] > df["ema_200"], "htf_trend"] = 1.0
