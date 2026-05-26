@@ -43,7 +43,7 @@ class NeuralPredictor:
             pred_exit_atr = 2.0
             if self.exit_model:
                 raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
-                pred_exit_atr = max(1.0, min(raw_exit, 4.0))
+                pred_exit_atr = max(1.5, min(raw_exit, 4.0))
 
             # Dynamic Risk Sizing based on Neural Conviction
             risk_mult = 0.5  # Base Low
@@ -112,26 +112,43 @@ class NeuralPredictor:
             )
             entry_model.save(ENTRY_MODEL_FILE)
 
-            # 2. Train Exit Model mapping Risk adjustments (Ensures secondary keras is generated)
+            # 2. Train Exit Model mapping Risk adjustments
             logger.info("🧠 Training SMC Exit Model ...")
-            if "target_excursion" in df.columns:
-                y_exit = df["target_excursion"]
+
+            # ISOLATE WINNERS FOR EXCURSION REGRESSION
+            winning_df = df[df["target_win"] == 1].copy()
+
+            if len(winning_df) < 10:
+                logger.warning("⚠️ Insufficient winning trades. Falling back to static exit predictions.")
+                exit_model = None
             else:
-                y_exit = pd.Series([2.0] * len(df))  # Fallback exit target structure mapping if absent
+                X_winners = winning_df[FEATURE_COLS]
+                X_winners_scaled = self.scaler.transform(X_winners)
 
-            exit_model = tf.keras.models.Sequential(
-                [
-                    tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
-                    tf.keras.layers.Dense(16, activation="relu"),
-                    tf.keras.layers.Dense(1, activation="linear"),
-                ]
-            )
+                if "target_excursion" in winning_df.columns:
+                    y_exit = winning_df["target_excursion"]
+                else:
+                    y_exit = pd.Series([2.0] * len(winning_df))
 
-            exit_model.compile(optimizer="adam", loss="mse", metrics=["mae"])
-            exit_model.fit(
-                X_scaled, y_exit, epochs=100, batch_size=32, verbose=1, validation_split=0.15, callbacks=[early_stop]
-            )
-            exit_model.save(EXIT_MODEL_FILE)
+                exit_model = tf.keras.models.Sequential(
+                    [
+                        tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
+                        tf.keras.layers.Dense(16, activation="relu"),
+                        tf.keras.layers.Dense(1, activation="linear"),
+                    ]
+                )
+
+                exit_model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+                exit_model.fit(
+                    X_winners_scaled,
+                    y_exit,
+                    epochs=100,
+                    batch_size=32,
+                    verbose=1,
+                    validation_split=0.15,
+                    callbacks=[early_stop],
+                )
+                exit_model.save(EXIT_MODEL_FILE)
 
             # Save artifacts to root directory
             joblib.dump(self.scaler, SCALER_FILE)

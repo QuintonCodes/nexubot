@@ -16,7 +16,6 @@ class StrategyAnalyzer:
         active_obs: List[Dict],
         structure: dict,
         is_liquidity_swept: int,
-        htf_trend: float,
     ) -> Optional[Dict]:
         """
         Unified SMC Strategy Router.
@@ -34,7 +33,7 @@ class StrategyAnalyzer:
 
         # 3. IFVG Continuation (Direction dictated by the IFVG itself)
         if not signal:
-            signal = self._ifvg_mitigation(curr, active_ifvgs)
+            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs)
 
         # 4. POI Reversals (Pullbacks to Order Blocks & FVGs)
         if not signal:
@@ -67,13 +66,13 @@ class StrategyAnalyzer:
         # Determine Strategy Name and Confidence based on Sweep Tier
         if is_liquidity_swept == 3:
             strat_name = "Daily Liquidity Sweep"
-            conf = 94.0
+            conf = 84.0
         elif is_liquidity_swept == 2:
             strat_name = "Major Swing Sweep (50p)"
-            conf = 90.0
+            conf = 80.0
         else:
             strat_name = "Internal Sweep Trap"
-            conf = 86.0
+            conf = 76.0
 
         #   --- BULLISH SWEEPS   ---
         if struct_break == "BULL":
@@ -140,41 +139,61 @@ class StrategyAnalyzer:
 
         return None
 
-    def _ifvg_mitigation(self, curr: Union[pd.Series, dict], active_ifvgs: List[Dict]) -> Optional[Dict]:
+    def _ifvg_mitigation(
+        self, curr: Union[pd.Series, dict], active_ifvgs: List[Dict], active_obs: List[Dict] = None
+    ) -> Optional[Dict]:
         """
-        Detects bounces off active IFVGs. Direction is HARD OVERRIDDEN by the IFVG nature.
+        Detects bounces off active IFVGs with CE Validation and Overlap Protection.
         """
+        active_obs = active_obs or []
         atr_buffer = curr["atr"] * 0.5
         recent_low = curr.get("recent_low_4", 0)
         recent_high = curr.get("recent_high_4", 0)
+        close_price = curr["close"]
 
         # Ensure we are actually bouncing (candle is green for longs, red for shorts)
-        is_bouncing_up = curr["close"] > curr["open"]
-        is_bouncing_down = curr["close"] < curr["open"]
+        is_bouncing_up = close_price > curr["open"]
+        is_bouncing_down = close_price < curr["open"]
 
-        if is_bouncing_up:
-            tapped_bullish_ifvg = any(recent_low <= i_fvg["high"] for i_fvg in active_ifvgs if i_fvg["type"] == "BULL")
-            if tapped_bullish_ifvg:
-                return {
-                    "strategy": "IFVG Re-Test",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 89.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_low - atr_buffer,
-                }
+        # Opposing Blockade Check (Don't buy into a Major Bearish OB, don't sell into a Major Bullish OB)
+        blocked_by_bear = any(
+            ob["low"] <= close_price <= ob["high"]
+            for ob in active_obs
+            if ob["type"] == "BEAR" and ob.get("tier") == "MAJOR"
+        )
+        blocked_by_bull = any(
+            ob["low"] <= close_price <= ob["high"]
+            for ob in active_obs
+            if ob["type"] == "BULL" and ob.get("tier") == "MAJOR"
+        )
 
-        if is_bouncing_down:
-            tapped_bearish_ifvg = any(recent_high >= i_fvg["low"] for i_fvg in active_ifvgs if i_fvg["type"] == "BEAR")
-            if tapped_bearish_ifvg:
-                return {
-                    "strategy": "IFVG Re-Test",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 89.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_high + atr_buffer,
-                }
+        if is_bouncing_up and not blocked_by_bear:
+            for i_fvg in active_ifvgs:
+                if i_fvg["type"] == "BULL" and recent_low <= i_fvg["high"]:
+                    ce_midpoint = (i_fvg["high"] + i_fvg["low"]) / 2
+                    if close_price > ce_midpoint:  # Must close above midpoint to prove rejection
+                        return {
+                            "strategy": "IFVG Re-Test",
+                            "signal": "BUY",
+                            "direction": "LONG",
+                            "confidence": 78.0,
+                            "order_type": "MARKET",
+                            "suggested_sl": recent_low - atr_buffer,
+                        }
+
+        if is_bouncing_down and not blocked_by_bull:
+            for i_fvg in active_ifvgs:
+                if i_fvg["type"] == "BEAR" and recent_high >= i_fvg["low"]:
+                    ce_midpoint = (i_fvg["high"] + i_fvg["low"]) / 2
+                    if close_price < ce_midpoint:  # Must close below midpoint to prove rejection
+                        return {
+                            "strategy": "IFVG Re-Test",
+                            "signal": "SELL",
+                            "direction": "SHORT",
+                            "confidence": 78.0,
+                            "order_type": "MARKET",
+                            "suggested_sl": recent_high + atr_buffer,
+                        }
 
         return None
 
@@ -185,14 +204,15 @@ class StrategyAnalyzer:
         active_obs: List[Dict],
     ) -> Optional[Dict]:
         """
-        Detects bounces off active FVGs and Order Blocks.
+        Detects bounces off active FVGs and Order Blocks with CE Validation.
         """
         recent_low = curr.get("recent_low_4", 0)
         recent_high = curr.get("recent_high_4", 0)
+        close_price = curr["close"]
         atr_buffer = curr["atr"] * 0.5
 
-        is_bouncing_up = curr["close"] > curr["open"]
-        is_bouncing_down = curr["close"] < curr["open"]
+        is_bouncing_up = close_price > curr["open"]
+        is_bouncing_down = close_price < curr["open"]
 
         # Filter OBs by minimum displacement volume and sort by strength
         valid_bull_obs = [ob for ob in active_obs if ob["type"] == "BULL" and ob.get("vol_strength", 1.0) >= 1.1]
@@ -201,22 +221,36 @@ class StrategyAnalyzer:
         valid_bear_obs = [ob for ob in active_obs if ob["type"] == "BEAR" and ob.get("vol_strength", 1.0) >= 1.1]
         valid_bear_obs.sort(key=lambda x: x.get("vol_strength", 0), reverse=True)
 
+        # Blockades
+        blocked_by_bear = any(
+            ob["low"] <= close_price <= ob["high"] for ob in valid_bear_obs if ob.get("tier") == "MAJOR"
+        )
+        blocked_by_bull = any(
+            ob["low"] <= close_price <= ob["high"] for ob in valid_bull_obs if ob.get("tier") == "MAJOR"
+        )
+
         #   --- BULLISH CONFIRMATIONS   ---
-        if is_bouncing_up:
+        if is_bouncing_up and not blocked_by_bear:
             major_ob = next(
                 (ob for ob in valid_bull_obs if ob.get("tier") == "MAJOR" and recent_low <= ob["high"]), None
             )
             internal_ob = next(
                 (ob for ob in valid_bull_obs if ob.get("tier") == "INTERNAL" and recent_low <= ob["high"]), None
             )
-            tapped_fvg = any(recent_low <= fvg["high"] for fvg in active_fvgs if fvg["type"] == "BULL")
+
+            tapped_fvg = False
+            for fvg in active_fvgs:
+                if fvg["type"] == "BULL" and recent_low <= fvg["high"]:
+                    if close_price > ((fvg["high"] + fvg["low"]) / 2):  # Consequent Encroachment validation
+                        tapped_fvg = True
+                        break
 
             if major_ob:
                 return {
                     "strategy": "Major OB Bounce",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 88.0,
+                    "confidence": 78.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_low - atr_buffer,
                 }
@@ -225,7 +259,7 @@ class StrategyAnalyzer:
                     "strategy": "Internal OB Bounce",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 84.0,
+                    "confidence": 74.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_low - atr_buffer,
                 }
@@ -235,27 +269,33 @@ class StrategyAnalyzer:
                     "strategy": "FVG Bounce",
                     "signal": "BUY",
                     "direction": "LONG",
-                    "confidence": 85.0,
+                    "confidence": 75.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_low - atr_buffer,
                 }
 
         #   --- BEARISH CONFIRMATIONS   ---
-        if is_bouncing_down:
+        if is_bouncing_down and not blocked_by_bull:
             major_ob = next(
                 (ob for ob in valid_bear_obs if ob.get("tier") == "MAJOR" and recent_high >= ob["low"]), None
             )
             internal_ob = next(
                 (ob for ob in valid_bear_obs if ob.get("tier") == "INTERNAL" and recent_high >= ob["low"]), None
             )
-            tapped_fvg = any(recent_high >= fvg["low"] for fvg in active_fvgs if fvg["type"] == "BEAR")
+
+            tapped_fvg = False
+            for fvg in active_fvgs:
+                if fvg["type"] == "BEAR" and recent_high >= fvg["low"]:
+                    if close_price < ((fvg["high"] + fvg["low"]) / 2):  # Consequent Encroachment validation
+                        tapped_fvg = True
+                        break
 
             if major_ob:
                 return {
                     "strategy": "Major OB Bounce",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 88.0,
+                    "confidence": 78.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_high + atr_buffer,
                 }
@@ -264,7 +304,7 @@ class StrategyAnalyzer:
                     "strategy": "Internal OB Bounce",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 84.0,
+                    "confidence": 74.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_high + atr_buffer,
                 }
@@ -274,7 +314,7 @@ class StrategyAnalyzer:
                     "strategy": "FVG Bounce",
                     "signal": "SELL",
                     "direction": "SHORT",
-                    "confidence": 85.0,
+                    "confidence": 75.0,
                     "order_type": "MARKET",
                     "suggested_sl": recent_high + atr_buffer,
                 }
@@ -310,7 +350,7 @@ class StrategyAnalyzer:
                 "strategy": "VWAP Bounce",
                 "signal": "BUY",
                 "direction": "LONG",
-                "confidence": 83.0,
+                "confidence": 73.0,
                 "order_type": "MARKET",
                 "suggested_sl": recent_low - atr_buffer,
             }
@@ -320,7 +360,7 @@ class StrategyAnalyzer:
                 "strategy": "VWAP Bounce",
                 "signal": "SELL",
                 "direction": "SHORT",
-                "confidence": 83.0,
+                "confidence": 73.0,
                 "order_type": "MARKET",
                 "suggested_sl": recent_high + atr_buffer,
             }

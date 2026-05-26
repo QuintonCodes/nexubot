@@ -224,11 +224,16 @@ class TechnicalAnalyzer:
                     ):
                         pool.remove(zone)
 
-            # 3. Detect new FVG
-            if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
-                active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"], "mitigations": 0})
-            elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
-                active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"], "mitigations": 0})
+            # 3. Detect new FVG (Now strictly filtered by Institutional Volume)
+            vol_sma = c2.get("vol_sma_20", 1)
+            vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
+
+            # Only register FVGs with volume strength >= 1.0 (average or above average displacement)
+            if vol_strength >= 1.0:
+                if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
+                    active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"], "mitigations": 0})
+                elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
+                    active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"], "mitigations": 0})
 
             # 4. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
             is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
@@ -237,28 +242,32 @@ class TechnicalAnalyzer:
             vol_sma = c2.get("vol_sma_20", 1)
             vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
 
-            if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
-                active_obs.append(
-                    {
-                        "type": "BULL",
-                        "high": c1["high"],
-                        "low": c1["low"],
-                        "tier": ob_tier,
-                        "vol_strength": vol_strength,
-                        "mitigations": 0,
-                    }
-                )
-            elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
-                active_obs.append(
-                    {
-                        "type": "BEAR",
-                        "high": c1["high"],
-                        "low": c1["low"],
-                        "tier": ob_tier,
-                        "vol_strength": vol_strength,
-                        "mitigations": 0,
-                    }
-                )
+            # Require actual institutional displacement
+            required_vol = 1.2 if ob_tier == "MAJOR" else 1.0
+
+            if vol_strength >= required_vol:
+                if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
+                    active_obs.append(
+                        {
+                            "type": "BULL",
+                            "high": c1["high"],
+                            "low": c1["low"],
+                            "tier": ob_tier,
+                            "vol_strength": vol_strength,
+                            "mitigations": 0,
+                        }
+                    )
+                elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
+                    active_obs.append(
+                        {
+                            "type": "BEAR",
+                            "high": c1["high"],
+                            "low": c1["low"],
+                            "tier": ob_tier,
+                            "vol_strength": vol_strength,
+                            "mitigations": 0,
+                        }
+                    )
 
         return active_fvgs, active_ifvgs, active_obs
 

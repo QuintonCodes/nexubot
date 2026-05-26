@@ -121,7 +121,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
 
             # 5. Routing
             signal = engine.strategy_analyzer.analyze_router(
-                curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept, htf_trend
+                curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
             )
 
             if not signal:
@@ -136,19 +136,21 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
                 if (atr * 0.2) < suggested_dist < (atr * 6.0):
                     sl_dist = suggested_dist
 
-            all_zones = active_fvgs + active_ifvgs + active_obs
+            # Only use IFVGs and Major OBs as walls
+            hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
             opposing_pois = []
+
             if signal["direction"] == "LONG":
-                opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > close_price]
+                opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > close_price]
             else:
-                opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < close_price]
+                opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < close_price]
 
             nearest_opposing_poi = (
                 min(opposing_pois)
                 if signal["direction"] == "LONG" and opposing_pois
                 else (max(opposing_pois) if signal["direction"] == "SHORT" and opposing_pois else None)
             )
-            base_tp_dist = max(atr * 3.0, sl_dist * 1.2)
+            base_tp_dist = max(atr * 3.0, sl_dist * 1.5)
 
             if signal["direction"] == "LONG":
                 sl = close_price - sl_dist
@@ -195,6 +197,7 @@ async def backfill_data(provider, engine, target_symbols: Optional[List[str]] = 
             # Distance & Mitigation Tracking
             dist_nearest_poi_atr = 0.0
             mitigation_count = 0
+            all_zones = active_fvgs + active_ifvgs + active_obs
             if all_zones:
                 nearest_poi = min(
                     all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price))

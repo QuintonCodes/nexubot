@@ -151,22 +151,27 @@ class AITradingEngine:
             return None
 
         # Determine Opposing POIs to dynamically cap Take Profit
+        # Only use MAJOR Order Blocks and IFVGs as hard opposing blockades.
+        hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
+
         opposing_pois = []
-        all_zones = active_fvgs + active_ifvgs + active_obs
         if signal["direction"] == "LONG":
-            opposing_pois = [p["low"] for p in all_zones if p["type"] == "BEAR" and p["low"] > entry_price]
+            opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > entry_price]
         else:
-            opposing_pois = [p["high"] for p in all_zones if p["type"] == "BULL" and p["high"] < entry_price]
+            opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < entry_price]
 
         nearest_opposing_poi = None
         if opposing_pois:
             nearest_opposing_poi = min(opposing_pois) if signal["direction"] == "LONG" else max(opposing_pois)
 
         # Probability calibration hook
+        MIN_RR = 1.5
         prob = nn_result.get("prob", 0.5)
-        pred_exit_atr = max(1.0, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
+
+        # Ensure base TP is natively plotted at MIN_RR to stop auto-rejections
+        pred_exit_atr = max(MIN_RR, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
         tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
-        base_tp_dist = max(atr * tp_multiplier, sl_dist * 1.2)
+        base_tp_dist = max(atr * tp_multiplier, sl_dist * MIN_RR)
 
         # Absolute Prices
         if signal["signal"] == "BUY":
@@ -197,7 +202,6 @@ class AITradingEngine:
 
         # Verify true Risk/Reward against POI blockades
         rr = (actual_tp_dist / sl_dist) if sl_dist > 0 else 1.0
-        MIN_RR = 1.5
         if rr < MIN_RR:
             self._log_once(f"rr_gate_{symbol}", f"Skipping {symbol}: Poor Risk/Reward ratio ({rr:.2f}) < {MIN_RR}")
             return None
@@ -442,7 +446,7 @@ class AITradingEngine:
 
         # Route through Strategy Engine
         final_signal = self.strategy_analyzer.analyze_router(
-            curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept, htf_trend
+            curr, active_fvgs, active_ifvgs, active_obs, structure_info, is_liquidity_swept
         )
 
         if not final_signal:
