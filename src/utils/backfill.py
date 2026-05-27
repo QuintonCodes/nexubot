@@ -60,7 +60,8 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
 
             curr = records[i]
             close_price = curr["close"]
-            atr = max(float(curr.get("atr", 1.0)), 1.0)
+            min_atr = point * 10
+            atr = max(float(curr.get("atr", min_atr)), min_atr)
 
             # Slicing for logic processing
             df_slice = df_full.iloc[max(0, i - WARMUP_PERIOD) : i + 1]

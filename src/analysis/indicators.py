@@ -82,9 +82,10 @@ class TechnicalAnalyzer:
         major_low_50 = curr.get("major_low_50", None)
         major_high_50 = curr.get("major_high_50", None)
 
-        atr = curr.get("atr", 1.0)
-        if atr == 0:
-            atr = 1.0
+        fallback_atr = close_price * 0.0005
+        atr = curr.get("atr", fallback_atr)
+        if atr == 0 or pd.isna(atr):
+            atr = fallback_atr
 
         is_swept = 0
         sweep_depth = 0.0

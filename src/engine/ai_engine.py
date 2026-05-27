@@ -128,9 +128,11 @@ class AITradingEngine:
         min_vol, max_vol, vol_step = info.get("min_vol", 0.01), info.get("max_vol", 100.0), info.get("vol_step", 0.01)
         digits = info.get("digits", 5)
 
-        atr = float(curr.get("atr", 1.0))
-        if atr <= 0:
-            atr = 1.0
+        # Dynamically scale the minimum ATR fallback using the asset's point value
+        min_atr = point * 10
+        atr = float(curr.get("atr", min_atr))
+        if atr <= 0 or pd.isna(atr):
+            atr = min_atr
 
         # Entry Price Determination
         current_market_price = ask if signal["direction"] == "LONG" else bid
@@ -401,8 +403,8 @@ class AITradingEngine:
         curr = df.iloc[-1]
 
         # Centralize highly used row metrics
-        atr = float(curr.get("atr", 1.0))
-        if atr <= 0:
+        atr = float(curr.get("atr", 0.0))
+        if atr <= 0 or pd.isna(atr):
             return None
         close_price = curr["close"]
 
