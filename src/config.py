@@ -53,6 +53,7 @@ CANDLE_LIMIT = 500
 DEFAULT_MIN_CONFIDENCE = 60.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 5.0
+MIN_RR = 1.9
 
 SCAN_INTERVAL_CRYPTO = 30
 SCAN_INTERVAL_FOREX = 30
@@ -69,6 +70,8 @@ MAX_SIGNALS_PER_SCAN = 3
 ENTRY_MODEL_FILE = "nexubot_entry.keras"
 EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
+CALIBRATOR_FILE = "nexubot_calibrator.pkl"
+TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
     "is_htf_aligned",

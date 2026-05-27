@@ -8,17 +8,17 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from src.data.provider import DataProvider
 from src.core.engine import NexubotEngine
 from src.utils.backfill import backfill_data
-from src.config import ENTRY_MODEL_FILE, EXIT_MODEL_FILE, SCALER_FILE
+from src.config import CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, SCALER_FILE, TRAINING_FILE
 
 load_dotenv()
 
 
-def wipe_legacy_ml_data():
+def wipe_legacy_ml_data() -> None:
     """
     Wipes old ML artifacts to prevent TensorFlow shape mismatches
     now that the engine has transitioned to Pure SMC features.
     """
-    files_to_delete = ["training_data.csv", ENTRY_MODEL_FILE, EXIT_MODEL_FILE, SCALER_FILE]
+    files_to_delete = [CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, SCALER_FILE, TRAINING_FILE]
     cleaned = False
 
     print("🧹 Checking for legacy ML artifacts...")
@@ -37,7 +37,7 @@ def wipe_legacy_ml_data():
         print("✅ Environment is clean. No legacy data found.\n")
 
 
-async def main():
+async def main() -> None:
     print("🚀 Initiating Pure SMC Backfill Engine (M1 Timeframe) ...")
 
     # Force clean environment to prevent Neural Network crashes
@@ -48,9 +48,8 @@ async def main():
 
     engine = NexubotEngine(None)
     engine.provider = provider
-    engine.strategy_analyzer = engine.ai_engine.strategy_analyzer
 
-    await backfill_data(provider, engine)
+    await backfill_data(provider)
 
     print("\n🛑 Shutting down provider...")
     await provider.shutdown()

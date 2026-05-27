@@ -17,6 +17,7 @@ from src.config import (
     DEFAULT_MAX_LOT,
     DEFAULT_RISK_PCT,
     HIGH_VOLATILITY_IDENTIFIERS,
+    MIN_RR,
     PAIR_SIGNAL_COOLDOWN,
     SESSION_CONFIG,
     get_account_risk_caps,
@@ -61,13 +62,19 @@ class AITradingEngine:
         """
         base_conf = min(signal["confidence"], DEFAULT_MIN_CONFIDENCE)
 
-        # 1. MTF Trend Alignment (1.0 = Bullish, -1.0 = Bearish)
-        trend_bonus = (
-            15
-            if (htf_trend == 1.0 and signal["direction"] == "LONG")
-            or (htf_trend == -1.0 and signal["direction"] == "SHORT")
-            else 0
+        structural_break = signal.get("structural_break_val", 0.0)
+        is_counter_trend = (htf_trend == 1.0 and signal["direction"] == "SHORT") or (
+            htf_trend == -1.0 and signal["direction"] == "LONG"
         )
+
+        # Counter-trend with a confirmed structural break (CHoCH) is fine — no penalty.
+        # Counter-trend with NO structural break (raw OB/FVG bounce) is lower quality.
+        if is_counter_trend and structural_break == 0.0:
+            trend_bonus = -5  # Mild penalty: counter-trend bounce with no structure change
+        elif not is_counter_trend and structural_break != 0.0:
+            trend_bonus = 10  # Reward: WITH-trend + structural confirmation
+        else:
+            trend_bonus = 0  # Neutral: counter-trend with structure OR trend-following without
 
         # 2. Historical Performance
         hist_win_rate = 0.5
@@ -151,7 +158,6 @@ class AITradingEngine:
             return None
 
         # Determine Opposing POIs to dynamically cap Take Profit
-        # Only use MAJOR Order Blocks and IFVGs as hard opposing blockades.
         hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
 
         opposing_pois = []
@@ -165,12 +171,12 @@ class AITradingEngine:
             nearest_opposing_poi = min(opposing_pois) if signal["direction"] == "LONG" else max(opposing_pois)
 
         # Probability calibration hook
-        MIN_RR = 1.5
         prob = nn_result.get("prob", 0.5)
 
         # Ensure base TP is natively plotted at MIN_RR to stop auto-rejections
-        pred_exit_atr = max(MIN_RR, min(float(nn_result.get("pred_exit_atr", 2.0)), 6.0))
-        tp_multiplier = max(pred_exit_atr, 3.0) if self.risk_pct > 3.0 else pred_exit_atr
+        pred_exit_atr = max(MIN_RR, min(float(nn_result.get("pred_exit_atr", 2.5)), 6.0))
+        tp_multiplier = max(pred_exit_atr, 3.5) if self.risk_pct > 3.0 else pred_exit_atr
+
         base_tp_dist = max(atr * tp_multiplier, sl_dist * MIN_RR)
 
         # Absolute Prices
@@ -207,8 +213,11 @@ class AITradingEngine:
             return None
 
         expected_ev = prob * rr - (1.0 - prob)
-        if expected_ev < -0.25:
-            self._log_once(f"ev_gate_{symbol}", f"Skipping {symbol}: Negative EV ({expected_ev:.2f})")
+        if expected_ev < 0.0:
+            self._log_once(
+                f"ev_gate_{symbol}",
+                f"Skipping {symbol}: Negative EV ({expected_ev:.2f}) at prob={prob:.2f}, rr={rr:.2f}",
+            )
             return None
 
         # Lot Sizing based on the final SL distance
@@ -236,8 +245,6 @@ class AITradingEngine:
 
         # Safety Cap
         max_allowed_pct = get_account_risk_caps(balance_in_usd, self.currency)
-
-        # Absolute hard cap in ZAR
         max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
 
         # Check if risk exceeds cap
@@ -455,6 +462,9 @@ class AITradingEngine:
         # Set volatility flag for Telegram UI
         final_signal["is_high_risk"] = is_volatile_pair
 
+        # Pass structural_break into signal for use in _adjust_confidence
+        final_signal["structural_break_val"] = structure_info.get("structural_break", 0.0)
+
         # Feature Extraction calculations
 
         # A. Determine Killzone Session Logic
@@ -485,11 +495,7 @@ class AITradingEngine:
         if htf_trend != 0.0:
             is_long_aligned = final_signal["direction"] == "LONG" and htf_trend == 1.0
             is_short_aligned = final_signal["direction"] == "SHORT" and htf_trend == -1.0
-
-            if is_long_aligned or is_short_aligned:
-                alignment_score = 1.0
-            else:
-                alignment_score = -1.0
+            alignment_score = 1.0 if (is_long_aligned or is_short_aligned) else -1.0
 
         # C. Feature Construction (Types are cleanly managed, formatting occurs in collector)
         features = {
