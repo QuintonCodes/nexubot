@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 
 from typing import Dict, Tuple, Union
@@ -56,6 +57,17 @@ class TechnicalAnalyzer:
         df["htf_trend"] = 0.0
         df.loc[df["ema_50"] > df["ema_200"], "htf_trend"] = 1.0
         df.loc[df["ema_50"] < df["ema_200"], "htf_trend"] = -1.0
+
+        # Asian Range Tracking (Power of 3)
+        df["hour"] = df["datetime"].dt.hour
+        asian_mask = (df["hour"] >= 2) & (df["hour"] < 10)
+        df["is_asian"] = asian_mask
+
+        asian_highs = df[asian_mask].groupby("date_group")["high"].max()
+        asian_lows = df[asian_mask].groupby("date_group")["low"].min()
+
+        df["asian_high"] = df["date_group"].map(asian_highs)
+        df["asian_low"] = df["date_group"].map(asian_lows)
 
         # Safely fill price-based columns before global zeroing to prevent SL Cap / VWAP corruption
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.0005)
@@ -134,48 +146,60 @@ class TechnicalAnalyzer:
         Unified Liquidity Sweep Logic.
         Returns: (Sweep Tier [0-3], Sweep Depth in ATR)
         """
-        pdl = daily_levels.get("pdl")
-        pdh = daily_levels.get("pdh")
-        last_low = structure.get("last_low")
-        last_high = structure.get("last_high")
+        pdl, pdh = daily_levels.get("pdl"), daily_levels.get("pdh")
+        asian_high, asian_low = curr.get("asian_high"), curr.get("asian_low")
+        last_low, last_high = structure.get("last_low"), structure.get("last_high")
 
         close_price = curr["close"]
-        recent_low_5 = curr.get("recent_low_5", 0)
-        recent_high_5 = curr.get("recent_high_5", 0)
-        major_low_50 = curr.get("major_low_50", None)
-        major_high_50 = curr.get("major_high_50", None)
+        recent_low_5, recent_high_5 = curr.get("recent_low_5", 0), curr.get("recent_high_5", 0)
+        major_low_50, major_high_50 = curr.get("major_low_50", None), curr.get("major_high_50", None)
 
         fallback_atr = close_price * 0.0005
         atr = curr.get("atr", fallback_atr)
         if atr == 0 or pd.isna(atr):
             atr = fallback_atr
 
-        is_swept = 0
-        sweep_depth = 0.0
+        is_swept, sweep_depth = 0, 0.0
+
+        # Round Number Pool proximity check
+        def is_round_number_sweep(price, high, low):
+            # Scale dynamically based on asset value
+            magnitude = 10 ** math.floor(math.log10(price))
+            step = magnitude / 10 if magnitude > 10 else 1.0
+            closest_round = round(price / step) * step
+            # If price swept a major round number and returned
+            return min(abs(high - closest_round), abs(low - closest_round)) < (atr * 0.5)
+
+        # Tier 3: Daily Sweeps & Asian Range Manipulations
+        is_london = (
+            9
+            <= pd.to_datetime(curr.get("time"), unit="s" if isinstance(curr.get("time"), (int, float)) else None).hour
+            <= 11
+        )
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
-            is_swept = 3
-            sweep_depth = (pdl - recent_low_5) / atr
+            is_swept, sweep_depth = 3, (pdl - recent_low_5) / atr
         elif pdh and recent_high_5 > pdh and close_price < pdh:
-            is_swept = 3
-            sweep_depth = (recent_high_5 - pdh) / atr
+            is_swept, sweep_depth = 3, (recent_high_5 - pdh) / atr
+        elif is_london and asian_low and recent_low_5 < asian_low and close_price > asian_low:
+            is_swept, sweep_depth = 3, (asian_low - recent_low_5) / atr
+        elif is_london and asian_high and recent_high_5 > asian_high and close_price < asian_high:
+            is_swept, sweep_depth = 3, (recent_high_5 - asian_high) / atr
 
-        # Tier 2: Major 50-Period Sweeps
+        # Tier 2: Major 50-Period Sweeps & Round Number Sweeps
         elif major_low_50 and recent_low_5 < major_low_50 and close_price > major_low_50:
-            is_swept = 2
-            sweep_depth = (major_low_50 - recent_low_5) / atr
+            is_swept, sweep_depth = 2, (major_low_50 - recent_low_5) / atr
         elif major_high_50 and recent_high_5 > major_high_50 and close_price < major_high_50:
-            is_swept = 2
-            sweep_depth = (recent_high_5 - major_high_50) / atr
+            is_swept, sweep_depth = 2, (recent_high_5 - major_high_50) / atr
+        elif is_round_number_sweep(close_price, recent_high_5, recent_low_5):
+            is_swept, sweep_depth = 2, 0.5  # Fixed default depth for psychological pools
 
         # Tier 1: Internal Sweeps (Local Structural Pivots)
         elif last_low and recent_low_5 < last_low and close_price > last_low:
-            is_swept = 1
-            sweep_depth = (last_low - recent_low_5) / atr
+            is_swept, sweep_depth = 1, (last_low - recent_low_5) / atr
         elif last_high and recent_high_5 > last_high and close_price < last_high:
-            is_swept = 1
-            sweep_depth = (recent_high_5 - last_high) / atr
+            is_swept, sweep_depth = 1, (recent_high_5 - last_high) / atr
 
         return is_swept, sweep_depth
 
@@ -207,31 +231,25 @@ class TechnicalAnalyzer:
         is_downtrend = (last_high < prev_high) and (last_low < prev_low)
         structure = "BULL" if is_uptrend else ("BEAR" if is_downtrend else "FLAT")
 
-        bos, choch = None, None
-        structural_break = 0.0
+        bos, choch, structural_break = None, None, 0.0
 
         # 2. Detect BOS and CHoCH on the live edge (Requires body close)
         if structure == "BULL":
             if current_close > last_high:
-                bos = "BULL"
-                structural_break = 1.0
+                bos, structural_break = "BULL", 1.0
             elif current_close < last_low:
-                choch = "BEAR"
-                structural_break = -2.0
+                choch, structural_break = "BEAR", -2.0
         elif structure == "BEAR":
             if current_close < last_low:
-                bos = "BEAR"
-                structural_break = -1.0
+                bos, structural_break = "BEAR", -1.0
             elif current_close > last_high:
-                choch = "BULL"
-                structural_break = 2.0
+                choch, structural_break = "BULL", 2.0
 
         # Premium / Discount Calculation (0.0 to 1.0)
         pd_range = last_high - last_low
         pd_array_status = 0.5
         if pd_range > 0:
-            pd_array_status = (current_close - last_low) / pd_range
-            pd_array_status = max(0.0, min(1.0, pd_array_status))
+            pd_array_status = max(0.0, min(1.0, (current_close - last_low) / pd_range))
 
         return {
             "bos": bos,
@@ -274,8 +292,8 @@ class TechnicalAnalyzer:
                     surviving_fvgs.append(f)
             active_fvgs = surviving_fvgs
 
-            # 2. Track Mitigations & Invalidate fully broken zones
-            for pool in [active_fvgs, active_ifvgs, active_obs]:
+            # 2. Track Mitigations & Manage Broken OBs (Breaker Blocks)
+            for pool, pool_name in [(active_fvgs, "fvg"), (active_ifvgs, "ifvg"), (active_obs, "ob")]:
                 surviving_zones = []
                 for zone in pool[:]:
                     is_inside = False
@@ -294,22 +312,40 @@ class TechnicalAnalyzer:
                     # Remove heavily mitigated/broken zones (Over 3 touches = void)
                     if zone["mitigations"] > 3:
                         continue
-                    if zone["type"] == "BULL" and curr_close < zone["low"]:
-                        continue
-                    if zone["type"] == "BEAR" and curr_close > zone["high"]:
-                        continue
+
+                    # Convert Violated OBs into Breaker Blocks
+                    if pool_name == "ob":
+                        if zone["type"] == "BULL" and curr_close < zone["low"]:
+                            zone["type"] = "BEAR"
+                            zone["tier"] = "BREAKER"
+                            zone["mitigations"] = 0
+                            surviving_zones.append(zone)
+                            continue
+                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                            zone["type"] = "BULL"
+                            zone["tier"] = "BREAKER"
+                            zone["mitigations"] = 0
+                            surviving_zones.append(zone)
+                            continue
+                    else:
+                        if zone["type"] == "BULL" and curr_close < zone["low"]:
+                            continue
+                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                            continue
 
                     surviving_zones.append(zone)
 
                 # Replace the original list with surviving entries
                 pool[:] = surviving_zones
 
-            # 3. Detect new FVG (Now strictly filtered by Institutional Volume)
+            # 3. True Institutional FVG Detection (Displacement Check)
             vol_sma = c2.get("vol_sma_20", 1)
             vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
+            c2_range = c2["high"] - c2["low"]
+            c2_body = abs(c2["close"] - c2["open"])
 
             # Only register FVGs with volume strength >= 1.0 (average or above average displacement)
-            if vol_strength >= 1.0:
+            if c2_range > 0 and vol_strength >= 1.5 and (c2_body / c2_range) >= 0.70:
                 if c1["high"] < curr_low and c2["close"] > c2["open"]:
                     active_fvgs.append(
                         {"type": "BULL", "high": curr_low, "low": c1["high"], "mitigations": 0, "is_touching": False}
@@ -322,7 +358,6 @@ class TechnicalAnalyzer:
             # 4. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
             is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
             ob_tier = "MAJOR" if is_pivot else "INTERNAL"
-
             required_vol = 1.2 if ob_tier == "MAJOR" else 1.0
 
             if vol_strength >= required_vol:

@@ -35,15 +35,22 @@ class MarketScanner:
         signals_found = 0
 
         for sym in symbols:
-            if not self.engine.is_running:
+            if not self.engine.is_running or signals_found >= MAX_SIGNALS_PER_SCAN:
                 break
 
-            # Limit signals per batch
-            if signals_found >= MAX_SIGNALS_PER_SCAN:
-                break
+            active_syms = [s.get("symbol") for s in self.engine.active_signals]
 
-            # Skip if trade is already active/monitoring
-            if any(s.get("symbol") == sym for s in self.engine.active_signals):
+            # Risk Budget Preserver: Correlation blocking
+            if sym == "ETHUSDm" and any("BTC" in s for s in active_syms):
+                continue
+            if sym == "BTCUSDm" and any("ETH" in s for s in active_syms):
+                continue
+            if "NAS" in sym and any("US30" in s for s in active_syms):
+                continue
+            if "US30" in sym and any("NAS" in s for s in active_syms):
+                continue
+
+            if sym in active_syms:
                 continue
 
             klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, 3000)

@@ -73,17 +73,25 @@ CALIBRATOR_FILE = "nexubot_calibrator.pkl"
 TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
-    "is_htf_aligned",
-    "is_liquidity_swept",
+    "signal_quality_score",
+    "session_quality_score",
+    "is_low_noise_session",
+    "is_optimal_entry_distance",
+    "poi_freshness_score",
+    "log_distance_to_poi",
+    "htf_fvg_confluence",
     "is_in_fvg",
     "is_in_ifvg",
-    "is_in_orderblock",
+    "bos_htf_directional_confluence",
+    "is_choch_signal",
     "structural_break",
-    "active_killzone",
-    "distance_to_poi",
-    "pd_array_status",
-    "mitigation_count",
+    "is_htf_aligned",
+    "is_liquidity_swept_tier",
     "sweep_depth_atr",
+    "pd_array_status",
+    "pd_deviation_from_equilibrium",
+    "is_inside_poi_flag",
+    "zone_overlap_count",
 ]
 
 MAX_ROWS = 14000

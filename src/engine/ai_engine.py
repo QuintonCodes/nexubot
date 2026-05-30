@@ -314,14 +314,11 @@ class AITradingEngine:
             htf_trend == -1.0 and signal["direction"] == "LONG"
         )
 
-        # Counter-trend with a confirmed structural break (CHoCH) is fine — no penalty.
-        # Counter-trend with NO structural break (raw OB/FVG bounce) is lower quality.
-        if is_counter_trend and structural_break == 0.0:
-            trend_bonus = -5  # Mild penalty: counter-trend bounce with no structure change
-        elif not is_counter_trend and structural_break != 0.0:
-            trend_bonus = 10  # Reward: WITH-trend + structural confirmation
-        else:
-            trend_bonus = 0  # Neutral: counter-trend with structure OR trend-following without
+        trend_bonus = (
+            -5
+            if is_counter_trend and structural_break == 0.0
+            else (10 if not is_counter_trend and structural_break != 0.0 else 0)
+        )
 
         # 2. Historical Performance
         hist_win_rate = 0.5
@@ -376,10 +373,6 @@ class AITradingEngine:
         if not symbol_info:
             return None
 
-        point = symbol_info.get("point", 0.00001)
-        spread_info = await provider.get_spread(symbol)
-        spread_price = spread_info.get("spread", 0.0) * point
-
         # Route through Strategy Engine
         final_signal = self.strategy_analyzer.analyze_router(
             curr,
@@ -396,7 +389,8 @@ class AITradingEngine:
         final_signal["is_high_risk"] = is_volatile_pair
         final_signal["structural_break_val"] = snapshot["structure"].get("structural_break", 0.0)
 
-        features = TechnicalAnalyzer.compile_features(
+        # Apply raw features then pipe directly into feature engineer
+        raw_features = TechnicalAnalyzer.compile_features(
             curr=curr,
             htf_trend=snapshot["htf_trend"],
             signal_direction=final_signal["direction"],
@@ -408,9 +402,11 @@ class AITradingEngine:
             sweep_depth_atr=snapshot["sweep_depth_atr"],
             atr=atr,
         )
+        collector = DataCollector()
+        engineered_features = collector.engineer_features(raw_features)
 
         # Inference from read-only bundled model
-        nn_result = self.nn_brain.predict(features)
+        nn_result = self.nn_brain.predict(engineered_features)
 
         # Confidence Adjustment
         final_signal = await self.adjust_confidence(
@@ -442,7 +438,7 @@ class AITradingEngine:
         )
         if result:
             self.signal_history[symbol] = time.time()
-            self.active_features[symbol] = features
+            self.active_features[symbol] = engineered_features
             return result
 
         return None
