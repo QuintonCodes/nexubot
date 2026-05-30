@@ -1,20 +1,21 @@
 import asyncio
 import time
+
 from datetime import datetime
 
+from src.core.services.market_scanner import MarketScanner
+from src.core.services.offline_manager import OfflineManager
+from src.core.services.trade_monitor import TradeMonitor
 from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
 from src.utils.logger import setup_logging
-from src.core.services.market_scanner import MarketScanner
-from src.core.services.offline_manager import OfflineManager
-from src.core.services.trade_monitor import TradeMonitor
 
 logger = setup_logging()
 
 
 class NexubotEngine:
-    """The central control of the bot."""
+    """Central engine class that orchestrates all components of the trading bot, including data provider, database manager, AI engine, market scanner, trade monitor, and offline manager. It handles connection management, session tracking, and graceful shutdown of the system."""
 
     def __init__(self, notifier):
         self.notifier = notifier
@@ -47,9 +48,7 @@ class NexubotEngine:
         self.session_start = time.time()
 
     async def initialize_connection(self, login_id: int, server: str, password: str, mt5_path=None) -> bool:
-        """
-        Headless connection to MT5 using environment credentials.
-        """
+        """Initializes connection to MT5 with provided credentials. If already connected, it will skip re-initialization."""
         #   --- Prevent Duplicate Connection   ---
         if self.provider.connected:
             logger.info("✅ Already connected to MT5.")
@@ -95,8 +94,8 @@ class NexubotEngine:
             logger.error("MT5 Connection Failed. Check Credentials.")
             return False
 
-    async def stop_session(self):
-        """Stops the bot operations & closes resources."""
+    async def stop_session(self) -> bool:
+        """Gracefully stops the engine, ensuring all tasks are cancelled, session stats are saved, and connections are closed properly."""
         logger.info("🛑 Stopping Engine & Saving Session...")
         self.is_running = False
 

@@ -32,9 +32,6 @@ HIGH_VOLATILITY_IDENTIFIERS = ["XAU", "XAG", "BTC", "ETH", "US30"]
 
 #  ---------------------------------------------------------
 # SESSION & TIME FILTERS (SAST - South African Standard Time)
-# Advanced Session Awareness Configured:
-# The engine will dynamically adjust confidence multipliers based on the active session.
-# Example: XAUUSD & US30 get a boost during NY Session, EUR/GBP during London.
 #  ---------------------------------------------------------
 SESSION_CONFIG = {
     "ASIAN_START": 2,  # 02:00 SAST (JPY, AUD, NZD Volatility)
@@ -50,15 +47,16 @@ SESSION_CONFIG = {
 # ---------------------------------------------------------
 TIMEFRAME = "M1"
 CANDLE_LIMIT = 500
-DEFAULT_MIN_CONFIDENCE = 60.0
+DEFAULT_MIN_CONFIDENCE = 65.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 5.0
-MIN_RR = 1.9
+MIN_RR = 2.0
 
 SCAN_INTERVAL_CRYPTO = 30
 SCAN_INTERVAL_FOREX = 30
 SCAN_INTERVAL_INDICES = 30
 SCAN_INTERVAL_METALS = 20
+
 GLOBAL_SIGNAL_COOLDOWN = 60
 PAIR_SIGNAL_COOLDOWN = 900
 LOSS_COOLDOWN_DURATION = 1800
@@ -70,6 +68,7 @@ MAX_SIGNALS_PER_SCAN = 3
 ENTRY_MODEL_FILE = "nexubot_entry.keras"
 EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
+EXIT_SCALER_FILE = "nexubot_exit_scaler.pkl"
 CALIBRATOR_FILE = "nexubot_calibrator.pkl"
 TRAINING_FILE = "training_data.csv"
 
@@ -86,6 +85,8 @@ FEATURE_COLS = [
     "mitigation_count",
     "sweep_depth_atr",
 ]
+
+MAX_ROWS = 14000
 
 
 # ---------------------------------------------------------

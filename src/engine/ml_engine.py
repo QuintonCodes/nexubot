@@ -1,19 +1,23 @@
 import joblib
 import logging
-import os
 import numpy as np
+import os
 import pandas as pd
 import tensorflow as tf
+
 from typing import Dict, Optional, Tuple
 
 from keras.callbacks import EarlyStopping
 from sklearn.isotonic import IsotonicRegression
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 
 from src.config import (
     CALIBRATOR_FILE,
     ENTRY_MODEL_FILE,
     EXIT_MODEL_FILE,
+    EXIT_SCALER_FILE,
     FEATURE_COLS,
     MIN_RR,
     SCALER_FILE,
@@ -33,15 +37,17 @@ class NeuralPredictor:
         self.entry_model: Optional[tf.keras.Model] = None
         self.exit_model: Optional[tf.keras.Model] = None
         self.scaler: Optional[StandardScaler] = None
+        self.exit_scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
         self.is_ready: bool = False
 
-    def _predict_exit(self, X_new: np.ndarray) -> float:
+    def _predict_exit(self, df_input: pd.DataFrame) -> float:
         """Helper to safely predict the exit ATR with boundaries."""
-        if not self.exit_model:
+        if not self.exit_model or not self.exit_scaler:
             return 3.0
 
-        raw_exit = float(self.exit_model.predict(X_new, verbose=0)[0][0])
+        X_new_exit = self.exit_scaler.transform(df_input)
+        raw_exit = float(self.exit_model.predict(X_new_exit, verbose=0)[0][0])
         return max(MIN_RR, min(raw_exit, 6.0))
 
     def _calculate_risk_multiplier(self, probability: float) -> float:
@@ -74,9 +80,15 @@ class NeuralPredictor:
         return df
 
     def _train_entry_model(
-        self, X_scaled: np.ndarray, y_entry: pd.Series, early_stop: EarlyStopping
+        self, X_scaled: np.ndarray, y_entry: np.ndarray, early_stop: EarlyStopping
     ) -> Tuple[tf.keras.Model, np.ndarray, np.ndarray]:
         """Constructs and trains the binary classification model for entries."""
+        X_train, X_cal, y_train, y_cal = train_test_split(X_scaled, y_entry, test_size=0.15, random_state=42)
+
+        classes = np.unique(y_train)
+        weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
+        class_weights = dict(zip(classes, weights))
+
         model = tf.keras.models.Sequential(
             [
                 tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
@@ -89,12 +101,15 @@ class NeuralPredictor:
 
         model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
         model.fit(
-            X_scaled, y_entry, epochs=150, batch_size=32, verbose=1, validation_split=0.15, callbacks=[early_stop]
+            X_train,
+            y_train,
+            epochs=150,
+            batch_size=32,
+            verbose=1,
+            validation_split=0.15,
+            class_weight=class_weights,
+            callbacks=[early_stop],
         )
-
-        # Reserve the validation portion for calibration later
-        split_idx = int(len(X_scaled) * 0.85)
-        X_cal, y_cal = X_scaled[split_idx:], y_entry.values[split_idx:]
 
         return model, X_cal, y_cal
 
@@ -107,7 +122,10 @@ class NeuralPredictor:
             return None
 
         X_winners = winning_df[FEATURE_COLS]
-        X_winners_scaled = self.scaler.transform(X_winners)
+
+        # Instantiate and fit a distinct scaler solely on the winner distribution
+        self.exit_scaler = StandardScaler()
+        X_winners_scaled = self.exit_scaler.fit_transform(X_winners)
 
         # Handle missing excursion target
         if "target_excursion" in winning_df.columns:
@@ -152,14 +170,14 @@ class NeuralPredictor:
 
         joblib.dump(self.calibrator, CALIBRATOR_FILE)
         joblib.dump(self.scaler, SCALER_FILE)
+        if self.exit_scaler:
+            joblib.dump(self.exit_scaler, EXIT_SCALER_FILE)
 
     def predict(self, features: dict) -> Dict[str, float]:
-        """
-        Predicts entry probability, dynamic risk sizing, and optimal exit ATR.
-        """
+        """Predicts entry probability, dynamic risk sizing, and optimal exit ATR."""
         # Graceful Failover if models are not yet trained
         if not self.is_ready or self.entry_model is None:
-            return {"prob": 0.85, "risk_mult": 1.0, "pred_exit_atr": 3.0}
+            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 3.0}
 
         try:
             # Map incoming features, defaulting to 0 for missing binary flags
@@ -174,7 +192,7 @@ class NeuralPredictor:
             prob = float(self.calibrator.transform([raw_prob])[0]) if self.calibrator else raw_prob
 
             # Predict exit ATR (Default to 3.0 if model is missing)
-            pred_exit_atr = self._predict_exit(X_new)
+            pred_exit_atr = self._predict_exit(df_input)
 
             # Calculate dynamic risk sizing based on conviction
             risk_mult = self._calculate_risk_multiplier(prob)
@@ -182,12 +200,10 @@ class NeuralPredictor:
             return {"prob": prob, "risk_mult": risk_mult, "pred_exit_atr": pred_exit_atr}
         except Exception as e:
             logger.error(f"Prediction error: {e}")
-            return {"prob": 0.85, "risk_mult": 1.0, "pred_exit_atr": 3.0}
+            return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 3.0}
 
     def train_network(self) -> None:
-        """
-        Coordinates the training of the entry model, exit model, and calibrator.
-        """
+        """Coordinates the training of the entry model, exit model, and calibrator."""
         # 1. Load and prepare data
         df = self._load_and_prepare_data(TRAINING_FILE)
         if df is None:
@@ -195,7 +211,7 @@ class NeuralPredictor:
 
         try:
             X = df[FEATURE_COLS]
-            y_entry = df["target_win"]
+            y_entry = df["target_win"].values
 
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)

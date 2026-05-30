@@ -4,6 +4,7 @@ import json
 import numpy as np
 import re
 import time
+
 from functools import wraps
 from sqlalchemy import select, desc, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -28,7 +29,7 @@ class SafeEncoder(json.JSONEncoder):
 
 
 # --- RETRY DECORATOR ---
-def db_retry(retries=3, delay=2):
+def db_retry(retries=3, delay=2, default_return=None):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -51,15 +52,8 @@ def db_retry(retries=3, delay=2):
                     else:
                         logger.error(f"DB Error in {func.__name__}: {e.__class__.__name__} - {e}")
                         break
-            # Return default empty values on failure
-            func_name = func.__name__
-            if "get_total" in func_name or "performance" in func_name:
-                return 0.0
-            if "get_active" in func_name or "get_history" in func_name:
-                return []
-            if "check" in func_name:
-                return False
-            return None
+
+            return default_return
 
         return wrapper
 
@@ -107,9 +101,7 @@ class SessionAnalytics(Base):
 
 # --- MANAGER ---
 class DatabaseManager:
-    """
-    Async Database Manager for Neon (PostgreSQL).
-    """
+    """Async Database Manager for Neon (PostgreSQL)."""
 
     def __init__(self):
         if not DATABASE_URL:
@@ -132,7 +124,7 @@ class DatabaseManager:
         self.async_session = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
         self._performance_cache = {}
 
-    @db_retry()
+    @db_retry(default_return=False)
     async def check_recent_loss(self, symbol: str) -> bool:
         """
         Returns True if the symbol had a loss recently (Cool-down check).
@@ -159,9 +151,9 @@ class DatabaseManager:
             except Exception:
                 return False
 
-    @db_retry()
-    async def cleanup_db(self):
-        """Removes logs older than 30 days."""
+    @db_retry(default_return=None)
+    async def cleanup_db(self) -> None:
+        """Removes logs older than 90 days and cleans empty sessions."""
         if not self.engine:
             return
 
@@ -171,19 +163,24 @@ class DatabaseManager:
                 stmt_sessions = delete(SessionAnalytics).where(SessionAnalytics.total_trades == 0)
                 await session.execute(stmt_sessions)
 
+                # Remove trade results older than 90 days
+                cutoff = time.time() - (90 * 24 * 3600)
+                stmt_trades = delete(TradeResult).where(TradeResult.timestamp < cutoff)
+                await session.execute(stmt_trades)
+
                 await session.commit()
-                logger.info("🧹 Database cleaned (Old logs & Empty sessions removed).")
+                logger.info("🧹 Database cleaned (Old trades & Empty sessions removed).")
         except Exception as e:
             logger.error(f"Cleanup failed: {e}")
 
-    async def close(self):
+    async def close(self) -> None:
         """Closes the database connection"""
         if self.engine:
             await self.engine.dispose()
             logger.info("🔒 Database Connection Closed.")
 
-    @db_retry()
-    async def delete_active_trade(self, symbol: str):
+    @db_retry(default_return=None)
+    async def delete_active_trade(self, symbol: str) -> None:
         """Deletes an active trade from DB"""
         if not self.engine:
             return
@@ -195,7 +192,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to delete active trade {symbol}: {e}")
 
-    @db_retry()
+    @db_retry(default_return=[])
     async def get_active_trades(self) -> List:
         """Returns list of (symbol, signal_dict, start_time)"""
         if not self.engine:
@@ -210,7 +207,7 @@ class DatabaseManager:
             logger.error(f"Failed to fetch active trades: {e}")
             return []
 
-    @db_retry()
+    @db_retry(default_return=0.5)
     async def get_pair_performance(self, symbol: str) -> float:
         """
         Returns win rate for a specific pair.
@@ -241,7 +238,7 @@ class DatabaseManager:
         except Exception:
             return 0.5
 
-    @db_retry()
+    @db_retry(default_return=[])
     async def get_recent_trades(self, limit=5) -> List[TradeResult]:
         """Fetches only the last N trades for display."""
         if not self.engine:
@@ -256,7 +253,7 @@ class DatabaseManager:
             logger.error(f"Recent Trades Error: {e}")
             return []
 
-    @db_retry()
+    @db_retry(default_return=0.0)
     async def get_total_historical_win_rate(self) -> float:
         """
         Calculates the win rate across ALL trades stored in the database.
@@ -281,8 +278,8 @@ class DatabaseManager:
             logger.error(f"Failed to fetch historical win rate: {e}")
             return 0.0
 
-    @db_retry()
-    async def init_database(self):
+    @db_retry(default_return=None)
+    async def init_database(self) -> None:
         """Creates tables if they don't exist"""
         if not self.engine:
             return
@@ -295,8 +292,8 @@ class DatabaseManager:
         except Exception as e:
             logger.warning(f"⚠️ DB Connection failed: {e}")
 
-    @db_retry()
-    async def log_session(self, session_id: str, start_time: float, stats: dict):
+    @db_retry(default_return=None)
+    async def log_session(self, session_id: str, start_time: float, stats: dict) -> None:
         """Logs session summary on shutdown"""
         if not self.engine:
             return
@@ -319,8 +316,8 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to log session: {e}")
 
-    @db_retry()
-    async def log_trade(self, trade_data: dict):
+    @db_retry(default_return=None)
+    async def log_trade(self, trade_data: dict) -> None:
         """Logs a trade asynchronously"""
         if not self.engine:
             return
@@ -345,10 +342,9 @@ class DatabaseManager:
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed to log trade: {e}")
-            await session.rollback()
 
-    @db_retry()
-    async def save_active_trade(self, symbol: str, signal: dict):
+    @db_retry(default_return=None)
+    async def save_active_trade(self, symbol: str, signal: dict) -> None:
         """Saves an active trade to DB"""
         if not self.engine:
             return

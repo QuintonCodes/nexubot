@@ -4,19 +4,23 @@ import math
 import time
 import uuid
 
+from typing import Tuple
+
 from src.config import CANDLE_LIMIT, TIMEFRAME
 
 logger = logging.getLogger(__name__)
 
 
 class OfflineManager:
-    """Offline Trading manager for all previously closed trades."""
+    """Handles trades that were active during a shutdown or restart, calculates their outcomes based on historical price data, and manages any necessary post-trade processing or notifications."""
 
     def __init__(self, engine):
         self.engine = engine
 
-    def _calculate_offline_result(self, signal: dict, start_time: float, klines: list):
-        """Synchronous CPU-bound calculation logic for offline verification."""
+    def _calculate_offline_result(
+        self, signal: dict, start_time: float, klines: list, currency: str
+    ) -> Tuple[str, float, bool]:
+        """Calculates the outcome of an offline trade based on historical price data and the original trade signal parameters."""
         if not klines:
             return None, 0.0, False
 
@@ -26,6 +30,10 @@ class OfflineManager:
         is_long = signal["direction"] == "LONG"
         order_type = signal.get("order_type", "MARKET")
         trade_duration = 14400  # Max tracking 4 hours
+
+        # Pull correct currency field priorities
+        risk_val = signal.get("risk_zar", 0) if currency == "ZAR" else signal.get("risk_account", 0)
+        profit_val = signal.get("profit_zar", 0) if currency == "ZAR" else signal.get("profit_account", 0)
 
         outcome = None
         pnl = 0.0
@@ -53,26 +61,26 @@ class OfflineManager:
                 if is_long:
                     if k["low"] <= sl:
                         outcome = "LOSS (SL Offline)"
-                        pnl = -signal.get("risk_account", signal.get("risk_zar", 0))
+                        pnl = -risk_val
                         break
                     if k["high"] >= tp:
                         outcome = "WIN (TP Offline)"
-                        pnl = signal.get("profit_account", signal.get("profit_zar", 0))
+                        pnl = profit_val
                         break
                 else:
                     if k["high"] >= sl:
                         outcome = "LOSS (SL Offline)"
-                        pnl = -signal.get("risk_account", signal.get("risk_zar", 0))
+                        pnl = -risk_val
                         break
                     if k["low"] <= tp:
                         outcome = "WIN (TP Offline)"
-                        pnl = signal.get("profit_account", signal.get("profit_zar", 0))
+                        pnl = profit_val
                         break
 
         return outcome, pnl, filled_offline
 
-    async def check_offline_trades(self):
-        """Resumes or closes trades that were active before shutdown."""
+    async def check_offline_trades(self) -> None:
+        """Checks for any active trades that were not monitored in real-time (e.g., due to shutdown) and calculates their outcomes based on historical price data."""
         logger.info("🔄 Checking for interrupted trades...")
         active_trades = await self.engine.db.get_active_trades()
 
@@ -84,12 +92,12 @@ class OfflineManager:
             self.engine.ai_engine.register_active_trade(symbol)
 
             elapsed = time.time() - start_time
-            candles_needed = math.ceil(elapsed / 60) + 5
+            candles_needed = min(math.ceil(elapsed / 60) + 5, 1440)
             klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, min(candles_needed, CANDLE_LIMIT))
 
-            outcome, pnl, filled = self._calculate_offline_result(signal, start_time, klines)
-
             currency = self.engine.session_stats.get("currency", "USD")
+            outcome, pnl, filled = self._calculate_offline_result(signal, start_time, klines, currency)
+
             curr_sym = "R" if currency == "ZAR" else "$"
 
             # Case 1: Trade finished (TP or SL hit)

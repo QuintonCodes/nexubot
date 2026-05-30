@@ -4,8 +4,9 @@ import MetaTrader5 as mt5
 import os
 import subprocess
 import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+
+from collections import deque
+from typing import Dict, List, Optional
 
 from src.config import (
     FALLBACK_CRYPTO,
@@ -14,8 +15,8 @@ from src.config import (
     FALLBACK_METALS,
     MT5_LOGIN,
     MT5_PASSWORD,
-    MT5_SERVER,
     MT5_PATH,
+    MT5_SERVER,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,9 +26,7 @@ IGNORED_CURRENCIES = ["RUB", "TRY", "ZAR", "MXN", "CNH", "HKD", "SGD", "NOK", "S
 
 
 class DataProvider:
-    """
-    MT5 Direct Provider with Live Economic Calender.
-    """
+    """Centralized Data Provider for MT5 Terminal."""
 
     def __init__(self):
         self.connected = False
@@ -41,7 +40,7 @@ class DataProvider:
         self._cached_usdzar = None
         self._cached_usdzar_time = 0
 
-    def _kill_terminal(self):
+    def _kill_terminal(self) -> None:
         """Force kills MT5 terminal process."""
         try:
             if os.name == "nt":
@@ -54,7 +53,7 @@ class DataProvider:
             logger.error(f"Failed to kill terminal: {e}")
 
     def _sync_account_info(self) -> Dict:
-        """Fetches live account balance and equity."""
+        """Fetches live account summary (balance, equity, profit). Returns zeros if not connected or error occurs."""
         info = mt5.account_info()
         if not info:
             return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
@@ -67,14 +66,17 @@ class DataProvider:
         }
 
     def _sync_connect(self) -> bool:
-        """Synchronous MT5 Connection with Retries and Auto-Kill"""
+        """Initializes connection to MT5 Terminal."""
         try:
             if mt5.terminal_info() is not None:
-                if self.connected:
+                acc_info = mt5.account_info()
+                if acc_info is not None and str(acc_info.login) == str(self._login):
+                    self.connected = True
                     return True
                 else:
-                    # It's open but we need to verify login
-                    self.connected = True
+                    # Terminal is open, but wrong account (or not logged in).
+                    # Fall through to force a fresh login below.
+                    self.connected = False
 
             # 1. Validate Path
             if not os.path.exists(self._path):
@@ -111,7 +113,6 @@ class DataProvider:
         Fetches all symbols currently visible in MT5 Market Watch.
         Strictly filters to only include the highly targeted assets defined in config.
         """
-
         if not self.connected:
             return {}
 
@@ -159,7 +160,7 @@ class DataProvider:
         return categorized
 
     def _sync_get_rates(self, symbol: str, timeframe: int, limit: int) -> List[Dict]:
-        """Fetches candles with Synchronization Check."""
+        """Fetches historical OHLCV data for a symbol and timeframe. Returns empty list if not connected or symbol issues."""
         if not self.connected:
             return []
 
@@ -208,8 +209,7 @@ class DataProvider:
         return mt5.symbol_info_tick(symbol)
 
     def _sync_symbol_info(self, symbol: str) -> Dict:
-        """
-        Fetches detailed symbol specification for risk calculations."""
+        """Fetches detailed symbol specification for risk calculations."""
         info = mt5.symbol_info(symbol)
         if not info:
             return {}
@@ -227,43 +227,46 @@ class DataProvider:
         }
 
     async def fetch_klines(self, symbol: str, timeframe_str: str, limit: int) -> List[Dict]:
-        """
-        Fetches candles with Synchronization Check.
-        """
+        """Async wrapper to fetch klines with MT5 timeframe mapping and synchronization check."""
         if not self.connected:
             return []
 
         tf_map = {
+            "m1": mt5.TIMEFRAME_M1,
             "1m": mt5.TIMEFRAME_M1,
+            "m5": mt5.TIMEFRAME_M5,
             "5m": mt5.TIMEFRAME_M5,
+            "m15": mt5.TIMEFRAME_M15,
             "15m": mt5.TIMEFRAME_M15,
+            "m30": mt5.TIMEFRAME_M30,
             "30m": mt5.TIMEFRAME_M30,
+            "h1": mt5.TIMEFRAME_H1,
             "1h": mt5.TIMEFRAME_H1,
+            "h4": mt5.TIMEFRAME_H4,
             "4h": mt5.TIMEFRAME_H4,
+            "d1": mt5.TIMEFRAME_D1,
             "1d": mt5.TIMEFRAME_D1,
         }
-        mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M15)
+        mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M1)
 
         return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
 
     async def get_account_summary(self) -> Dict:
-        """Async wrapper to get account details"""
+        """Async wrapper to fetch live account summary (balance, equity, profit). Returns zeros if not connected."""
         if not self.connected:
             return {"balance": 0.0, "equity": 0.0, "profit": 0.0, "currency": "USD"}
         return await asyncio.to_thread(self._sync_account_info)
 
     async def get_current_tick(self, symbol: str) -> Optional[mt5.Tick]:
-        """Returns full tick object (Bid/Ask)."""
+        """Async wrapper to get current tick (Bid/Ask) for spread calculations."""
         return await asyncio.to_thread(self._sync_get_tick_struct, symbol)
 
     async def get_dynamic_symbols(self) -> Dict:
-        """Async wrapper to get market watch symbols."""
+        """Async wrapper to fetch dynamic list of symbols from Market Watch with strict filtering."""
         return await asyncio.to_thread(self._sync_get_market_watch_symbols)
 
     async def get_spread(self, symbol: str) -> Dict:
-        """
-        Smart Spread Check using caching + Hourly Clear.
-        """
+        """Returns current spread and average spread for the symbol."""
         # 1. Clear cache if older than 1 hour
         if time.time() - self.last_cache_clear > 3600:
             self.spread_cache = {}
@@ -271,7 +274,7 @@ class DataProvider:
 
         tick = await self.get_current_tick(symbol)
         if not tick:
-            return {"spread": 0, "spread_high": True}  # Block if no data
+            return {"spread": 0, "spread_high": True}
 
         spread_points = tick.ask - tick.bid
         info = await self.get_symbol_info(symbol)
@@ -280,29 +283,20 @@ class DataProvider:
 
         # Cache Update
         if symbol not in self.spread_cache:
-            self.spread_cache[symbol] = []
-        self.spread_cache[symbol].append(spread_raw)
+            self.spread_cache[symbol] = deque(maxlen=10)
 
-        # Keep last 10 ticks
-        if len(self.spread_cache[symbol]) > 10:
-            self.spread_cache[symbol].pop(0)
+        self.spread_cache[symbol].append(spread_raw)
 
         avg_spread = sum(self.spread_cache[symbol]) / len(self.spread_cache[symbol])
 
         return {"spread": spread_raw, "avg_spread": avg_spread, "spread_high": False}
 
     async def get_symbol_info(self, symbol: str) -> Dict:
-        """
-        Fetches detailed symbol specification for risk calculations.
-        Crucial for ZAR account conversion.
-        """
+        """Async wrapper to get symbol info for risk calculations."""
         return await asyncio.to_thread(self._sync_symbol_info, symbol)
 
     def get_symbol_type(self, symbol: str) -> str:
-        """
-        Robustly determines if a symbol is 'CRYPTO' or 'FOREX'
-        based on MT5 internal classification paths.
-        """
+        """Determines if a symbol is Forex, Crypto, Indices, or Metals based on MT5 info and heuristics."""
         # Return cached result if available
         if symbol in self._symbol_type_cache:
             return self._symbol_type_cache[symbol]
@@ -338,10 +332,7 @@ class DataProvider:
         return result
 
     async def get_usdzar_rate(self) -> float:
-        """
-        Fetches the current USDZAR exchange rate for currency conversion.
-        Tries standard permutations like USDZAR, USDZARm, USDZAR.
-        """
+        """Fetches the current USDZAR exchange rate. Uses caching to minimize MT5 calls. Returns a fallback rate if not available."""
         # Return cached if fresh (1 minute)
         if self._cached_usdzar and (time.time() - self._cached_usdzar_time) < 60:
             return self._cached_usdzar
@@ -349,21 +340,20 @@ class DataProvider:
         possible_pairs = ["USDZAR", "USDZARm", "USDZAR.", "USDZAR_OT"]
 
         for pair in possible_pairs:
-            tick = await self.get_current_tick(pair)
-            if tick:
-                rate = (tick.bid + tick.ask) / 2.0
-                self._cached_usdzar = rate
-                self._cached_usdzar_time = time.time()
-                return rate
+            if mt5.symbol_select(pair, True):
+                tick = await self.get_current_tick(pair)
+                if tick:
+                    rate = (tick.bid + tick.ask) / 2.0
+                    self._cached_usdzar = rate
+                    self._cached_usdzar_time = time.time()
+                    return rate
 
-        # Fallback if pair not found in market watch (Rough Estimate)
-        return 18.5
+        # Fallback if the broker entirely lacks USDZAR
+        logger.critical("⚠️ MT5 Broker lacks USDZAR! ZAR Lot sizing falling back to rough 16.5 estimate.")
+        return 16.5
 
     async def initialize(self) -> bool:
-        """
-        Initializes connection to MT5 Terminal.
-        Retries logic implemented for stability.
-        """
+        """Initializes connection to MT5 Terminal. Returns True if successful, False otherwise."""
         return await asyncio.to_thread(self._sync_connect)
 
     async def shutdown(self):

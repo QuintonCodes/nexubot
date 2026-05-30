@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Union
 class StrategyAnalyzer:
     """
     Pure SMC Strategy Engine.
-    Filters entries based on Volume Profiles and Institutional Order Flow.
+    Filters entries based on Volume Profiles and Institutional Order Flow, and Liquidity Sweeps.
     """
 
     def analyze_router(
@@ -36,7 +36,7 @@ class StrategyAnalyzer:
 
         # 2. IFVG Continuation
         if not signal:
-            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs)
+            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs, is_liquidity_swept)
 
         # 3. POI Reversals — only when a sweep has already occurred
         if not signal:
@@ -58,10 +58,9 @@ class StrategyAnalyzer:
         self, curr: Union[pd.Series, dict], structure: dict, is_liquidity_swept: int
     ) -> Optional[Dict]:
         """
-        Detects liquidity sweeps that trigger a structural break.
-        Only BOS signals are taken.
+        Detects aggressive liquidity sweeps with BOS confirmation.
         """
-        if is_liquidity_swept == 0:
+        if is_liquidity_swept < 2:
             return None
 
         # Only accept BOS confirmation (momentum continuation), not CHoCH (reversal)
@@ -82,8 +81,7 @@ class StrategyAnalyzer:
             strat_name = "Major Swing Sweep (50p)"
             conf = 80.0
         else:
-            strat_name = "Internal Sweep Trap"
-            conf = 76.0
+            return None  # Failsafe against internal sweeps
 
         #   --- BULLISH SWEEPS   ---
         if bos == "BULL":
@@ -110,11 +108,18 @@ class StrategyAnalyzer:
         return None
 
     def _ifvg_mitigation(
-        self, curr: Union[pd.Series, dict], active_ifvgs: List[Dict], active_obs: List[Dict] = None
+        self,
+        curr: Union[pd.Series, dict],
+        active_ifvgs: List[Dict],
+        active_obs: List[Dict] = None,
+        is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
         """
         Detects bounces off active IFVGs with CE Validation and Overlap Protection.
         """
+        if is_liquidity_swept < 2:
+            return None
+
         active_obs = active_obs or []
         atr_buffer = curr["atr"] * 0.5
         recent_low = curr.get("recent_low_4", 0)
@@ -180,11 +185,10 @@ class StrategyAnalyzer:
         is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
         """
-        Detects bounces off active FVGs and Order Blocks with CE Validation.
-        Requires is_liquidity_swept > 0.
+        Detects reversals at Points of Interest (OBs, FVGs) but only after a liquidity sweep has occurred.
         """
         # Require at least a Tier-1 sweep before entering a POI reversal
-        if is_liquidity_swept == 0:
+        if is_liquidity_swept < 2:
             return None
 
         recent_low = curr.get("recent_low_4", 0)
@@ -320,15 +324,13 @@ class StrategyAnalyzer:
         structural_break: float = 0.0,
     ) -> Optional[Dict]:
         """
-        VWAP Bounces — only when structural context exists.
-
-        Requires either a liquidity sweep or a structural break to be present.
+        Detects bounces off the VWAP with volume and structural context validation.
         """
         if vwap_val == 0:
             return None
 
         # Require structural context: either a sweep or a structure break
-        if is_liquidity_swept == 0 and structural_break == 0.0:
+        if is_liquidity_swept < 2 and structural_break == 0.0:
             return None
 
         # Demand institutional volume backing the bounce (20% above average volume)
