@@ -245,7 +245,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
             sl, tp = trade_params
 
             # Build feature dictionary using shared analyzer method
-            features = TechnicalAnalyzer.compile_features(
+            raw_features = TechnicalAnalyzer.compile_features(
                 curr=curr,
                 htf_trend=curr["htf_trend_mapped"],
                 signal_direction=signal["direction"],
@@ -258,7 +258,10 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 atr=atr,
             )
 
-            if features.get("mitigation_count", 0) > 2:
+            # Engineer features via the new Matrix
+            engineered_features = collector.engineer_features(raw_features)
+
+            if raw_features.get("mitigation_count", 0) > 2:
                 continue
 
             # Forward Simulation
@@ -268,7 +271,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 future_window, signal["direction"], close_price, sl, tp, atr
             )
 
-            collector.log_training_data(symbol, features, won, pnl, target_excursion)
+            collector.log_training_data(symbol, engineered_features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1
 

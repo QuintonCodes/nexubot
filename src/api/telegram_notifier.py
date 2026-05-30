@@ -6,6 +6,7 @@ from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from src.analysis.indicators import TechnicalAnalyzer
+from src.data.collector import DataCollector
 from src.config import TIMEFRAME, VERSION
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ class TelegramNotifier:
                 final_signal["structural_break_val"] = structure.get("structural_break", 0.0)
 
             # Centralized Feature Compilation
-            features = TechnicalAnalyzer.compile_features(
+            raw_features = TechnicalAnalyzer.compile_features(
                 curr=curr,
                 htf_trend=htf_trend,
                 signal_direction=final_signal["direction"],
@@ -119,7 +120,10 @@ class TelegramNotifier:
                 atr=snapshot["atr"],
             )
 
-            nn_result = self.engine.ai_engine.nn_brain.predict(features)
+            # Pipe to 20-Feature Engineering Matrix
+            engineered_features = DataCollector.engineer_features(raw_features)
+
+            nn_result = self.engine.ai_engine.nn_brain.predict(engineered_features)
             session_info = self.engine.ai_engine.get_session_status()
 
             adjusted_signal = await self.engine.ai_engine.adjust_confidence(
@@ -134,7 +138,7 @@ class TelegramNotifier:
             htf_text = "BULLISH 🐂" if htf_trend == 1.0 else ("BEARISH 🐻" if htf_trend == -1.0 else "FLAT ➖")
 
             # PD Array Map
-            pd_status = features["pd_array_status"]
+            pd_status = engineered_features["pd_array_status"]
             pd_text = "Equilibrium"
             if pd_status <= 0.4:
                 pd_text = f"Discount 🟢 ({pd_status:.2f})"
@@ -142,7 +146,7 @@ class TelegramNotifier:
                 pd_text = f"Premium 🔴 ({pd_status:.2f})"
 
             # Structure Break Map
-            struct_break = features["structural_break"]
+            struct_break = engineered_features["structural_break"]
             break_text = "None"
             if struct_break == 1.0:
                 break_text = "Bullish BOS 📈"
@@ -156,9 +160,9 @@ class TelegramNotifier:
             # Sweep Map
             sweep_text = "None"
             if is_liquidity_swept == 3:
-                sweep_text = f"Daily High/Low Swept 🔥 ({sweep_depth_atr:.1f} ATR)"
+                sweep_text = f"Daily/Asian High/Low Swept 🔥 ({sweep_depth_atr:.1f} ATR)"
             elif is_liquidity_swept == 2:
-                sweep_text = f"Major Swing Swept ⚡ ({sweep_depth_atr:.1f} ATR)"
+                sweep_text = f"Major Swing/Psych Swept ⚡ ({sweep_depth_atr:.1f} ATR)"
             elif is_liquidity_swept == 1:
                 sweep_text = f"Internal Pivot Swept ({sweep_depth_atr:.1f} ATR)"
 
@@ -176,16 +180,17 @@ class TelegramNotifier:
 
             msg = (
                 f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
-                f"🌍 *Active Killzone:* {killzone_name} (Vol Map: {session_info['multiplier']}x)\n"
+                f"🌍 *Session Profile:* {engineered_features['session_quality_score']:.2f} ({killzone_name})\n"
                 f"📊 *HTF Flow (1H):* {htf_text}\n"
                 f"🧭 *Local Flow ({TIMEFRAME}):* {structure['structure']} | Break: {break_text}\n"
                 f"📏 *PD Array:* Price in {pd_text}\n"
                 f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs\n"
-                f"🎯 *Nearest POI Status:* {features['distance_to_poi']:.1f} ATR Away | Touched {int(features['mitigation_count'])}x\n"
+                f"🎯 *Nearest POI Status:* {engineered_features['distance_to_poi']:.1f} ATR Away | Freshness: {engineered_features['poi_freshness_score']:.2f}\n"
                 f"🧹 *Sweep Status:* {sweep_text}\n"
                 f"🌊 *VWAP State:* {vwap_trend}\n\n"
                 f"🤖 *Neural Output:*\n"
                 f"• _Trend Alignment:_ {'Aligned ✅' if trend_bonus > 0 else 'Counter ⚠️'}\n"
+                f"• _Signal Quality Score:_ *{engineered_features['signal_quality_score']:.2f}*\n"
                 f"• _Calculated AI Confidence:_ *{win_prob:.1f}%*\n"
                 f"• _AI Conclusion:_ {ai_thought}"
             )
