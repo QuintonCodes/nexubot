@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Union
 class StrategyAnalyzer:
     """
     Pure SMC Strategy Engine.
-    Filters entries based on Volume Profiles and Institutional Order Flow.
+    Filters entries based on Volume Profiles and Institutional Order Flow, and Liquidity Sweeps.
     """
 
     def analyze_router(
@@ -24,7 +24,6 @@ class StrategyAnalyzer:
         mitigation_count = (
             curr.get("mitigation_count", 0) if isinstance(curr, dict) else curr.get("mitigation_count", 0)
         )
-
         if mitigation_count >= 3:
             return None
 
@@ -34,21 +33,32 @@ class StrategyAnalyzer:
         if not signal:
             signal = self._smc_liquidity_sweep(curr, structure, is_liquidity_swept)
 
-        # 2. IFVG Continuation
+        # 2. ICT Optimal Entry
         if not signal:
-            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs)
+            signal = self._ict_optimal_trade_entry(curr, structure)
 
-        # 3. POI Reversals — only when a sweep has already occurred
+        # 3. IFVG Continuation
+        if not signal:
+            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs, is_liquidity_swept)
+
+        # 4. POI Reversals — only when a sweep has already occurred
         if not signal:
             signal = self._smc_poi_reversal(curr, active_fvgs, active_obs, is_liquidity_swept)
 
-        # 4. VWAP Bounce — only when structural context supports it
+        # 5. VWAP Bounce — only when structural context supports it
         if not signal:
             vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
             structural_break = structure.get("structural_break", 0.0)
             signal = self._vwap_bounce(curr, vwap_val, is_liquidity_swept, structural_break)
 
         if signal:
+            # PD Array Hard Gate: Longs strictly in Discount, Shorts strictly in Premium
+            pd_status = structure.get("pd_array", 0.5)
+            if signal["direction"] == "LONG" and pd_status > 0.45:
+                return None
+            if signal["direction"] == "SHORT" and pd_status < 0.55:
+                return None
+
             signal["is_liquidity_swept"] = is_liquidity_swept
             return signal
 
@@ -58,10 +68,9 @@ class StrategyAnalyzer:
         self, curr: Union[pd.Series, dict], structure: dict, is_liquidity_swept: int
     ) -> Optional[Dict]:
         """
-        Detects liquidity sweeps that trigger a structural break.
-        Only BOS signals are taken.
+        Detects aggressive liquidity sweeps with BOS confirmation.
         """
-        if is_liquidity_swept == 0:
+        if is_liquidity_swept < 2:
             return None
 
         # Only accept BOS confirmation (momentum continuation), not CHoCH (reversal)
@@ -76,14 +85,11 @@ class StrategyAnalyzer:
 
         # Determine Strategy Name and Confidence based on Sweep Tier
         if is_liquidity_swept == 3:
-            strat_name = "Daily Liquidity Sweep"
+            strat_name = "Daily/Asian Sweep"
             conf = 84.0
-        elif is_liquidity_swept == 2:
-            strat_name = "Major Swing Sweep (50p)"
-            conf = 80.0
         else:
-            strat_name = "Internal Sweep Trap"
-            conf = 76.0
+            strat_name = "Major Swing Sweep"
+            conf = 80.0
 
         #   --- BULLISH SWEEPS   ---
         if bos == "BULL":
@@ -109,12 +115,55 @@ class StrategyAnalyzer:
 
         return None
 
+    def _ict_optimal_trade_entry(self, curr: Union[pd.Series, dict], structure: dict) -> Optional[Dict]:
+        """ICT OTE (62-79% Fibonacci Retracement) entry post-BOS."""
+        last_low, last_high = structure.get("last_low"), structure.get("last_high")
+        if not last_low or not last_high:
+            return None
+
+        close_price = curr["close"]
+        atr_buffer = curr["atr"] * 0.2
+        range_size = last_high - last_low
+
+        if structure["structure"] == "BULL":
+            fib_62 = last_high - (range_size * 0.618)
+            fib_79 = last_high - (range_size * 0.786)
+            if fib_79 <= close_price <= fib_62 and curr["close"] > curr["open"]:
+                return {
+                    "strategy": "ICT OTE (Bullish)",
+                    "signal": "BUY",
+                    "direction": "LONG",
+                    "confidence": 85.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": last_low - atr_buffer,
+                }
+        elif structure["structure"] == "BEAR":
+            fib_62 = last_low + (range_size * 0.618)
+            fib_79 = last_low + (range_size * 0.786)
+            if fib_62 <= close_price <= fib_79 and curr["close"] < curr["open"]:
+                return {
+                    "strategy": "ICT OTE (Bearish)",
+                    "signal": "SELL",
+                    "direction": "SHORT",
+                    "confidence": 85.0,
+                    "order_type": "MARKET",
+                    "suggested_sl": last_high + atr_buffer,
+                }
+        return None
+
     def _ifvg_mitigation(
-        self, curr: Union[pd.Series, dict], active_ifvgs: List[Dict], active_obs: List[Dict] = None
+        self,
+        curr: Union[pd.Series, dict],
+        active_ifvgs: List[Dict],
+        active_obs: List[Dict] = None,
+        is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
         """
         Detects bounces off active IFVGs with CE Validation and Overlap Protection.
         """
+        if is_liquidity_swept < 2:
+            return None
+
         active_obs = active_obs or []
         atr_buffer = curr["atr"] * 0.5
         recent_low = curr.get("recent_low_4", 0)
@@ -179,12 +228,9 @@ class StrategyAnalyzer:
         active_obs: List[Dict],
         is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
-        """
-        Detects bounces off active FVGs and Order Blocks with CE Validation.
-        Requires is_liquidity_swept > 0.
-        """
+        """Detects reversals at Points of Interest (OBs, FVGs) but only after a liquidity sweep has occurred."""
         # Require at least a Tier-1 sweep before entering a POI reversal
-        if is_liquidity_swept == 0:
+        if is_liquidity_swept < 2:
             return None
 
         recent_low = curr.get("recent_low_4", 0)
@@ -195,66 +241,40 @@ class StrategyAnalyzer:
         is_bouncing_up = close_price > curr["open"]
         is_bouncing_down = close_price < curr["open"]
 
-        # Filter OBs by minimum displacement volume and sort by strength
-        valid_bull_obs = [
-            ob
-            for ob in active_obs
-            if ob["type"] == "BULL" and ob.get("vol_strength", 1.0) >= 1.1 and ob.get("mitigations", 0) <= 2
-        ]
-        valid_bull_obs.sort(key=lambda x: x.get("vol_strength", 0), reverse=True)
-
-        valid_bear_obs = [
-            ob
-            for ob in active_obs
-            if ob["type"] == "BEAR" and ob.get("vol_strength", 1.0) >= 1.1 and ob.get("mitigations", 0) <= 2
-        ]
-        valid_bear_obs.sort(key=lambda x: x.get("vol_strength", 0), reverse=True)
-
-        # Blockades
+        # Extract OBs and newly added Breaker Blocks
+        valid_bull_obs = [ob for ob in active_obs if ob["type"] == "BULL" and ob.get("mitigations", 0) <= 2]
+        valid_bear_obs = [ob for ob in active_obs if ob["type"] == "BEAR" and ob.get("mitigations", 0) <= 2]
         blocked_by_bear = any(
-            ob["low"] <= close_price <= ob["high"] for ob in valid_bear_obs if ob.get("tier") == "MAJOR"
+            ob["low"] <= close_price <= ob["high"] for ob in valid_bear_obs if ob.get("tier") in ["MAJOR", "BREAKER"]
         )
         blocked_by_bull = any(
-            ob["low"] <= close_price <= ob["high"] for ob in valid_bull_obs if ob.get("tier") == "MAJOR"
+            ob["low"] <= close_price <= ob["high"] for ob in valid_bull_obs if ob.get("tier") in ["MAJOR", "BREAKER"]
         )
 
         #   --- BULLISH CONFIRMATIONS   ---
         if is_bouncing_up and not blocked_by_bear:
-            major_ob = next(
-                (ob for ob in valid_bull_obs if ob.get("tier") == "MAJOR" and recent_low <= ob["high"]), None
-            )
-            internal_ob = next(
-                (ob for ob in valid_bull_obs if ob.get("tier") == "INTERNAL" and recent_low <= ob["high"]), None
-            )
+            # Breaker and OB require Consequent Encroachment (CE) crossing
+            for ob in valid_bull_obs:
+                if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_low <= ob["high"]:
+                    ce = (ob["high"] + ob["low"]) / 2
+                    # Must close past 50% CE to prove momentum
+                    if close_price > ce:
+                        return {
+                            "strategy": f"{ob['tier']} OB CE Bounce",
+                            "signal": "BUY",
+                            "direction": "LONG",
+                            "confidence": 78.0,
+                            "order_type": "MARKET",
+                            "suggested_sl": recent_low - atr_buffer,
+                        }
 
-            tapped_fvg = any(
+            if any(
                 fvg["type"] == "BULL"
                 and fvg.get("mitigations", 0) <= 2
                 and recent_low <= fvg["high"]
                 and close_price > ((fvg["high"] + fvg["low"]) / 2)
                 for fvg in active_fvgs
-            )
-
-            if major_ob:
-                return {
-                    "strategy": "Major OB Bounce",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 78.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_low - atr_buffer,
-                }
-            if internal_ob:
-                return {
-                    "strategy": "Internal OB Bounce",
-                    "signal": "BUY",
-                    "direction": "LONG",
-                    "confidence": 74.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_low - atr_buffer,
-                }
-
-            if tapped_fvg:
+            ):
                 return {
                     "strategy": "FVG Bounce",
                     "signal": "BUY",
@@ -266,41 +286,26 @@ class StrategyAnalyzer:
 
         #   --- BEARISH CONFIRMATIONS   ---
         if is_bouncing_down and not blocked_by_bull:
-            major_ob = next(
-                (ob for ob in valid_bear_obs if ob.get("tier") == "MAJOR" and recent_high >= ob["low"]), None
-            )
-            internal_ob = next(
-                (ob for ob in valid_bear_obs if ob.get("tier") == "INTERNAL" and recent_high >= ob["low"]), None
-            )
+            for ob in valid_bear_obs:
+                if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_high >= ob["low"]:
+                    ce = (ob["high"] + ob["low"]) / 2
+                    if close_price < ce:
+                        return {
+                            "strategy": f"{ob['tier']} OB CE Bounce",
+                            "signal": "SELL",
+                            "direction": "SHORT",
+                            "confidence": 78.0,
+                            "order_type": "MARKET",
+                            "suggested_sl": recent_high + atr_buffer,
+                        }
 
-            tapped_fvg = any(
+            if any(
                 fvg["type"] == "BEAR"
                 and fvg.get("mitigations", 0) <= 2
                 and recent_high >= fvg["low"]
                 and close_price < ((fvg["high"] + fvg["low"]) / 2)
                 for fvg in active_fvgs
-            )
-
-            if major_ob:
-                return {
-                    "strategy": "Major OB Bounce",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 78.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_high + atr_buffer,
-                }
-            if internal_ob:
-                return {
-                    "strategy": "Internal OB Bounce",
-                    "signal": "SELL",
-                    "direction": "SHORT",
-                    "confidence": 74.0,
-                    "order_type": "MARKET",
-                    "suggested_sl": recent_high + atr_buffer,
-                }
-
-            if tapped_fvg:
+            ):
                 return {
                     "strategy": "FVG Bounce",
                     "signal": "SELL",
@@ -320,15 +325,9 @@ class StrategyAnalyzer:
         structural_break: float = 0.0,
     ) -> Optional[Dict]:
         """
-        VWAP Bounces — only when structural context exists.
-
-        Requires either a liquidity sweep or a structural break to be present.
+        Detects bounces off the VWAP with volume and structural context validation.
         """
-        if vwap_val == 0:
-            return None
-
-        # Require structural context: either a sweep or a structure break
-        if is_liquidity_swept == 0 and structural_break == 0.0:
+        if vwap_val == 0 or (is_liquidity_swept < 2 and structural_break == 0.0):
             return None
 
         # Demand institutional volume backing the bounce (20% above average volume)

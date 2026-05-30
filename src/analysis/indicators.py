@@ -1,18 +1,15 @@
+import math
 import pandas as pd
+
 from typing import Dict, Tuple, Union
 
 
 class TechnicalAnalyzer:
-    """
-    Advanced SMC data processing engine.
-    Calculates essential structural and volatility metrics without lagging indicators.
-    """
+    """Centralized class for all technical indicator calculations and structural analysis."""
 
     @staticmethod
     def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Applies technical indicators to the provided DataFrame.
-        """
+        """Applies technical indicators to the provided DataFrame."""
         # Ensure DateTime column exists for Time-based indicators
         if "datetime" not in df.columns:
             if "time" in df.columns:
@@ -38,8 +35,8 @@ class TechnicalAnalyzer:
         df["daily_open"] = df.groupby("date_group")["open"].transform("first")
 
         # 4. Internal Pivot Tracking
-        df["pivot_high"] = df["high"] == df["high"].rolling(6, center=True).max()
-        df["pivot_low"] = df["low"] == df["low"].rolling(6, center=True).min()
+        df["pivot_high"] = (df["high"] == df["high"].rolling(window=6, min_periods=6).max().shift(-3)).fillna(False)
+        df["pivot_low"] = (df["low"] == df["low"].rolling(window=6, min_periods=6).min().shift(-3)).fillna(False)
 
         # 5. Volume Profile for Institutional Displacement
         df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=1).mean()
@@ -53,9 +50,7 @@ class TechnicalAnalyzer:
         df["major_high_50"] = df["high"].rolling(50).max().shift(5)
 
         # 7. HTF Trend (Institutional EMAs)
-        # Cast to float to ensure mathematical calculation avoids object-type bugs
         close_series = df["close"].astype(float)
-
         df["ema_50"] = close_series.ewm(span=50, adjust=False).mean()
         df["ema_200"] = close_series.ewm(span=200, adjust=False).mean()
 
@@ -63,7 +58,87 @@ class TechnicalAnalyzer:
         df.loc[df["ema_50"] > df["ema_200"], "htf_trend"] = 1.0
         df.loc[df["ema_50"] < df["ema_200"], "htf_trend"] = -1.0
 
+        # Asian Range Tracking (Power of 3)
+        df["hour"] = df["datetime"].dt.hour
+        asian_mask = (df["hour"] >= 2) & (df["hour"] < 10)
+        df["is_asian"] = asian_mask
+
+        asian_highs = df[asian_mask].groupby("date_group")["high"].max()
+        asian_lows = df[asian_mask].groupby("date_group")["low"].min()
+
+        df["asian_high"] = df["date_group"].map(asian_highs)
+        df["asian_low"] = df["date_group"].map(asian_lows)
+
+        # Safely fill price-based columns before global zeroing to prevent SL Cap / VWAP corruption
+        df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.0005)
+        df["vwap"] = df["vwap"].ffill().fillna(df["close"])
+        df["vol_sma_20"] = df["vol_sma_20"].ffill().fillna(1.0)
+
         return df.fillna(0)
+
+    @staticmethod
+    def compile_features(
+        curr: Union[pd.Series, dict],
+        htf_trend: float,
+        signal_direction: str,
+        active_fvgs: list,
+        active_ifvgs: list,
+        active_obs: list,
+        structure_info: dict,
+        is_liquidity_swept: int,
+        sweep_depth_atr: float,
+        atr: float,
+    ) -> Dict:
+        """Compiles the strict SMC feature set for neural network predictions and training."""
+        close_price = curr["close"]
+
+        # Alignment Score
+        alignment_score = 0.0
+        if htf_trend != 0.0:
+            is_long_aligned = signal_direction == "LONG" and htf_trend == 1.0
+            is_short_aligned = signal_direction == "SHORT" and htf_trend == -1.0
+            alignment_score = 1.0 if (is_long_aligned or is_short_aligned) else -1.0
+
+        # Killzone Map
+        if isinstance(curr["time"], (int, float)):
+            dt_hour = pd.to_datetime(curr["time"], unit="s").hour
+        else:
+            dt_hour = curr["time"].hour
+
+        from src.config import SESSION_CONFIG
+
+        active_killzone = 0.0
+        if SESSION_CONFIG["ASIAN_START"] <= dt_hour < SESSION_CONFIG["ASIAN_END"]:
+            active_killzone = 1.0
+        elif SESSION_CONFIG["LONDON_START"] <= dt_hour < SESSION_CONFIG["LONDON_END"]:
+            active_killzone = 2.0
+        elif SESSION_CONFIG["NY_START"] <= dt_hour < SESSION_CONFIG["NY_END"]:
+            active_killzone = 3.0
+
+        # Distance & Mitigation Tracking
+        dist_nearest_poi_atr = 0.0
+        mitigation_count = 0
+        all_zones = active_fvgs + active_ifvgs + active_obs
+
+        if all_zones:
+            nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
+            raw_distance = min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price))
+            dist_nearest_poi_atr = raw_distance / atr if atr > 0 else 0.0
+            mitigation_count = nearest_poi.get("mitigations", 0)
+
+        return {
+            "is_htf_aligned": alignment_score,
+            "is_liquidity_swept": float(is_liquidity_swept),
+            "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
+            "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,
+            "is_in_orderblock": 1.0 if any(o["low"] <= close_price <= o["high"] for o in active_obs) else 0.0,
+            "structural_break": structure_info.get("structural_break", 0.0),
+            "active_killzone": active_killzone,
+            "distance_to_poi": dist_nearest_poi_atr,
+            "pd_array_status": structure_info.get("pd_array", 0.5),
+            "mitigation_count": float(mitigation_count),
+            "sweep_depth_atr": sweep_depth_atr,
+        }
 
     @staticmethod
     def detect_liquidity_sweeps(curr: Union[pd.Series, dict], structure: dict, daily_levels: dict) -> Tuple[int, float]:
@@ -71,48 +146,60 @@ class TechnicalAnalyzer:
         Unified Liquidity Sweep Logic.
         Returns: (Sweep Tier [0-3], Sweep Depth in ATR)
         """
-        pdl = daily_levels.get("pdl")
-        pdh = daily_levels.get("pdh")
-        last_low = structure.get("last_low")
-        last_high = structure.get("last_high")
+        pdl, pdh = daily_levels.get("pdl"), daily_levels.get("pdh")
+        asian_high, asian_low = curr.get("asian_high"), curr.get("asian_low")
+        last_low, last_high = structure.get("last_low"), structure.get("last_high")
 
         close_price = curr["close"]
-        recent_low_5 = curr.get("recent_low_5", 0)
-        recent_high_5 = curr.get("recent_high_5", 0)
-        major_low_50 = curr.get("major_low_50", None)
-        major_high_50 = curr.get("major_high_50", None)
+        recent_low_5, recent_high_5 = curr.get("recent_low_5", 0), curr.get("recent_high_5", 0)
+        major_low_50, major_high_50 = curr.get("major_low_50", None), curr.get("major_high_50", None)
 
         fallback_atr = close_price * 0.0005
         atr = curr.get("atr", fallback_atr)
         if atr == 0 or pd.isna(atr):
             atr = fallback_atr
 
-        is_swept = 0
-        sweep_depth = 0.0
+        is_swept, sweep_depth = 0, 0.0
+
+        # Round Number Pool proximity check
+        def is_round_number_sweep(price, high, low):
+            # Scale dynamically based on asset value
+            magnitude = 10 ** math.floor(math.log10(price))
+            step = magnitude / 10 if magnitude > 10 else 1.0
+            closest_round = round(price / step) * step
+            # If price swept a major round number and returned
+            return min(abs(high - closest_round), abs(low - closest_round)) < (atr * 0.5)
+
+        # Tier 3: Daily Sweeps & Asian Range Manipulations
+        is_london = (
+            9
+            <= pd.to_datetime(curr.get("time"), unit="s" if isinstance(curr.get("time"), (int, float)) else None).hour
+            <= 11
+        )
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
-            is_swept = 3
-            sweep_depth = (pdl - recent_low_5) / atr
+            is_swept, sweep_depth = 3, (pdl - recent_low_5) / atr
         elif pdh and recent_high_5 > pdh and close_price < pdh:
-            is_swept = 3
-            sweep_depth = (recent_high_5 - pdh) / atr
+            is_swept, sweep_depth = 3, (recent_high_5 - pdh) / atr
+        elif is_london and asian_low and recent_low_5 < asian_low and close_price > asian_low:
+            is_swept, sweep_depth = 3, (asian_low - recent_low_5) / atr
+        elif is_london and asian_high and recent_high_5 > asian_high and close_price < asian_high:
+            is_swept, sweep_depth = 3, (recent_high_5 - asian_high) / atr
 
-        # Tier 2: Major 50-Period Sweeps
+        # Tier 2: Major 50-Period Sweeps & Round Number Sweeps
         elif major_low_50 and recent_low_5 < major_low_50 and close_price > major_low_50:
-            is_swept = 2
-            sweep_depth = (major_low_50 - recent_low_5) / atr
+            is_swept, sweep_depth = 2, (major_low_50 - recent_low_5) / atr
         elif major_high_50 and recent_high_5 > major_high_50 and close_price < major_high_50:
-            is_swept = 2
-            sweep_depth = (recent_high_5 - major_high_50) / atr
+            is_swept, sweep_depth = 2, (recent_high_5 - major_high_50) / atr
+        elif is_round_number_sweep(close_price, recent_high_5, recent_low_5):
+            is_swept, sweep_depth = 2, 0.5  # Fixed default depth for psychological pools
 
         # Tier 1: Internal Sweeps (Local Structural Pivots)
         elif last_low and recent_low_5 < last_low and close_price > last_low:
-            is_swept = 1
-            sweep_depth = (last_low - recent_low_5) / atr
+            is_swept, sweep_depth = 1, (last_low - recent_low_5) / atr
         elif last_high and recent_high_5 > last_high and close_price < last_high:
-            is_swept = 1
-            sweep_depth = (recent_high_5 - last_high) / atr
+            is_swept, sweep_depth = 1, (recent_high_5 - last_high) / atr
 
         return is_swept, sweep_depth
 
@@ -126,7 +213,7 @@ class TechnicalAnalyzer:
             return {"bos": None, "choch": None, "structure": "FLAT", "structural_break": 0.0, "pd_array": 0.5}
 
         recent_df = df.tail(200)
-        confirmed_df = recent_df.iloc[:-3]
+        confirmed_df = recent_df.iloc[:-1]
 
         # Extract actual pivot prices
         highs = confirmed_df[confirmed_df["pivot_high"]]["high"].values
@@ -144,32 +231,25 @@ class TechnicalAnalyzer:
         is_downtrend = (last_high < prev_high) and (last_low < prev_low)
         structure = "BULL" if is_uptrend else ("BEAR" if is_downtrend else "FLAT")
 
-        bos, choch = None, None
-        structural_break = 0.0
+        bos, choch, structural_break = None, None, 0.0
 
         # 2. Detect BOS and CHoCH on the live edge (Requires body close)
         if structure == "BULL":
             if current_close > last_high:
-                bos = "BULL"
-                structural_break = 1.0
+                bos, structural_break = "BULL", 1.0
             elif current_close < last_low:
-                choch = "BEAR"
-                structural_break = -2.0
+                choch, structural_break = "BEAR", -2.0
         elif structure == "BEAR":
             if current_close < last_low:
-                bos = "BEAR"
-                structural_break = -1.0
+                bos, structural_break = "BEAR", -1.0
             elif current_close > last_high:
-                choch = "BULL"
-                structural_break = 2.0
+                choch, structural_break = "BULL", 2.0
 
         # Premium / Discount Calculation (0.0 to 1.0)
-        # 0.0 = At recent low (Discount), 1.0 = At recent high (Premium)
         pd_range = last_high - last_low
         pd_array_status = 0.5
         if pd_range > 0:
-            pd_array_status = (current_close - last_low) / pd_range
-            pd_array_status = max(0.0, min(1.0, pd_array_status))
+            pd_array_status = max(0.0, min(1.0, (current_close - last_low) / pd_range))
 
         return {
             "bos": bos,
@@ -182,68 +262,102 @@ class TechnicalAnalyzer:
         }
 
     @staticmethod
-    def extract_active_pois(data: Union[pd.DataFrame, list]) -> Tuple[list, list, list]:
-        """
-        Extracts POIs, handles conversions, and tracks their Mitigation Count.
-        """
-
+    def extract_active_pois(data: Union[pd.DataFrame, list], lookback_limit: int = 500) -> Tuple[list, list, list]:
+        """Extracts POIs, handles conversions, and tracks their Mitigation Count."""
         active_fvgs, active_ifvgs, active_obs = [], [], []
-
         records = data.to_dict("records") if isinstance(data, pd.DataFrame) else data
+
+        if len(records) > lookback_limit:
+            records = records[-lookback_limit:]
+
         if len(records) < 3:
             return [], [], []
 
         for i in range(2, len(records)):
             c1, c2, curr = records[i - 2], records[i - 1], records[i]
-            curr_low, curr_high = curr["low"], curr["high"]
+            curr_low, curr_high, curr_close = curr["low"], curr["high"], curr["close"]
 
             # 1. Manage FVGs -> Mitigated FVGs become IFVGs (Inverse Fair Value Gaps)
+            surviving_fvgs = []
             for f in active_fvgs[:]:
                 if f["type"] == "BULL" and curr_low < f["low"]:
-                    # Broken Bullish FVG -> Bearish IFVG
-                    active_ifvgs.append({"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0})
-                    active_fvgs.remove(f)
+                    active_ifvgs.append(
+                        {"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                    )
                 elif f["type"] == "BEAR" and curr_high > f["high"]:
-                    # Broken Bearish FVG -> Bullish IFVG
-                    active_ifvgs.append({"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0})
-                    active_fvgs.remove(f)
+                    active_ifvgs.append(
+                        {"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                    )
+                else:
+                    surviving_fvgs.append(f)
+            active_fvgs = surviving_fvgs
 
-            # 2. Track Mitigations & Invalidate fully broken zones
-            for pool in [active_fvgs, active_ifvgs, active_obs]:
+            # 2. Track Mitigations & Manage Broken OBs (Breaker Blocks)
+            for pool, pool_name in [(active_fvgs, "fvg"), (active_ifvgs, "ifvg"), (active_obs, "ob")]:
+                surviving_zones = []
                 for zone in pool[:]:
-                    # Check for mitigation touches (Wick crosses into the POI)
+                    is_inside = False
                     if zone["type"] == "BULL" and curr_low <= zone["high"]:
-                        zone["mitigations"] += 1
+                        is_inside = True
                     elif zone["type"] == "BEAR" and curr_high >= zone["low"]:
-                        zone["mitigations"] += 1
+                        is_inside = True
+
+                    if is_inside:
+                        if not zone.get("is_touching", False):
+                            zone["mitigations"] += 1
+                            zone["is_touching"] = True
+                    else:
+                        zone["is_touching"] = False
 
                     # Remove heavily mitigated/broken zones (Over 3 touches = void)
-                    if (
-                        zone["mitigations"] > 3
-                        or (zone["type"] == "BULL" and curr["close"] < zone["low"])
-                        or (zone["type"] == "BEAR" and curr["close"] > zone["high"])
-                    ):
-                        pool.remove(zone)
+                    if zone["mitigations"] > 3:
+                        continue
 
-            # 3. Detect new FVG (Now strictly filtered by Institutional Volume)
+                    # Convert Violated OBs into Breaker Blocks
+                    if pool_name == "ob":
+                        if zone["type"] == "BULL" and curr_close < zone["low"]:
+                            zone["type"] = "BEAR"
+                            zone["tier"] = "BREAKER"
+                            zone["mitigations"] = 0
+                            surviving_zones.append(zone)
+                            continue
+                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                            zone["type"] = "BULL"
+                            zone["tier"] = "BREAKER"
+                            zone["mitigations"] = 0
+                            surviving_zones.append(zone)
+                            continue
+                    else:
+                        if zone["type"] == "BULL" and curr_close < zone["low"]:
+                            continue
+                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                            continue
+
+                    surviving_zones.append(zone)
+
+                # Replace the original list with surviving entries
+                pool[:] = surviving_zones
+
+            # 3. True Institutional FVG Detection (Displacement Check)
             vol_sma = c2.get("vol_sma_20", 1)
             vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
+            c2_range = c2["high"] - c2["low"]
+            c2_body = abs(c2["close"] - c2["open"])
 
             # Only register FVGs with volume strength >= 1.0 (average or above average displacement)
-            if vol_strength >= 1.0:
-                if c1["high"] < curr["low"] and c2["close"] > c2["open"]:
-                    active_fvgs.append({"type": "BULL", "high": curr["low"], "low": c1["high"], "mitigations": 0})
-                elif c1["low"] > curr["high"] and c2["close"] < c2["open"]:
-                    active_fvgs.append({"type": "BEAR", "high": c1["low"], "low": curr["high"], "mitigations": 0})
+            if c2_range > 0 and vol_strength >= 1.5 and (c2_body / c2_range) >= 0.70:
+                if c1["high"] < curr_low and c2["close"] > c2["open"]:
+                    active_fvgs.append(
+                        {"type": "BULL", "high": curr_low, "low": c1["high"], "mitigations": 0, "is_touching": False}
+                    )
+                elif c1["low"] > curr_high and c2["close"] < c2["open"]:
+                    active_fvgs.append(
+                        {"type": "BEAR", "high": c1["low"], "low": curr_high, "mitigations": 0, "is_touching": False}
+                    )
 
             # 4. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
             is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
             ob_tier = "MAJOR" if is_pivot else "INTERNAL"
-
-            vol_sma = c2.get("vol_sma_20", 1)
-            vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
-
-            # Require actual institutional displacement
             required_vol = 1.2 if ob_tier == "MAJOR" else 1.0
 
             if vol_strength >= required_vol:
@@ -256,6 +370,7 @@ class TechnicalAnalyzer:
                             "tier": ob_tier,
                             "vol_strength": vol_strength,
                             "mitigations": 0,
+                            "is_touching": False,
                         }
                     )
                 elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
@@ -267,6 +382,7 @@ class TechnicalAnalyzer:
                             "tier": ob_tier,
                             "vol_strength": vol_strength,
                             "mitigations": 0,
+                            "is_touching": False,
                         }
                     )
 
@@ -274,13 +390,10 @@ class TechnicalAnalyzer:
 
     @staticmethod
     def get_htf_trend(df: pd.DataFrame) -> float:
-        """
-        Determines HTF trend dynamically using the 50/200 EMA Cross.
-        """
+        """Determines HTF trend dynamically using the 50/200 EMA Cross."""
         if df.empty:
             return 0.0
 
-        # Read the preserved historical state mapped to this exact candle
         if "htf_trend" in df.columns:
             return float(df.iloc[-1]["htf_trend"])
 

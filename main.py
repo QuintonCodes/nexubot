@@ -16,7 +16,7 @@ load_dotenv()
 setup_logging()
 
 
-async def main():
+async def main() -> None:
     print(f"🚀 Booting Nexubot {VERSION} (Pure SMC Engine)...")
     engine = NexubotEngine(None)
 
@@ -69,15 +69,21 @@ async def main():
         except asyncio.CancelledError:
             print("Received Cancellation Signal.")
         finally:
-            print("Initiating Graceful Shutdown ...")
+            print("Initiating Graceful Shutdown...")
             stats = engine.session_stats
+
             notifier.send_daily_report(
                 stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
             )
-
             await notifier.send_shutdown_message()
+
             await engine.stop_session()
-            await asyncio.sleep(2)
+
+            # Catch all pending fire-and-forget tasks
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if pending:
+                print(f"Waiting for {len(pending)} background tasks to complete delivery...")
+                await asyncio.gather(*pending, return_exceptions=True)
     else:
         print(f"❌ *MT5 Connection Failed.* Check console logs.")
 

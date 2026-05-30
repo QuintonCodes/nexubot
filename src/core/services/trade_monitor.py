@@ -7,12 +7,12 @@ logger = logging.getLogger(__name__)
 
 
 class TradeMonitor:
-    """Trading monitor for all active trades based on pure price action ticks."""
+    """Monitors active trades in real-time for TP/SL hits, manages trailing logic, and handles post-trade processing."""
 
     def __init__(self, engine):
         self.engine = engine
 
-    async def _ghost_track_tp3(self, symbol: str, entry: float, tp3: float, is_long: bool, point: float):
+    async def _ghost_track_tp3(self, symbol: str, entry: float, tp3: float, is_long: bool, point: float) -> None:
         """Silently tracks if TP3 is eventually hit after an early Breakeven/TP1 exit."""
         logger.info(f"👻 Ghost tracking {symbol} for TP3 hit ...")
         start = time.time()
@@ -33,11 +33,8 @@ class TradeMonitor:
 
             await asyncio.sleep(2)
 
-    async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None):
-        """
-        Monitors live market ticks against SMC dynamic targets and logs the outcome.
-        """
-
+    async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None) -> None:
+        """Monitors an active trade in real-time for TP/SL hits, manages trailing logic, and handles post-trade processing."""
         logger.info(f"👀 Monitoring trade {symbol} for outcome...")
         await self.engine.db.save_active_trade(symbol, signal)
 
@@ -107,8 +104,9 @@ class TradeMonitor:
                     if hit_tp1:
                         tp1_hit = True
                         be_stage = max(be_stage, 1)
-                        # Move SL to Breakeven (+ slight buffer)
-                        sl = entry + (20 * point) if is_long else entry - (20 * point)
+                        # Move SL to Breakeven (+ dynamic ATR buffer)
+                        buffer = atr * 0.15
+                        sl = entry + buffer if is_long else entry - buffer
                         self.engine.notifier.send_message(f"💰 *{symbol} Hit TP1!* Moving SL to Breakeven.")
 
                 if tp1_hit and not tp2_hit and tp2 is not None:
@@ -135,7 +133,6 @@ class TradeMonitor:
                 await asyncio.sleep(interval)
 
             #   --- POST TRADE PROCESSING   ---
-            await self.engine.db.delete_active_trade(symbol)
             self.engine.active_signals = [s for s in self.engine.active_signals if s["symbol"] != symbol]
 
             if outcome == "TIMEOUT":
@@ -152,14 +149,15 @@ class TradeMonitor:
             final_pnl = round(final_pnl, 2)
             currency = self.engine.session_stats.get("currency", "USD")
             curr_sym = "R" if currency == "ZAR" else "$"
-            logger.info(f"🔔 Result ({symbol}): {outcome} | PnL: {curr_sym}{final_pnl:.2f} | Pips: {final_pips:.1f}")
+            logger.info(f"🏁 Result ({symbol}): {outcome} | PnL: {curr_sym}{final_pnl:.2f} | Pips: {final_pips:.1f}")
 
             if is_filled:
                 self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won, final_pnl, currency)
 
                 # Initiate Ghost Tracking for Early Exits
                 if "Stopped in Profit/BE" in outcome:
-                    asyncio.create_task(self._ghost_track_tp3(symbol, entry, tp3, is_long, point))
+                    ghost_task = asyncio.create_task(self._ghost_track_tp3(symbol, entry, tp3, is_long, point))
+                    self.engine.monitored_tasks[f"ghost_{symbol}"] = ghost_task
 
                 if won:
                     self.engine.session_stats["wins"] += 1
@@ -191,4 +189,8 @@ class TradeMonitor:
         except Exception as e:
             logger.error(f"Error verifying {symbol}: {e}")
         finally:
-            asyncio.create_task(self.engine.db.delete_active_trade(symbol))
+            try:
+                # Direct await instead of creating a detached task that raises errors on event loop shutdown
+                await self.engine.db.delete_active_trade(symbol)
+            except Exception as e:
+                logger.error(f"Failed to delete active trade during cleanup: {e}")
