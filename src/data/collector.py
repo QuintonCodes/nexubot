@@ -24,6 +24,7 @@ class DataCollector:
         with open(self.filename, "r", encoding="utf-8") as f:
             return sum(1 for _ in f) - 1  # Subtract 1 for the header
 
+    @staticmethod
     def engineer_features(raw_features: dict) -> dict:
         """Transforms raw SMC features into the full engineered feature set."""
         f = raw_features
