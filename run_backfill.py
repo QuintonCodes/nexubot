@@ -8,9 +8,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from src.data.provider import DataProvider
 from src.core.engine import NexubotEngine
 from src.utils.backfill import backfill_data
+from src.utils.logger import setup_logging
 from src.config import CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE, TRAINING_FILE
 
 load_dotenv()
+setup_logging()
 
 
 def wipe_legacy_ml_data() -> None:
