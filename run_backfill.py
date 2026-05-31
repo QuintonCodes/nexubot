@@ -12,7 +12,7 @@ from src.utils.logger import setup_logging
 from src.config import CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE, TRAINING_FILE
 
 load_dotenv()
-setup_logging()
+setup_logging("backfill.log")
 
 
 def wipe_legacy_ml_data() -> None:
@@ -40,7 +40,7 @@ def wipe_legacy_ml_data() -> None:
 
 
 async def main() -> None:
-    print("🚀 Initiating Pure SMC Backfill Engine (M1 Timeframe) ...")
+    print("🚀 Initiating Pure SMC Backfill Engine (M1 Timeframe)...")
 
     # Force clean environment to prevent Neural Network crashes
     wipe_legacy_ml_data()

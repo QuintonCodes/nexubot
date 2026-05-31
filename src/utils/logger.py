@@ -1,12 +1,9 @@
 import logging
-import os
 import sys
 
 
 class UnicodeStreamHandler(logging.StreamHandler):
-    """
-    Custom StreamHandler to handle Unicode characters on Windows consoles
-    """
+    """Custom StreamHandler to handle Unicode characters on Windows consoles"""
 
     def emit(self, record):
         try:
@@ -23,7 +20,7 @@ class UnicodeStreamHandler(logging.StreamHandler):
             self.handleError(record)
 
 
-def setup_logging():
+def setup_logging(filename="nexubot.log"):
     """
     Initialize the logging configuration.
     Logs to file and console with specific formatting.
@@ -40,7 +37,7 @@ def setup_logging():
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%d %b %H:%M:%S")
 
     # File Handler
-    file_handler = logging.FileHandler("nexubot.log", encoding="utf-8", mode="a")
+    file_handler = logging.FileHandler(filename, encoding="utf-8", mode="a")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 

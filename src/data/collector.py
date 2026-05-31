@@ -46,7 +46,11 @@ class DataCollector:
 
         # Composite score
         score = 0.0
-        score += {0: 2.0, 1: 1.5, 2: -0.5, 3: -1.0}.get(active_killzone, 0.0)
+
+        SESSION_SCORE_MAP = {0: 1.0, 1: 0.9, 2: 0.6, 3: 0.55}
+        session_score = SESSION_SCORE_MAP.get(active_killzone, 1.0)
+        score += session_score * 1.5
+
         if is_in_fvg == 1:
             score += 2.0
         elif is_in_ifvg == 1:
@@ -83,9 +87,7 @@ class DataCollector:
 
         return {
             "signal_quality_score": round(score, 2),
-            "session_quality_score": {0: 1.0, 1: 0.9, 2: 0.6, 3: 0.55}.get(active_killzone, 1.0),
-            "is_optimal_entry_distance": float(0.5 <= distance_to_poi <= 2.5),
-            "poi_freshness_score": round(1.0 - (min(mit, 3) / 3.0), 4),
+            "session_quality_score": session_score,
             "log_distance_to_poi": round(float(np.log1p(distance_to_poi)), 4),
             "is_in_fvg": is_in_fvg,
             "is_in_ifvg": is_in_ifvg,
@@ -102,7 +104,6 @@ class DataCollector:
         self, symbol: str, strategy: str, features: dict, won: int, pnl: float, excursion: float = 0.0
     ) -> None:
         """Logs the features and trade outcome to a CSV file for future training."""
-
         headers = ["symbol", "strategy"] + FEATURE_COLS + ["target_win", "pnl", "target_excursion"]
 
         row = {"symbol": symbol, "strategy": strategy}

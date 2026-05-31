@@ -75,8 +75,6 @@ TRAINING_FILE = "training_data.csv"
 FEATURE_COLS = [
     "signal_quality_score",
     "session_quality_score",
-    "is_optimal_entry_distance",
-    "poi_freshness_score",
     "log_distance_to_poi",
     "is_in_fvg",
     "is_in_ifvg",

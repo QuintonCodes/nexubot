@@ -88,7 +88,7 @@ class OfflineManager:
             return
 
         for symbol, signal, start_time in active_trades:
-            self.engine.ai_engine.register_active_trade(symbol)
+            self.engine.ai_engine.register_active_trade(symbol, signal.get("strategy", "Unknown"))
 
             elapsed = time.time() - start_time
             candles_needed = min(math.ceil(elapsed / 60) + 5, 1440)
