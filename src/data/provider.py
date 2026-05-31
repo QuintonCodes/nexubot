@@ -4,7 +4,6 @@ import MetaTrader5 as mt5
 import os
 import subprocess
 import time
-
 from collections import deque
 from typing import Dict, List, Optional
 

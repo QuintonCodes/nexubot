@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -180,17 +179,17 @@ class TelegramNotifier:
 
             msg = (
                 f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
-                f"🌍 *Session Profile:* {engineered_features['session_quality_score']:.2f} ({killzone_name})\n"
+                f"🌍 *Session Profile:* {engineered_features.get('session_quality_score', 1.0):.2f} ({killzone_name})\n"
                 f"📊 *HTF Flow (1H):* {htf_text}\n"
                 f"🧭 *Local Flow ({TIMEFRAME}):* {structure['structure']} | Break: {break_text}\n"
                 f"📏 *PD Array:* Price in {pd_text}\n"
                 f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs\n"
-                f"🎯 *Nearest POI Status:* {engineered_features['distance_to_poi']:.1f} ATR Away | Freshness: {engineered_features['poi_freshness_score']:.2f}\n"
+                f"🎯 *Nearest POI Status:* {engineered_features.get('distance_to_poi', 0.0):.1f} ATR Away | Freshness: {engineered_features.get('poi_freshness_score', 0.0):.2f}\n"
                 f"🧹 *Sweep Status:* {sweep_text}\n"
                 f"🌊 *VWAP State:* {vwap_trend}\n\n"
                 f"🤖 *Neural Output:*\n"
                 f"• _Trend Alignment:_ {'Aligned ✅' if trend_bonus > 0 else 'Counter ⚠️'}\n"
-                f"• _Signal Quality Score:_ *{engineered_features['signal_quality_score']:.2f}*\n"
+                f"• _Signal Quality Score:_ *{engineered_features.get('signal_quality_score', 0.0):.2f}*\n"
                 f"• _Calculated AI Confidence:_ *{win_prob:.1f}%*\n"
                 f"• _AI Conclusion:_ {ai_thought}"
             )
@@ -252,8 +251,14 @@ class TelegramNotifier:
 
     def send_message(self, text: str) -> None:
         """Sends a message to the configured Telegram chat asynchronously."""
-        if self.bot_token and self.chat_id:
-            asyncio.create_task(self._safe_send(self.chat_id, text))
+        if not (self.bot_token and self.chat_id):
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._safe_send(self.chat_id, text))
+        except RuntimeError:
+            logger.warning("Telegram message dropped contextually: no active event loop detected running.")
 
     async def send_shutdown_message(self) -> None:
         """Sends a final shutdown message with a summary of the bot's state."""

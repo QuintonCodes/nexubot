@@ -1,7 +1,6 @@
 import logging
 import MetaTrader5 as mt5
 import pandas as pd
-
 from typing import Dict, List, Optional, Tuple
 
 from src.analysis.indicators import TechnicalAnalyzer
@@ -16,14 +15,13 @@ from src.config import (
     HIGH_VOLATILITY_IDENTIFIERS,
     MAX_ROWS,
     MIN_RR,
-    SESSION_CONFIG,
     TIMEFRAME,
 )
 
 logger = logging.getLogger(__name__)
 
 # Constants for backfill limits
-MAX_ROWS_PER_SYMBOL = 1500
+MAX_ROWS_PER_SYMBOL = 2500
 FUTURE_WINDOW_SIZE = 400
 WARMUP_PERIOD = 200
 
@@ -169,11 +167,11 @@ def _simulate_trade_outcome(
     if won == 1:
         gross_dist = abs(tp - close_price)
         pnl = gross_dist / atr if atr > 0 else 0.0
+        target_excursion = gross_dist / atr if atr > 0 else 0.0
     else:
         gross_dist = abs(sl - close_price)
         pnl = -gross_dist / atr if atr > 0 else 0.0
-
-    target_excursion = max_favorable / atr if atr > 0 else 0.0
+        target_excursion = max_favorable / atr if atr > 0 else 0.0
 
     return won, pnl, target_excursion
 
@@ -203,24 +201,32 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
         df_full, records, point, is_volatile_asset = data_bundle
         symbol_rows_collected = 0
 
+        active_fvgs, active_ifvgs, active_obs = [], [], []
+
         # --- SIMULATION ENGINE ---
-        for i in range(WARMUP_PERIOD, len(records) - FUTURE_WINDOW_SIZE):
+        for i in range(2, len(records) - FUTURE_WINDOW_SIZE):
+            c1, c2, curr = records[i - 2], records[i - 1], records[i]
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.update_pois(
+                c1, c2, curr, active_fvgs, active_ifvgs, active_obs
+            )
+
+            # Prevent mapping until structure warms up fully
+            if i < WARMUP_PERIOD:
+                continue
+
             if symbol_rows_collected >= MAX_ROWS_PER_SYMBOL:
                 logger.info(f"✅ {symbol} reached {MAX_ROWS_PER_SYMBOL} row cap.")
                 break
 
-            curr = records[i]
             close_price = curr["close"]
             min_atr = point * 10
             atr = max(float(curr.get("atr", min_atr)), min_atr)
 
             # Slicing for logic processing
             df_slice = df_full.iloc[max(0, i - WARMUP_PERIOD) : i + 1]
-            records_slice = records[max(0, i - 100) : i + 1]
 
             # SMC Detection
             structure_info = TechnicalAnalyzer.detect_structure(df_slice)
-            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(records_slice)
             daily_levels = {"pdh": curr.get("pdh"), "pdl": curr.get("pdl")}
             is_liquidity_swept, sweep_depth_atr = TechnicalAnalyzer.detect_liquidity_sweeps(
                 curr, structure_info, daily_levels
@@ -271,7 +277,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 future_window, signal["direction"], close_price, sl, tp, atr
             )
 
-            collector.log_training_data(symbol, engineered_features, won, pnl, target_excursion)
+            collector.log_training_data(symbol, signal["strategy"], engineered_features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1
 

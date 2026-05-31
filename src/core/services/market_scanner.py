@@ -1,10 +1,10 @@
 import asyncio
 import logging
 import time
-
 from typing import List
 
 from src.config import (
+    CANDLE_LIMIT,
     FALLBACK_CRYPTO,
     FALLBACK_FOREX,
     FALLBACK_INDICES,
@@ -53,7 +53,7 @@ class MarketScanner:
             if sym in active_syms:
                 continue
 
-            klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, 3000)
+            klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
             if klines:
                 # Store lightweight df for sorting without requiring fresh MT5 calls
                 df = self.engine.ai_engine.prepare_data(klines)

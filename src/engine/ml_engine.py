@@ -4,14 +4,14 @@ import numpy as np
 import os
 import pandas as pd
 import tensorflow as tf
-
-from typing import Dict, Optional, Tuple
-
+from imblearn.over_sampling import SMOTE
 from keras.callbacks import EarlyStopping
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.class_weight import compute_class_weight
+from typing import Dict, Optional, Tuple
 
 from src.config import (
     CALIBRATOR_FILE,
@@ -41,14 +41,8 @@ class NeuralPredictor:
         self.calibrator: Optional[IsotonicRegression] = None
         self.is_ready: bool = False
 
-    def _predict_exit(self, df_input: pd.DataFrame) -> float:
-        """Helper to safely predict the exit ATR with boundaries."""
-        if not self.exit_model or not self.exit_scaler:
-            return 3.0
-
-        X_new_exit = self.exit_scaler.transform(df_input)
-        raw_exit = float(self.exit_model.predict(X_new_exit, verbose=0)[0][0])
-        return max(MIN_RR, min(raw_exit, 6.0))
+        if auto_load:
+            self._load_artifacts()
 
     def _calculate_risk_multiplier(self, probability: float) -> float:
         """Helper to determine position sizing logic based on probability."""
@@ -57,6 +51,23 @@ class NeuralPredictor:
         elif probability > 0.60:
             return 1.0  # Standard
         return 0.5  # Base Low
+
+    def _load_artifacts(self) -> None:
+        """Loads machine learning pre-trained structures from static files where possible."""
+        if os.path.exists(ENTRY_MODEL_FILE) and os.path.exists(SCALER_FILE):
+            try:
+                self.entry_model = tf.keras.models.load_model(ENTRY_MODEL_FILE)
+                self.scaler = joblib.load(SCALER_FILE)
+                if os.path.exists(EXIT_MODEL_FILE):
+                    self.exit_model = tf.keras.models.load_model(EXIT_MODEL_FILE)
+                if os.path.exists(EXIT_SCALER_FILE):
+                    self.exit_scaler = joblib.load(EXIT_SCALER_FILE)
+                if os.path.exists(CALIBRATOR_FILE):
+                    self.calibrator = joblib.load(CALIBRATOR_FILE)
+                self.is_ready = True
+                logger.info("✅ ML Artifacts loaded successfully on init.")
+            except Exception as e:
+                logger.error(f"Failed to load ML artifacts: {e}")
 
     def _load_and_prepare_data(self, data_file: str) -> Optional[pd.DataFrame]:
         """Validates and prepares the initial dataset."""
@@ -79,15 +90,23 @@ class NeuralPredictor:
 
         return df
 
+    def _predict_exit(self, df_input: pd.DataFrame) -> float:
+        """Helper to safely predict the exit ATR with boundaries."""
+        if not self.exit_model or not self.exit_scaler:
+            return 3.0
+
+        X_new_exit = self.exit_scaler.transform(df_input)
+        raw_exit = float(self.exit_model.predict(X_new_exit, verbose=0)[0][0])
+        return max(MIN_RR, min(raw_exit, 6.0))
+
     def _train_entry_model(
         self, X_scaled: np.ndarray, y_entry: np.ndarray, early_stop: EarlyStopping
     ) -> Tuple[tf.keras.Model, np.ndarray, np.ndarray]:
         """Constructs and trains the binary classification model for entries."""
         X_train, X_cal, y_train, y_cal = train_test_split(X_scaled, y_entry, test_size=0.15, random_state=42)
 
-        classes = np.unique(y_train)
-        weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
-        class_weights = dict(zip(classes, weights))
+        smote = SMOTE(random_state=42, k_neighbors=5)
+        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
 
         model = tf.keras.models.Sequential(
             [
@@ -101,13 +120,12 @@ class NeuralPredictor:
 
         model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
         model.fit(
-            X_train,
-            y_train,
+            X_train_res,
+            y_train_res,
             epochs=150,
             batch_size=32,
             verbose=1,
             validation_split=0.15,
-            class_weight=class_weights,
             callbacks=[early_stop],
         )
 
@@ -157,7 +175,12 @@ class NeuralPredictor:
     def _train_calibrator(self, X_cal: np.ndarray, y_cal: np.ndarray) -> IsotonicRegression:
         """Trains the Isotonic Regression model to align raw probabilities with reality."""
         raw_probs = self.entry_model.predict(X_cal, verbose=0).flatten()
-        calibrator = IsotonicRegression(out_of_bounds="clip")
+
+        if np.std(raw_probs) < 1e-4:
+            logger.warning("Raw probabilities have no variance. Skipping calibration.")
+            return None
+
+        calibrator = IsotonicRegression(out_of_bounds="clip", increasing=True)
         calibrator.fit(raw_probs, y_cal)
         return calibrator
 
@@ -169,18 +192,17 @@ class NeuralPredictor:
             self.exit_model.save(EXIT_MODEL_FILE)
 
         joblib.dump(self.calibrator, CALIBRATOR_FILE)
-        joblib.dump(self.scaler, SCALER_FILE)
+        if self.calibrator:
+            joblib.dump(self.calibrator, CALIBRATOR_FILE)
         if self.exit_scaler:
             joblib.dump(self.exit_scaler, EXIT_SCALER_FILE)
 
     def predict(self, features: dict) -> Dict[str, float]:
         """Predicts entry probability, dynamic risk sizing, and optimal exit ATR."""
-        # Graceful Failover if models are not yet trained
         if not self.is_ready or self.entry_model is None:
             return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 3.0}
 
         try:
-            # Map incoming features, defaulting to 0 for missing binary flags
             data = {k: [features.get(k, 0.0)] for k in FEATURE_COLS}
             df_input = pd.DataFrame(data)
 
@@ -216,18 +238,35 @@ class NeuralPredictor:
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
 
-            early_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
+            rf = RandomForestClassifier(n_estimators=50, class_weight="balanced", n_jobs=-1, random_state=42)
+            auc_test = cross_val_score(rf, X_scaled, y_entry, cv=3, scoring="roc_auc").mean()
+            logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
+
+            if auc_test < 0.53:
+                logger.warning(
+                    "⚠️ AUC below threshold — engineered features carry insufficient signal. Continuing build sequence passively."
+                )
+
+            entry_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
+            exit_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=1)
 
             # 2. Train Entry Model
-            logger.info("🧠 Training SMC Entry Model ...")
-            self.entry_model, X_cal, y_cal = self._train_entry_model(X_scaled, y_entry, early_stop)
+            logger.info("🧠 Training SMC Entry Model...")
+            self.entry_model, X_cal, y_cal = self._train_entry_model(X_scaled, y_entry, entry_stop)
+
+            val_auc = roc_auc_score(y_cal, self.entry_model.predict(X_cal, verbose=0))
+            logger.info(f"📊 Live Validation AUC: {val_auc:.4f}")
+
+            if val_auc < 0.53:
+                logger.warning("⚠️ New model critically underperforms. Keeping existing artifacts intact.")
+                return
 
             # 3. Train Exit Model
-            logger.info("🧠 Training SMC Exit Model ...")
-            self.exit_model = self._train_exit_model(df, early_stop)
+            logger.info("🧠 Training SMC Exit Model...")
+            self.exit_model = self._train_exit_model(df, exit_stop)
 
             # 4. Calibrate Predictions
-            logger.info("⚖️ Calibrating Probabilities ...")
+            logger.info("⚖️ Calibrating Probabilities...")
             self.calibrator = self._train_calibrator(X_cal, y_cal)
 
             # 5. Save Artifacts

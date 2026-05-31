@@ -46,7 +46,7 @@ SESSION_CONFIG = {
 # STRATEGY & RISK SETTINGS
 # ---------------------------------------------------------
 TIMEFRAME = "M1"
-CANDLE_LIMIT = 500
+CANDLE_LIMIT = 3000
 DEFAULT_MIN_CONFIDENCE = 65.0
 DEFAULT_RISK_PCT = 2.0
 DEFAULT_MAX_LOT = 5.0
@@ -75,16 +75,11 @@ TRAINING_FILE = "training_data.csv"
 FEATURE_COLS = [
     "signal_quality_score",
     "session_quality_score",
-    "is_low_noise_session",
     "is_optimal_entry_distance",
     "poi_freshness_score",
     "log_distance_to_poi",
-    "htf_fvg_confluence",
     "is_in_fvg",
     "is_in_ifvg",
-    "bos_htf_directional_confluence",
-    "is_choch_signal",
-    "structural_break",
     "is_htf_aligned",
     "is_liquidity_swept_tier",
     "sweep_depth_atr",
