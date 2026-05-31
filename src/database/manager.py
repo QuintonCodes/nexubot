@@ -4,7 +4,6 @@ import json
 import numpy as np
 import re
 import time
-
 from functools import wraps
 from sqlalchemy import select, desc, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert

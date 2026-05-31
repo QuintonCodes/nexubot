@@ -1,7 +1,8 @@
 import math
 import pandas as pd
+from typing import Dict, List, Tuple, Union
 
-from typing import Dict, Tuple, Union
+from src.config import SESSION_CONFIG
 
 
 class TechnicalAnalyzer:
@@ -100,12 +101,11 @@ class TechnicalAnalyzer:
             alignment_score = 1.0 if (is_long_aligned or is_short_aligned) else -1.0
 
         # Killzone Map
-        if isinstance(curr["time"], (int, float)):
-            dt_hour = pd.to_datetime(curr["time"], unit="s").hour
-        else:
-            dt_hour = curr["time"].hour
-
-        from src.config import SESSION_CONFIG
+        dt_hour = (
+            curr["datetime"].hour
+            if "datetime" in curr and isinstance(curr["datetime"], pd.Timestamp)
+            else pd.to_datetime(curr.get("time"), unit="s").hour
+        )
 
         active_killzone = 0.0
         if SESSION_CONFIG["ASIAN_START"] <= dt_hour < SESSION_CONFIG["ASIAN_END"]:
@@ -163,7 +163,8 @@ class TechnicalAnalyzer:
 
         # Round Number Pool proximity check
         def is_round_number_sweep(price, high, low):
-            # Scale dynamically based on asset value
+            if price <= 0:
+                return False
             magnitude = 10 ** math.floor(math.log10(price))
             step = magnitude / 10 if magnitude > 10 else 1.0
             closest_round = round(price / step) * step
@@ -171,11 +172,14 @@ class TechnicalAnalyzer:
             return min(abs(high - closest_round), abs(low - closest_round)) < (atr * 0.5)
 
         # Tier 3: Daily Sweeps & Asian Range Manipulations
-        is_london = (
-            9
-            <= pd.to_datetime(curr.get("time"), unit="s" if isinstance(curr.get("time"), (int, float)) else None).hour
-            <= 11
-        )
+        is_london = False
+        if "datetime" in curr and isinstance(curr["datetime"], pd.Timestamp):
+            is_london = 9 <= curr["datetime"].hour <= 11
+        else:
+            time_val = curr.get("time")
+            if time_val:
+                dt = pd.to_datetime(time_val, unit="s" if isinstance(time_val, (int, float)) else None)
+                is_london = 9 <= dt.hour <= 11
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
@@ -275,116 +279,9 @@ class TechnicalAnalyzer:
 
         for i in range(2, len(records)):
             c1, c2, curr = records[i - 2], records[i - 1], records[i]
-            curr_low, curr_high, curr_close = curr["low"], curr["high"], curr["close"]
-
-            # 1. Manage FVGs -> Mitigated FVGs become IFVGs (Inverse Fair Value Gaps)
-            surviving_fvgs = []
-            for f in active_fvgs[:]:
-                if f["type"] == "BULL" and curr_low < f["low"]:
-                    active_ifvgs.append(
-                        {"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
-                    )
-                elif f["type"] == "BEAR" and curr_high > f["high"]:
-                    active_ifvgs.append(
-                        {"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
-                    )
-                else:
-                    surviving_fvgs.append(f)
-            active_fvgs = surviving_fvgs
-
-            # 2. Track Mitigations & Manage Broken OBs (Breaker Blocks)
-            for pool, pool_name in [(active_fvgs, "fvg"), (active_ifvgs, "ifvg"), (active_obs, "ob")]:
-                surviving_zones = []
-                for zone in pool[:]:
-                    is_inside = False
-                    if zone["type"] == "BULL" and curr_low <= zone["high"]:
-                        is_inside = True
-                    elif zone["type"] == "BEAR" and curr_high >= zone["low"]:
-                        is_inside = True
-
-                    if is_inside:
-                        if not zone.get("is_touching", False):
-                            zone["mitigations"] += 1
-                            zone["is_touching"] = True
-                    else:
-                        zone["is_touching"] = False
-
-                    # Remove heavily mitigated/broken zones (Over 3 touches = void)
-                    if zone["mitigations"] > 3:
-                        continue
-
-                    # Convert Violated OBs into Breaker Blocks
-                    if pool_name == "ob":
-                        if zone["type"] == "BULL" and curr_close < zone["low"]:
-                            zone["type"] = "BEAR"
-                            zone["tier"] = "BREAKER"
-                            zone["mitigations"] = 0
-                            surviving_zones.append(zone)
-                            continue
-                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
-                            zone["type"] = "BULL"
-                            zone["tier"] = "BREAKER"
-                            zone["mitigations"] = 0
-                            surviving_zones.append(zone)
-                            continue
-                    else:
-                        if zone["type"] == "BULL" and curr_close < zone["low"]:
-                            continue
-                        if zone["type"] == "BEAR" and curr_close > zone["high"]:
-                            continue
-
-                    surviving_zones.append(zone)
-
-                # Replace the original list with surviving entries
-                pool[:] = surviving_zones
-
-            # 3. True Institutional FVG Detection (Displacement Check)
-            vol_sma = c2.get("vol_sma_20", 1)
-            vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
-            c2_range = c2["high"] - c2["low"]
-            c2_body = abs(c2["close"] - c2["open"])
-
-            # Only register FVGs with volume strength >= 1.0 (average or above average displacement)
-            if c2_range > 0 and vol_strength >= 1.5 and (c2_body / c2_range) >= 0.70:
-                if c1["high"] < curr_low and c2["close"] > c2["open"]:
-                    active_fvgs.append(
-                        {"type": "BULL", "high": curr_low, "low": c1["high"], "mitigations": 0, "is_touching": False}
-                    )
-                elif c1["low"] > curr_high and c2["close"] < c2["open"]:
-                    active_fvgs.append(
-                        {"type": "BEAR", "high": c1["low"], "low": curr_high, "mitigations": 0, "is_touching": False}
-                    )
-
-            # 4. Detect New Order Blocks (Major vs Internal) with Volume Strength calculation
-            is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
-            ob_tier = "MAJOR" if is_pivot else "INTERNAL"
-            required_vol = 1.2 if ob_tier == "MAJOR" else 1.0
-
-            if vol_strength >= required_vol:
-                if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
-                    active_obs.append(
-                        {
-                            "type": "BULL",
-                            "high": c1["high"],
-                            "low": c1["low"],
-                            "tier": ob_tier,
-                            "vol_strength": vol_strength,
-                            "mitigations": 0,
-                            "is_touching": False,
-                        }
-                    )
-                elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
-                    active_obs.append(
-                        {
-                            "type": "BEAR",
-                            "high": c1["high"],
-                            "low": c1["low"],
-                            "tier": ob_tier,
-                            "vol_strength": vol_strength,
-                            "mitigations": 0,
-                            "is_touching": False,
-                        }
-                    )
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.update_pois(
+                c1, c2, curr, active_fvgs, active_ifvgs, active_obs
+            )
 
         return active_fvgs, active_ifvgs, active_obs
 
@@ -407,3 +304,108 @@ class TechnicalAnalyzer:
             return -1.0
 
         return 0.0
+
+    @staticmethod
+    def update_pois(
+        c1: dict, c2: dict, curr: dict, active_fvgs: list, active_ifvgs: list, active_obs: list
+    ) -> Tuple[List, List, List]:
+        """Runs an incremental O(1) state update step for arrays mapping."""
+        curr_low, curr_high, curr_close = curr["low"], curr["high"], curr["close"]
+
+        surviving_fvgs = []
+        for f in active_fvgs[:]:
+            if f["type"] == "BULL" and curr_low < f["low"]:
+                active_ifvgs.append(
+                    {"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                )
+            elif f["type"] == "BEAR" and curr_high > f["high"]:
+                active_ifvgs.append(
+                    {"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                )
+            else:
+                surviving_fvgs.append(f)
+        active_fvgs = surviving_fvgs
+
+        for pool, pool_name in [(active_fvgs, "fvg"), (active_ifvgs, "ifvg"), (active_obs, "ob")]:
+            surviving_zones = []
+            for zone in pool[:]:
+                is_inside = False
+                if zone["type"] == "BULL" and curr_low <= zone["high"]:
+                    is_inside = True
+                elif zone["type"] == "BEAR" and curr_high >= zone["low"]:
+                    is_inside = True
+
+                if is_inside:
+                    if not zone.get("is_touching", False):
+                        zone["mitigations"] += 1
+                        zone["is_touching"] = True
+                else:
+                    zone["is_touching"] = False
+
+                if zone["mitigations"] > 3:
+                    continue
+
+                if pool_name == "ob":
+                    if zone["type"] == "BULL" and curr_close < zone["low"]:
+                        zone["type"], zone["tier"], zone["mitigations"] = "BEAR", "BREAKER", 0
+                        surviving_zones.append(zone)
+                        continue
+                    if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                        zone["type"], zone["tier"], zone["mitigations"] = "BULL", "BREAKER", 0
+                        surviving_zones.append(zone)
+                        continue
+                else:
+                    if zone["type"] == "BULL" and curr_close < zone["low"]:
+                        continue
+                    if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                        continue
+
+                surviving_zones.append(zone)
+            pool[:] = surviving_zones
+
+        vol_sma = c2.get("vol_sma_20", 1)
+        vol_strength = round((c2["volume"] / vol_sma), 2) if vol_sma > 0 else 1.0
+        c2_range = c2["high"] - c2["low"]
+        c2_body = abs(c2["close"] - c2["open"])
+
+        if c2_range > 0 and vol_strength >= 1.5 and (c2_body / c2_range) >= 0.70:
+            if c1["high"] < curr_low and c2["close"] > c2["open"]:
+                active_fvgs.append(
+                    {"type": "BULL", "high": curr_low, "low": c1["high"], "mitigations": 0, "is_touching": False}
+                )
+            elif c1["low"] > curr_high and c2["close"] < c2["open"]:
+                active_fvgs.append(
+                    {"type": "BEAR", "high": c1["low"], "low": curr_high, "mitigations": 0, "is_touching": False}
+                )
+
+        is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
+        ob_tier = "MAJOR" if is_pivot else "INTERNAL"
+        required_vol = 1.2 if ob_tier == "MAJOR" else 1.0
+
+        if vol_strength >= required_vol:
+            if c2["close"] > c2["open"] and c1["close"] < c1["open"] and c2["close"] > c1["high"]:
+                active_obs.append(
+                    {
+                        "type": "BULL",
+                        "high": c1["high"],
+                        "low": c1["low"],
+                        "tier": ob_tier,
+                        "vol_strength": vol_strength,
+                        "mitigations": 0,
+                        "is_touching": False,
+                    }
+                )
+            elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
+                active_obs.append(
+                    {
+                        "type": "BEAR",
+                        "high": c1["high"],
+                        "low": c1["low"],
+                        "tier": ob_tier,
+                        "vol_strength": vol_strength,
+                        "mitigations": 0,
+                        "is_touching": False,
+                    }
+                )
+
+        return active_fvgs, active_ifvgs, active_obs

@@ -27,6 +27,13 @@ class StrategyAnalyzer:
         if mitigation_count >= 3:
             return None
 
+        pd_status = structure.get("pd_array", 0.5)
+        allow_long = pd_status <= 0.60
+        allow_short = pd_status >= 0.40
+
+        if not allow_long and not allow_short:
+            return None
+
         signal = None
 
         # 1. Liquidity Sweeps
@@ -52,11 +59,10 @@ class StrategyAnalyzer:
             signal = self._vwap_bounce(curr, vwap_val, is_liquidity_swept, structural_break)
 
         if signal:
-            # PD Array Hard Gate: Longs strictly in Discount, Shorts strictly in Premium
-            pd_status = structure.get("pd_array", 0.5)
-            if signal["direction"] == "LONG" and pd_status > 0.45:
+            # Rejection implementation using pre-calculated flags
+            if signal["direction"] == "LONG" and not allow_long:
                 return None
-            if signal["direction"] == "SHORT" and pd_status < 0.55:
+            if signal["direction"] == "SHORT" and not allow_short:
                 return None
 
             signal["is_liquidity_swept"] = is_liquidity_swept
@@ -74,7 +80,6 @@ class StrategyAnalyzer:
             return None
 
         # Only accept BOS confirmation (momentum continuation), not CHoCH (reversal)
-        # CHoCH entries (counter-trend) are structurally unsound at M1 granularity
         bos = structure.get("bos")
         if not bos:
             return None
@@ -83,7 +88,6 @@ class StrategyAnalyzer:
         recent_low = curr.get("recent_low_5", 0)
         recent_high = curr.get("recent_high_5", 0)
 
-        # Determine Strategy Name and Confidence based on Sweep Tier
         if is_liquidity_swept == 3:
             strat_name = "Daily/Asian Sweep"
             conf = 84.0
@@ -188,7 +192,6 @@ class StrategyAnalyzer:
 
         if is_bouncing_up and not blocked_by_bear:
             for i_fvg in active_ifvgs:
-                # Skip exhausted zones
                 if i_fvg.get("mitigations", 0) > 2:
                     continue
                 if i_fvg["type"] == "BULL" and recent_low <= i_fvg["high"]:
@@ -209,7 +212,7 @@ class StrategyAnalyzer:
                     continue
                 if i_fvg["type"] == "BEAR" and recent_high >= i_fvg["low"]:
                     ce_midpoint = (i_fvg["high"] + i_fvg["low"]) / 2
-                    if close_price < ce_midpoint:  # Must close below midpoint to prove rejection
+                    if close_price < ce_midpoint:
                         return {
                             "strategy": "IFVG Re-Test",
                             "signal": "SELL",
@@ -229,7 +232,6 @@ class StrategyAnalyzer:
         is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
         """Detects reversals at Points of Interest (OBs, FVGs) but only after a liquidity sweep has occurred."""
-        # Require at least a Tier-1 sweep before entering a POI reversal
         if is_liquidity_swept < 2:
             return None
 
@@ -327,7 +329,7 @@ class StrategyAnalyzer:
         """
         Detects bounces off the VWAP with volume and structural context validation.
         """
-        if vwap_val == 0 or (is_liquidity_swept < 2 and structural_break == 0.0):
+        if vwap_val == 0 or is_liquidity_swept < 2:
             return None
 
         # Demand institutional volume backing the bounce (20% above average volume)

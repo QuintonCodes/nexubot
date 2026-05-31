@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import os
 import pandas as pd
+import threading
 
 from src.config import FEATURE_COLS, MAX_ROWS, TRAINING_FILE
 
@@ -11,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 class DataCollector:
     """Collects and manages training data for the neural network models."""
+
+    _lock = threading.Lock()
 
     def __init__(self, filename=TRAINING_FILE):
         self.filename = filename
@@ -81,19 +84,11 @@ class DataCollector:
         return {
             "signal_quality_score": round(score, 2),
             "session_quality_score": {0: 1.0, 1: 0.9, 2: 0.6, 3: 0.55}.get(active_killzone, 1.0),
-            "is_low_noise_session": float(active_killzone <= 1),
             "is_optimal_entry_distance": float(0.5 <= distance_to_poi <= 2.5),
             "poi_freshness_score": round(1.0 - (min(mit, 3) / 3.0), 4),
             "log_distance_to_poi": round(float(np.log1p(distance_to_poi)), 4),
-            "htf_fvg_confluence": float(is_htf_aligned == 1.0 and is_in_fvg == 1.0),
             "is_in_fvg": is_in_fvg,
             "is_in_ifvg": is_in_ifvg,
-            "bos_htf_directional_confluence": float(
-                (structural_break == 1.0 and is_htf_aligned == 1.0)
-                or (structural_break == -1.0 and is_htf_aligned == -1.0)
-            ),
-            "is_choch_signal": float(structural_break in (-2.0, 2.0)),
-            "structural_break": structural_break,
             "is_htf_aligned": is_htf_aligned,
             "is_liquidity_swept_tier": is_liquidity_swept,
             "sweep_depth_atr": sweep_depth_atr,
@@ -103,17 +98,14 @@ class DataCollector:
             "zone_overlap_count": float(int(is_in_fvg) + int(is_in_ifvg) + int(is_in_orderblock)),
         }
 
-    def log_training_data(self, symbol: str, features: dict, won: int, pnl: float, excursion: float = 0.0) -> None:
+    def log_training_data(
+        self, symbol: str, strategy: str, features: dict, won: int, pnl: float, excursion: float = 0.0
+    ) -> None:
         """Logs the features and trade outcome to a CSV file for future training."""
-        file_exists = os.path.isfile(self.filename)
 
-        # Initialize counter once on boot
-        if self._current_row_count is None:
-            self._current_row_count = self._get_row_count()
+        headers = ["symbol", "strategy"] + FEATURE_COLS + ["target_win", "pnl", "target_excursion"]
 
-        headers = ["symbol"] + FEATURE_COLS + ["target_win", "pnl", "target_excursion"]
-
-        row = {"symbol": symbol}
+        row = {"symbol": symbol, "strategy": strategy}
         for col in FEATURE_COLS:
             row[col] = round(float(features.get(col, 0.0)), 4)
 
@@ -122,19 +114,25 @@ class DataCollector:
         row["target_excursion"] = round(excursion, 4)
 
         try:
-            with open(self.filename, mode="a", newline="") as file:
-                writer = csv.DictWriter(file, fieldnames=headers)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(row)
+            with self._lock:
+                file_exists = os.path.isfile(self.filename)
 
-            self._current_row_count += 1
+                if self._current_row_count is None:
+                    self._current_row_count = self._get_row_count()
 
-            # Only run the heavy Pandas prune operation when over maximum + buffer
-            if self._current_row_count > self.max_rows + 500:
-                df = pd.read_csv(self.filename, on_bad_lines="skip")
-                df.tail(self.max_rows).to_csv(self.filename, index=False)
-                self._current_row_count = self.max_rows
-                logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
+                with open(self.filename, mode="a", newline="") as file:
+                    writer = csv.DictWriter(file, fieldnames=headers)
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerow(row)
+
+                self._current_row_count += 1
+
+                # Only run the heavy Pandas prune operation when over maximum + buffer
+                if self._current_row_count > self.max_rows + 500:
+                    df = pd.read_csv(self.filename, on_bad_lines="skip")
+                    df.tail(self.max_rows).to_csv(self.filename, index=False)
+                    self._current_row_count = self.max_rows
+                    logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
         except Exception as e:
             logger.error(f"Failed to log training data for {symbol}: {e}")

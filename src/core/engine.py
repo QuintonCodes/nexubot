@@ -1,6 +1,6 @@
 import asyncio
+import logging
 import time
-
 from datetime import datetime
 
 from src.core.services.market_scanner import MarketScanner
@@ -9,9 +9,8 @@ from src.core.services.trade_monitor import TradeMonitor
 from src.data.provider import DataProvider
 from src.database.manager import DatabaseManager
 from src.engine.ai_engine import AITradingEngine
-from src.utils.logger import setup_logging
 
-logger = setup_logging()
+logger = logging.getLogger(__name__)
 
 
 class NexubotEngine:

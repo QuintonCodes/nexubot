@@ -1,9 +1,7 @@
-import asyncio
 import logging
 import math
 import pandas as pd
 import time
-
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -33,7 +31,8 @@ class AITradingEngine:
 
     def __init__(self):
         self.strategy_analyzer = StrategyAnalyzer()
-        self.nn_brain = NeuralPredictor()
+        self.nn_brain = NeuralPredictor(auto_load=True)
+        self.collector = DataCollector()
 
         self._log_throttle = {}
         self.active_features = {}
@@ -119,9 +118,11 @@ class AITradingEngine:
         else:
             opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < entry_price]
 
-        nearest_opposing_poi = None
-        if opposing_pois:
-            nearest_opposing_poi = min(opposing_pois) if signal["direction"] == "LONG" else max(opposing_pois)
+        nearest_opposing_poi = (
+            min(opposing_pois)
+            if signal["direction"] == "LONG" and opposing_pois
+            else (max(opposing_pois) if opposing_pois else None)
+        )
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
@@ -137,7 +138,6 @@ class AITradingEngine:
             ref_price = entry_price if order_type == "LIMIT" else ask
             sl_price = ref_price - sl_dist
 
-            # Cap TP just beneath the nearest opposing liquidity wall
             max_structural_tp = (
                 (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (ref_price + base_tp_dist)
             )
@@ -185,7 +185,7 @@ class AITradingEngine:
         try:
             steps = math.floor(lots / vol_step)
             lots = steps * vol_step
-        except:
+        except (ZeroDivisionError, ValueError, OverflowError):
             lots = round(lots / vol_step) * vol_step
 
         lots = round(max(min_vol, min(lots, max_vol, self.max_lot)), 2)
@@ -251,17 +251,14 @@ class AITradingEngine:
     async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> float:
         """Determines the HTF trend direction for the given symbol using cached data when possible."""
         htf_tf = "1h"
-
-        # Cache Check
         now = time.time()
-        if symbol in self.htf_cache:
-            cache_ts = self.htf_cache[symbol]["time"]
-            cache_dt = datetime.fromtimestamp(cache_ts)
-            curr_dt = datetime.fromtimestamp(now)
 
-            # Invalidate if day changed
-            if cache_dt.day == curr_dt.day and (now - cache_ts < 3600):
-                return self.htf_cache[symbol]["trend"]
+        cache_entry = self.htf_cache.get(symbol)
+        if cache_entry:
+            age = now - cache_entry["time"]
+            same_day = datetime.fromtimestamp(cache_entry["time"]).date() == datetime.fromtimestamp(now).date()
+            if same_day and age < 3600:
+                return cache_entry["trend"]
 
         klines = await provider.fetch_klines(symbol, htf_tf, 1000)
         trend = 0.0
@@ -276,9 +273,12 @@ class AITradingEngine:
         """Prevents log spamming for the same event within 5 minutes."""
         now = time.time()
 
-        stale_keys = [k for k, timestamp in self._log_throttle.items() if now - timestamp > 3600]
-        for k in stale_keys:
-            del self._log_throttle[k]
+        if len(self._log_throttle) > 1000:
+            stale_keys = [k for k, timestamp in self._log_throttle.items() if now - timestamp > 3600]
+            for k in stale_keys:
+                del self._log_throttle[k]
+            if len(self._log_throttle) > 1000:
+                self._log_throttle.clear()
 
         if key in self._log_throttle and now - self._log_throttle[key] < 300:
             return
@@ -402,8 +402,8 @@ class AITradingEngine:
             sweep_depth_atr=snapshot["sweep_depth_atr"],
             atr=atr,
         )
-        collector = DataCollector()
-        engineered_features = collector.engineer_features(raw_features)
+
+        engineered_features = self.collector.engineer_features(raw_features)
 
         # Inference from read-only bundled model
         nn_result = self.nn_brain.predict(engineered_features)
@@ -438,7 +438,10 @@ class AITradingEngine:
         )
         if result:
             self.signal_history[symbol] = time.time()
-            self.active_features[symbol] = engineered_features
+            self.active_features[symbol] = {
+                "features": engineered_features,
+                "strategy": final_signal.get("strategy", "Unknown"),
+            }
             return result
 
         return None
@@ -521,7 +524,14 @@ class AITradingEngine:
             active_session = "ASIAN"
 
         allow_trade = is_asian or is_london or is_ny
-        return {"allow_trade": allow_trade, "active_session": active_session, "multiplier": 1.0}
+
+        SESSION_MULTIPLIERS = {"NY": 1.05, "LONDON": 1.03, "ASIAN": 0.97, "NONE": 0.90}
+
+        return {
+            "allow_trade": allow_trade,
+            "active_session": active_session,
+            "multiplier": SESSION_MULTIPLIERS[active_session],
+        }
 
     def prepare_data(self, klines: list) -> Optional[pd.DataFrame]:
         """Prepares DataFrame with indicators for analysis."""
@@ -556,7 +566,9 @@ class AITradingEngine:
         logger.info(f"🏁 Trade Closed: {symbol} | PnL: {pnl} | Won: {won}")
 
         if symbol in self.active_features:
-            features = self.active_features[symbol]
+            data = self.active_features[symbol]
+            features = data.get("features", {})
+            strategy = data.get("strategy", "Unknown")
 
             # Skip logging corrupted empty feature sets from recovered offline trades
             if not features:
@@ -566,8 +578,7 @@ class AITradingEngine:
 
             target_win = 1 if won else 0
 
-            collector = DataCollector()
-            collector.log_training_data(symbol, features, target_win, pnl, excursion)
+            self.collector.log_training_data(symbol, strategy, features, target_win, pnl, excursion)
             logger.info(f"💾 Live features for {symbol} saved to training data.")
 
             del self.active_features[symbol]

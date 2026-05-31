@@ -3,7 +3,6 @@ import logging
 import math
 import time
 import uuid
-
 from typing import Tuple
 
 from src.config import CANDLE_LIMIT, TIMEFRAME
