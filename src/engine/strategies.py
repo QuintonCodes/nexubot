@@ -55,8 +55,7 @@ class StrategyAnalyzer:
         # 5. VWAP Bounce — only when structural context supports it
         if not signal:
             vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
-            structural_break = structure.get("structural_break", 0.0)
-            signal = self._vwap_bounce(curr, vwap_val, is_liquidity_swept, structural_break)
+            signal = self._vwap_bounce(curr, vwap_val, is_liquidity_swept)
 
         if signal:
             # Rejection implementation using pre-calculated flags
@@ -257,6 +256,9 @@ class StrategyAnalyzer:
         if is_bouncing_up and not blocked_by_bear:
             # Breaker and OB require Consequent Encroachment (CE) crossing
             for ob in valid_bull_obs:
+                if ob.get("tier") == "MAJOR":
+                    if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
+                        continue
                 if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_low <= ob["high"]:
                     ce = (ob["high"] + ob["low"]) / 2
                     # Must close past 50% CE to prove momentum
@@ -289,6 +291,9 @@ class StrategyAnalyzer:
         #   --- BEARISH CONFIRMATIONS   ---
         if is_bouncing_down and not blocked_by_bull:
             for ob in valid_bear_obs:
+                if ob.get("tier") == "MAJOR":
+                    if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
+                        continue
                 if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_high >= ob["low"]:
                     ce = (ob["high"] + ob["low"]) / 2
                     if close_price < ce:
@@ -324,7 +329,6 @@ class StrategyAnalyzer:
         curr: Union[pd.Series, dict],
         vwap_val: float,
         is_liquidity_swept: int = 0,
-        structural_break: float = 0.0,
     ) -> Optional[Dict]:
         """
         Detects bounces off the VWAP with volume and structural context validation.

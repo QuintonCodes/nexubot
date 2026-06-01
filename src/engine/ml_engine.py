@@ -103,7 +103,9 @@ class NeuralPredictor:
         self, X_scaled: np.ndarray, y_entry: np.ndarray, early_stop: EarlyStopping
     ) -> Tuple[tf.keras.Model, np.ndarray, np.ndarray]:
         """Constructs and trains the binary classification model for entries."""
-        X_train, X_cal, y_train, y_cal = train_test_split(X_scaled, y_entry, test_size=0.15, random_state=42)
+        X_train, X_cal, y_train, y_cal = train_test_split(
+            X_scaled, y_entry, test_size=0.15, random_state=42, stratify=y_entry
+        )
 
         smote = SMOTE(random_state=42, k_neighbors=5)
         X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
@@ -190,12 +192,12 @@ class NeuralPredictor:
             self.entry_model.save(ENTRY_MODEL_FILE)
         if self.exit_model:
             self.exit_model.save(EXIT_MODEL_FILE)
-
-        joblib.dump(self.calibrator, CALIBRATOR_FILE)
-        if self.calibrator:
-            joblib.dump(self.calibrator, CALIBRATOR_FILE)
+        if self.scaler:
+            joblib.dump(self.scaler, SCALER_FILE)
         if self.exit_scaler:
             joblib.dump(self.exit_scaler, EXIT_SCALER_FILE)
+        if self.calibrator:
+            joblib.dump(self.calibrator, CALIBRATOR_FILE)
 
     def predict(self, features: dict) -> Dict[str, float]:
         """Predicts entry probability, dynamic risk sizing, and optimal exit ATR."""

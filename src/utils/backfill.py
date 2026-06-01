@@ -21,7 +21,8 @@ from src.config import (
 logger = logging.getLogger(__name__)
 
 # Constants for backfill limits
-MAX_ROWS_PER_SYMBOL = 2500
+MAX_ROWS_PER_SYMBOL = 2000
+MAX_ROWS_PER_STRATEGY = 2000
 FUTURE_WINDOW_SIZE = 400
 WARMUP_PERIOD = 200
 
@@ -91,7 +92,7 @@ async def _prepare_symbol_data(
     point = symbol_info.get("point", 0.00001)
     is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
-    requested_m1 = 50000
+    requested_m1 = 90000
     requested_h1 = 15000
     klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m1)
     klines_htf = await provider.fetch_klines(symbol, "1h", requested_h1)
@@ -167,11 +168,11 @@ def _simulate_trade_outcome(
     if won == 1:
         gross_dist = abs(tp - close_price)
         pnl = gross_dist / atr if atr > 0 else 0.0
-        target_excursion = gross_dist / atr if atr > 0 else 0.0
     else:
         gross_dist = abs(sl - close_price)
         pnl = -gross_dist / atr if atr > 0 else 0.0
-        target_excursion = max_favorable / atr if atr > 0 else 0.0
+
+    target_excursion = max_favorable / atr if atr > 0 else 0.0
 
     return won, pnl, target_excursion
 
@@ -184,6 +185,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
     strategy_analyzer = StrategyAnalyzer()
     collector = DataCollector()
     total_rows_collected = 0
+    strategy_counts = {}
 
     symbols = target_symbols or (FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
@@ -240,6 +242,15 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
             if not signal:
                 continue
 
+            # Evaluate strategy cap early to save computation
+            strat = signal.get("strategy", "Unknown")
+            if strategy_counts.get(strat, 0) >= MAX_ROWS_PER_STRATEGY:
+                continue
+
+            # Filter heavily marginal signals to avoid dataset degradation
+            if signal.get("confidence", 0.0) < 60.0:
+                continue
+
             # Trade Parameters & Filtering
             trade_params = _calculate_risk_and_tp(
                 signal, close_price, atr, point, is_volatile_asset, active_ifvgs, active_obs
@@ -277,7 +288,8 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 future_window, signal["direction"], close_price, sl, tp, atr
             )
 
-            collector.log_training_data(symbol, signal["strategy"], engineered_features, won, pnl, target_excursion)
+            strategy_counts[strat] = strategy_counts.get(strat, 0) + 1
+            collector.log_training_data(symbol, strat, engineered_features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1
 

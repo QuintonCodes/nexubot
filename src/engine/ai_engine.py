@@ -12,6 +12,7 @@ from src.database.manager import DatabaseManager
 from src.engine.ml_engine import NeuralPredictor
 from src.engine.strategies import StrategyAnalyzer
 from src.config import (
+    CANDLE_LIMIT,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MAX_LOT,
     DEFAULT_RISK_PCT,
@@ -309,16 +310,8 @@ class AITradingEngine:
         """Adjusts the confidence score of a signal based on multiple factors:"""
         base_conf = signal["confidence"]
 
-        structural_break = signal.get("structural_break_val", 0.0)
-        is_counter_trend = (htf_trend == 1.0 and signal["direction"] == "SHORT") or (
-            htf_trend == -1.0 and signal["direction"] == "LONG"
-        )
-
-        trend_bonus = (
-            -5
-            if is_counter_trend and structural_break == 0.0
-            else (10 if not is_counter_trend and structural_break != 0.0 else 0)
-        )
+        # Zero out trend bonus temporarily until aligned is validated in structural data
+        trend_bonus = 0
 
         # 2. Historical Performance
         hist_win_rate = 0.5
@@ -451,7 +444,7 @@ class AITradingEngine:
     ) -> Optional[dict]:
         """Computes a comprehensive snapshot of the market for a given symbol."""
         if not klines:
-            klines = await provider.fetch_klines(symbol, TIMEFRAME, 500)
+            klines = await provider.fetch_klines(symbol, TIMEFRAME, CANDLE_LIMIT)
             if not klines:
                 return None
 
@@ -583,10 +576,10 @@ class AITradingEngine:
 
             del self.active_features[symbol]
 
-    def register_active_trade(self, symbol: str) -> None:
+    def register_active_trade(self, symbol: str, strategy: str = "Unknown") -> None:
         """Manually marks a symbol as active (used during recovery)."""
         if symbol not in self.active_features:
-            self.active_features[symbol] = {}
+            self.active_features[symbol] = {"strategy": strategy}
 
     def set_context(self, balance: float, db: DatabaseManager, currency: str = "USD") -> None:
         """Sets user balance and database manager."""
