@@ -8,7 +8,7 @@ load_dotenv()
 # APP INFO
 # ---------------------------------------------------------
 APP_NAME = "NEXUBOT"
-VERSION = "v1.1.0"
+__version__ = "v1.1.0"
 
 # ---------------------------------------------------------
 # MT5 TERMINAL SETTINGS
@@ -45,7 +45,7 @@ SESSION_CONFIG = {
 # ---------------------------------------------------------
 # STRATEGY & RISK SETTINGS
 # ---------------------------------------------------------
-TIMEFRAME = "M1"
+TIMEFRAME = "M5"
 CANDLE_LIMIT = 3000
 DEFAULT_MIN_CONFIDENCE = 65.0
 DEFAULT_RISK_PCT = 2.0
@@ -73,18 +73,25 @@ CALIBRATOR_FILE = "nexubot_calibrator.pkl"
 TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
-    "signal_quality_score",
-    "session_quality_score",
     "log_distance_to_poi",
-    "is_in_fvg",
-    "is_in_ifvg",
     "is_htf_aligned",
     "is_liquidity_swept_tier",
     "sweep_depth_atr",
-    "pd_array_status",
     "pd_deviation_from_equilibrium",
-    "is_inside_poi_flag",
     "zone_overlap_count",
+    "body_ratio",
+    "vol_ratio",
+    "momentum_exhaustion_count",
+    "dist_to_pdh_atr",
+    "dist_to_pdl_atr",
+    "sweep_snapback_vel",
+    "dist_to_asia_extremes_atr",
+    "hour_sin",
+    "hour_cos",
+    "mins_since_kz_open",
+    "sweep_aligned",
+    "poi_vol_anomaly",
+    "session_quality_score",
 ]
 
 MAX_ROWS = 14000

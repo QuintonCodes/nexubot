@@ -24,80 +24,41 @@ class DataCollector:
         """Efficiently counts rows without loading the entire CSV into memory."""
         if not os.path.isfile(self.filename):
             return 0
-        with open(self.filename, "r", encoding="utf-8") as f:
-            return sum(1 for _ in f) - 1  # Subtract 1 for the header
+        with open(self.filename, "rb") as f:
+            return sum(1 for _ in f) - 1
 
     @staticmethod
     def engineer_features(raw_features: dict) -> dict:
         """Transforms raw SMC features into the full engineered feature set."""
         f = raw_features
 
+        # Session mappings logic
         active_killzone = int(f.get("active_killzone", 0))
-        is_in_fvg = float(f.get("is_in_fvg", 0.0))
-        is_in_ifvg = float(f.get("is_in_ifvg", 0.0))
-        is_in_orderblock = float(f.get("is_in_orderblock", 0.0))
-        distance_to_poi = float(f.get("distance_to_poi", 0.0))
-        mitigation_count = float(f.get("mitigation_count", 0.0))
-        structural_break = float(f.get("structural_break", 0.0))
-        is_htf_aligned = float(f.get("is_htf_aligned", 0.0))
-        pd_array_status = float(f.get("pd_array_status", 0.5))
-        sweep_depth_atr = float(f.get("sweep_depth_atr", 0.0))
-        is_liquidity_swept = float(f.get("is_liquidity_swept", 0.0))
-
-        # Composite score
-        score = 0.0
-
         SESSION_SCORE_MAP = {0: 1.0, 1: 0.9, 2: 0.6, 3: 0.55}
-        session_score = SESSION_SCORE_MAP.get(active_killzone, 1.0)
-        score += session_score * 1.5
-
-        if is_in_fvg == 1:
-            score += 2.0
-        elif is_in_ifvg == 1:
-            score += 0.5
-        elif is_in_orderblock == 1:
-            score -= 1.0
-
-        if 0.5 <= distance_to_poi < 2.0:
-            score += 1.5
-        elif distance_to_poi < 0.3:
-            score -= 1.5
-        elif distance_to_poi >= 4.0:
-            score -= 0.5
-
-        mit = int(mitigation_count)
-        if mit == 0:
-            score += 1.0
-        elif mit == 1:
-            score += 0.5
-        elif mit >= 2:
-            score -= 0.5
-
-        if structural_break in (-2.0, 2.0):
-            score += 1.0
-        elif structural_break in (-1.0, 1.0):
-            score += 0.3
-        else:
-            score -= 0.2
-
-        if is_htf_aligned == 1.0:
-            score += 0.5
-        elif is_htf_aligned == -1.0:
-            score -= 0.3
+        session_quality_score = SESSION_SCORE_MAP.get(active_killzone, 1.0)
+        pd_array_status = f.get("pd_array_status", 0.5)
+        raw_distance = max(0.0, float(f.get("distance_to_poi", 0.0)))
 
         return {
-            "signal_quality_score": round(score, 2),
-            "session_quality_score": session_score,
-            "log_distance_to_poi": round(float(np.log1p(distance_to_poi)), 4),
-            "is_in_fvg": is_in_fvg,
-            "is_in_ifvg": is_in_ifvg,
-            "is_htf_aligned": is_htf_aligned,
-            "is_liquidity_swept_tier": is_liquidity_swept,
-            "sweep_depth_atr": sweep_depth_atr,
-            "pd_array_status": round(pd_array_status, 4),
+            "log_distance_to_poi": round(float(np.log1p(raw_distance)), 4),
+            "is_htf_aligned": float(f.get("is_htf_aligned", 0.0)),
+            "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
+            "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
             "pd_deviation_from_equilibrium": round(abs(pd_array_status - 0.5), 4),
-            "is_inside_poi_flag": float(distance_to_poi < 0.30),
-            "zone_overlap_count": float(int(is_in_fvg) + int(is_in_ifvg) + int(is_in_orderblock)),
+            "zone_overlap_count": float(f.get("zone_overlap_count", 0.0)),
+            "body_ratio": round(f.get("body_ratio", 0.0), 4),
+            "vol_ratio": round(f.get("vol_ratio", 0.0), 4),
+            "momentum_exhaustion_count": float(f.get("momentum_exhaustion_count", 0.0)),
+            "dist_to_pdh_atr": round(f.get("dist_to_pdh_atr", 0.0), 4),
+            "dist_to_pdl_atr": round(f.get("dist_to_pdl_atr", 0.0), 4),
+            "sweep_snapback_vel": round(f.get("sweep_snapback_vel", 0.0), 4),
+            "dist_to_asia_extremes_atr": round(f.get("dist_to_asia_extremes_atr", 0.0), 4),
+            "hour_sin": round(f.get("hour_sin", 0.0), 4),
+            "hour_cos": round(f.get("hour_cos", 0.0), 4),
+            "mins_since_kz_open": float(f.get("mins_since_kz_open", 0.0)),
+            "sweep_aligned": float(f.get("sweep_aligned", 0.0)),
+            "poi_vol_anomaly": round(f.get("poi_vol_anomaly", 0.0), 4),
+            "session_quality_score": session_quality_score,
         }
 
     def log_training_data(
@@ -132,7 +93,11 @@ class DataCollector:
                 # Only run the heavy Pandas prune operation when over maximum + buffer
                 if self._current_row_count > self.max_rows + 500:
                     df = pd.read_csv(self.filename, on_bad_lines="skip")
-                    df.tail(self.max_rows).to_csv(self.filename, index=False)
+
+                    temp_file = self.filename + ".tmp"
+                    df.tail(self.max_rows).to_csv(temp_file, index=False)
+                    os.replace(temp_file, self.filename)
+
                     self._current_row_count = self.max_rows
                     logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
         except Exception as e:

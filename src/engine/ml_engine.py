@@ -4,13 +4,13 @@ import numpy as np
 import os
 import pandas as pd
 import tensorflow as tf
-from imblearn.over_sampling import SMOTE
 from keras.callbacks import EarlyStopping
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 from typing import Dict, Optional, Tuple
 
 from src.config import (
@@ -76,14 +76,11 @@ class NeuralPredictor:
             return None
 
         df = pd.read_csv(data_file, on_bad_lines="skip")
-
-        # Ensure all required feature columns exist
         for col in FEATURE_COLS:
             if col not in df.columns:
                 df[col] = 0.0
 
         df = df.dropna(subset=FEATURE_COLS + ["target_win"])
-
         if len(df) < 50:
             logger.warning(f"⚠️ Insufficient data ({len(df)} rows). Need 50+ to train.")
             return None
@@ -107,8 +104,14 @@ class NeuralPredictor:
             X_scaled, y_entry, test_size=0.15, random_state=42, stratify=y_entry
         )
 
-        smote = SMOTE(random_state=42, k_neighbors=5)
-        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        classes = np.unique(y_train)
+        if len(classes) > 1:
+            weights = compute_class_weight("balanced", classes=classes, y=y_train)
+            class_weight_dict = dict(zip(classes, weights))
+            logger.info(f"⚖️ Applied Dynamic Class Weights: {class_weight_dict}")
+        else:
+            logger.warning("⚠️ Only one target class found in training split! Falling back to 1.0 weights.")
+            class_weight_dict = {0: 1.0, 1: 1.0}
 
         model = tf.keras.models.Sequential(
             [
@@ -122,12 +125,13 @@ class NeuralPredictor:
 
         model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
         model.fit(
-            X_train_res,
-            y_train_res,
+            X_train,
+            y_train,
             epochs=150,
             batch_size=32,
             verbose=1,
             validation_split=0.15,
+            class_weight=class_weight_dict,
             callbacks=[early_stop],
         )
 
@@ -142,16 +146,14 @@ class NeuralPredictor:
             return None
 
         X_winners = winning_df[FEATURE_COLS]
-
-        # Instantiate and fit a distinct scaler solely on the winner distribution
         self.exit_scaler = StandardScaler()
         X_winners_scaled = self.exit_scaler.fit_transform(X_winners)
 
-        # Handle missing excursion target
-        if "target_excursion" in winning_df.columns:
-            y_exit = winning_df["target_excursion"]
-        else:
-            y_exit = pd.Series([3.0] * len(winning_df))
+        y_exit = (
+            winning_df["target_excursion"]
+            if "target_excursion" in winning_df.columns
+            else pd.Series([3.0] * len(winning_df))
+        )
 
         model = tf.keras.models.Sequential(
             [
@@ -177,7 +179,6 @@ class NeuralPredictor:
     def _train_calibrator(self, X_cal: np.ndarray, y_cal: np.ndarray) -> IsotonicRegression:
         """Trains the Isotonic Regression model to align raw probabilities with reality."""
         raw_probs = self.entry_model.predict(X_cal, verbose=0).flatten()
-
         if np.std(raw_probs) < 1e-4:
             logger.warning("Raw probabilities have no variance. Skipping calibration.")
             return None
@@ -233,6 +234,20 @@ class NeuralPredictor:
         if df is None:
             return
 
+        expected_sparse_features = [
+            "is_htf_aligned",
+            "sweep_aligned",
+            "momentum_exhaustion_count",
+            "sweep_snapback_vel",
+            "poi_vol_anomaly",
+            "dist_to_asia_extremes_atr",
+        ]
+
+        for col in FEATURE_COLS:
+            zero_pct = (df[col] == 0.0).mean()
+            if zero_pct > 0.95 and col not in expected_sparse_features:
+                logger.warning(f"⚠️ Schema mismatch detected: {col} is >95% zeros. Consider wiping legacy ML data.")
+
         try:
             X = df[FEATURE_COLS]
             y_entry = df["target_win"].values
@@ -244,10 +259,11 @@ class NeuralPredictor:
             auc_test = cross_val_score(rf, X_scaled, y_entry, cv=3, scoring="roc_auc").mean()
             logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
 
-            if auc_test < 0.53:
-                logger.warning(
-                    "⚠️ AUC below threshold — engineered features carry insufficient signal. Continuing build sequence passively."
+            if auc_test < 0.56:
+                logger.error(
+                    "🛑 AUC below threshold (0.56) — engineered features carry insufficient signal. Aborting to protect live deployment."
                 )
+                return
 
             entry_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
             exit_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=1)
@@ -260,7 +276,9 @@ class NeuralPredictor:
             logger.info(f"📊 Live Validation AUC: {val_auc:.4f}")
 
             if val_auc < 0.53:
-                logger.warning("⚠️ New model critically underperforms. Keeping existing artifacts intact.")
+                logger.error(
+                    "🛑 AUC below threshold (0.56) — engineered features carry insufficient signal. Aborting to protect live deployment."
+                )
                 return
 
             # 3. Train Exit Model

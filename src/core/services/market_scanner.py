@@ -26,6 +26,8 @@ class MarketScanner:
     def __init__(self, engine):
         self.engine = engine
         self.cached_dfs = {}
+        self._active_signals_lock = asyncio.Lock()
+        self._currently_scanning = set()
 
     async def _process_batch(self, symbols: list) -> None:
         """Processes a batch of symbols to find trading signals."""
@@ -38,44 +40,53 @@ class MarketScanner:
             if not self.engine.is_running or signals_found >= MAX_SIGNALS_PER_SCAN:
                 break
 
-            active_syms = [s.get("symbol") for s in self.engine.active_signals]
+            # 1. State Validation Lock
+            async with self._active_signals_lock:
+                if sym in self._currently_scanning:
+                    continue
 
-            # Risk Budget Preserver: Correlation blocking
-            if sym == "ETHUSDm" and any("BTC" in s for s in active_syms):
-                continue
-            if sym == "BTCUSDm" and any("ETH" in s for s in active_syms):
-                continue
-            if "NAS" in sym and any("US30" in s for s in active_syms):
-                continue
-            if "US30" in sym and any("NAS" in s for s in active_syms):
-                continue
+                active_syms = [s.get("symbol") for s in self.engine.active_signals]
 
-            if sym in active_syms:
-                continue
+                if sym == "ETHUSDm" and any("BTC" in s for s in active_syms):
+                    continue
+                if sym == "BTCUSDm" and any("ETH" in s for s in active_syms):
+                    continue
 
-            klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
-            if klines:
-                # Store lightweight df for sorting without requiring fresh MT5 calls
-                df = self.engine.ai_engine.prepare_data(klines)
-                if df is not None and not df.empty:
-                    self.cached_dfs[sym] = df.tail(2)
+                if sym in active_syms:
+                    continue
 
-                signal = await self.engine.ai_engine.analyze_market(sym, klines, self.engine.provider)
-                if signal:
-                    signal.setdefault("symbol", sym)
-                    signal["detected_at"] = time.time()
-                    signals_found += 1
+                # Mark as scanning to block concurrent overlapping batch intervals
+                self._currently_scanning.add(sym)
 
-                    self.engine.active_signals.append(signal)
+            try:
+                klines = await self.engine.provider.fetch_klines(sym, TIMEFRAME, CANDLE_LIMIT)
+                if klines:
+                    df = self.engine.ai_engine.prepare_data(klines)
+                    if df is not None and not df.empty:
+                        self.cached_dfs[sym] = df.tail(2)
 
-                    # 1. Alert via Telegram
-                    if hasattr(self.engine, "notifier"):
-                        self.engine.notifier.send_signal_alert(sym, signal)
+                    signal = await self.engine.ai_engine.analyze_market(sym, klines, self.engine.provider)
+                    if signal:
+                        signal.setdefault("symbol", sym)
+                        signal["detected_at"] = time.time()
+                        signals_found += 1
 
-                    # 2. Start monitoring the trade for TP/SL
-                    self.engine.monitored_tasks[sym] = asyncio.create_task(
-                        self.engine.monitor.verify_trade_realtime(sym, signal)
-                    )
+                        async with self._active_signals_lock:
+                            self.engine.active_signals.append(signal)
+
+                        # 1. Alert via Telegram
+                        if hasattr(self.engine, "notifier"):
+                            self.engine.notifier.send_signal_alert(sym, signal)
+
+                        # 2. Start monitoring the trade for TP/SL
+                        self.engine.monitored_tasks[sym] = asyncio.create_task(
+                            self.engine.monitor.verify_trade_realtime(sym, signal)
+                        )
+            finally:
+                # Always release the scanning lock, even if MT5 fails or throws an error
+                async with self._active_signals_lock:
+                    if sym in self._currently_scanning:
+                        self._currently_scanning.remove(sym)
 
     async def _refresh_market_watch_symbols(self) -> None:
         """Fetches the latest list of symbols from the provider and updates the engine's active lists."""
@@ -85,11 +96,13 @@ class MarketScanner:
         self.engine.active_indices_list = data.get("indices", [])
         self.engine.active_metals_list = data.get("metals", [])
 
-        if (
-            not self.engine.active_crypto_list
-            and not self.engine.active_forex_list
-            and not self.engine.active_indices_list
-            and not self.engine.active_metals_list
+        if not any(
+            [
+                self.engine.active_crypto_list,
+                self.engine.active_forex_list,
+                self.engine.active_indices_list,
+                self.engine.active_metals_list,
+            ]
         ):
             self.engine.active_crypto_list = list(FALLBACK_CRYPTO)
             self.engine.active_forex_list = list(FALLBACK_FOREX)
@@ -106,13 +119,7 @@ class MarketScanner:
         """Main loop for continuously scanning the market for new signals and managing active trades."""
         logger.info("🚀 Scanner Loop Initiated...")
 
-        last_crypto = 0
-        last_forex = 0
-        last_indices = 0
-        last_metals = 0
-
-        last_sort_time = 0
-
+        last_crypto, last_forex, last_indices, last_metals, last_sort_time = 0, 0, 0, 0, 0
         await self._refresh_market_watch_symbols()
 
         while self.engine.is_running:

@@ -47,7 +47,7 @@ class DataProvider:
                 subprocess.run(
                     ["taskkill", "/F", "/IM", "terminal64.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                logger.info("⚠️ Forced kill of terminal64.exe")
+                logger.info("⚠️ Forced kill of terminal64.exe executed to recover connection.")
         except Exception as e:
             logger.error(f"Failed to kill terminal: {e}")
 
@@ -73,8 +73,6 @@ class DataProvider:
                     self.connected = True
                     return True
                 else:
-                    # Terminal is open, but wrong account (or not logged in).
-                    # Fall through to force a fresh login below.
                     self.connected = False
 
             # 1. Validate Path
@@ -246,7 +244,7 @@ class DataProvider:
             "d1": mt5.TIMEFRAME_D1,
             "1d": mt5.TIMEFRAME_D1,
         }
-        mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M1)
+        mt5_tf = tf_map.get(timeframe_str.lower(), mt5.TIMEFRAME_M5)
 
         return await asyncio.to_thread(self._sync_get_rates, symbol, mt5_tf, limit)
 
@@ -285,7 +283,6 @@ class DataProvider:
             self.spread_cache[symbol] = deque(maxlen=10)
 
         self.spread_cache[symbol].append(spread_raw)
-
         avg_spread = sum(self.spread_cache[symbol]) / len(self.spread_cache[symbol])
 
         return {"spread": spread_raw, "avg_spread": avg_spread, "spread_high": False}
@@ -308,7 +305,7 @@ class DataProvider:
             path = info.path.lower()
             if "crypto" in path or "bitcoin" in path:
                 result = "CRYPTO"
-            if "indices" in path or "nas" in path:
+            if "indices" in path:
                 result = "INDICES"
             elif "metals" in path or "gold" in path or "silver" in path:
                 result = "METALS"
@@ -322,7 +319,7 @@ class DataProvider:
                 result = "METALS"
             elif any(base in s for base in ["BTC", "ETH", "SOL", "XRP"]):
                 result = "CRYPTO"
-            elif any(base in s for base in ["US30", "NAS", "GER30"]):
+            elif any(base in s for base in ["US30", "GER30"]):
                 result = "INDICES"
             else:
                 result = "FOREX"

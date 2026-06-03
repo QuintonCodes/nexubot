@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from src.analysis.indicators import TechnicalAnalyzer
 from src.data.collector import DataCollector
-from src.config import TIMEFRAME, VERSION
+from src.config import TIMEFRAME, __version__
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ class TelegramNotifier:
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.engine = engine
+        self.msg_queue = asyncio.Queue()
 
         # Initialize focused_symbols dynamically for the scanner to read
         if self.engine:
@@ -43,6 +44,13 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("analyze", self.cmd_analyze))
         self.app.add_handler(CommandHandler("focus", self.cmd_focus))
         self.app.add_error_handler(self._error_handler)
+
+    async def _drain_queue(self):
+        """Background daemon processing the telegram message queue."""
+        while True:
+            text = await self.msg_queue.get()
+            await self._safe_send(self.chat_id, text)
+            self.msg_queue.task_done()
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Silently handles Telegram network timeouts to prevent console crashes."""
@@ -71,7 +79,7 @@ class TelegramNotifier:
             return
 
         symbol = context.args[0]
-        await update.message.reply_text(f"🔍 *Deep SMC Scanning {symbol} ...*", parse_mode="Markdown")
+        await update.message.reply_text(f"🔍 *Deep SMC Scanning {symbol}...*", parse_mode="Markdown")
 
         try:
             snapshot = await self.engine.ai_engine.compute_market_snapshot(symbol, self.engine.provider)
@@ -132,12 +140,11 @@ class TelegramNotifier:
             win_prob = adjusted_signal["confidence"]
             trend_bonus = 10 if adjusted_signal["confidence"] > final_signal["confidence"] else 0
 
-            # Formatting Display Variables for Telegram Readability
             # HTF Map
             htf_text = "BULLISH 🐂" if htf_trend == 1.0 else ("BEARISH 🐻" if htf_trend == -1.0 else "FLAT ➖")
 
             # PD Array Map
-            pd_status = engineered_features["pd_array_status"]
+            pd_status = structure.get("pd_array", 0.5)
             pd_text = "Equilibrium"
             if pd_status <= 0.4:
                 pd_text = f"Discount 🟢 ({pd_status:.2f})"
@@ -145,7 +152,7 @@ class TelegramNotifier:
                 pd_text = f"Premium 🔴 ({pd_status:.2f})"
 
             # Structure Break Map
-            struct_break = engineered_features["structural_break"]
+            struct_break = raw_features.get("structural_break", 0.0)
             break_text = "None"
             if struct_break == 1.0:
                 break_text = "Bullish BOS 📈"
@@ -179,17 +186,17 @@ class TelegramNotifier:
 
             msg = (
                 f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
-                f"🌍 *Session Profile:* {engineered_features.get('session_quality_score', 1.0):.2f} ({killzone_name})\n"
+                f"🌍 *Session Profile:* ({killzone_name})\n"
                 f"📊 *HTF Flow (1H):* {htf_text}\n"
                 f"🧭 *Local Flow ({TIMEFRAME}):* {structure['structure']} | Break: {break_text}\n"
                 f"📏 *PD Array:* Price in {pd_text}\n"
                 f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs\n"
-                f"🎯 *Nearest POI Status:* {engineered_features.get('distance_to_poi', 0.0):.1f} ATR Away | Freshness: {engineered_features.get('poi_freshness_score', 0.0):.2f}\n"
+                f"🎯 *Nearest POI Status:* {raw_features.get('distance_to_poi', 0.0):.1f} ATR Away\n"
                 f"🧹 *Sweep Status:* {sweep_text}\n"
                 f"🌊 *VWAP State:* {vwap_trend}\n\n"
+                f"⚡ *Momentum & Vol:* Vol Ratio {engineered_features.get('vol_ratio', 1.0):.2f}x | Body Ratio {engineered_features.get('body_ratio', 0.0):.2f}\n\n"
                 f"🤖 *Neural Output:*\n"
                 f"• _Trend Alignment:_ {'Aligned ✅' if trend_bonus > 0 else 'Counter ⚠️'}\n"
-                f"• _Signal Quality Score:_ *{engineered_features.get('signal_quality_score', 0.0):.2f}*\n"
                 f"• _Calculated AI Confidence:_ *{win_prob:.1f}%*\n"
                 f"• _AI Conclusion:_ {ai_thought}"
             )
@@ -218,21 +225,27 @@ class TelegramNotifier:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Sends a welcome message with instructions on how to use the bot's features."""
         await update.message.reply_text(
-            f"🚀 *Nexubot {VERSION} Online*\n"
+            f"🚀 *Nexubot {__version__} Online*\n"
             f"• `/analyze [SYMBOL]` to run a deep SMC scan.\n"
             f"• `/focus [SYMBOLS]` to isolate specific pairs (e.g., `/focus XAUUSDm EURUSDm`).\n"
             f"• `/focus ALL` to resume full market scanning.",
             parse_mode="Markdown",
         )
 
-    async def initialize(self) -> None:
+    async def initialize(self) -> bool:
         """Starts the telegram polling asynchronously."""
         if not self.bot_token:
-            return
-        await self.app.initialize()
-        await self.app.start()
-        await self.app.updater.start_polling()
-        logger.info("✅ Async Telegram Listener Started")
+            return False
+        try:
+            await self.app.initialize()
+            await self.app.start()
+            await self.app.updater.start_polling()
+            asyncio.create_task(self._drain_queue())
+            logger.info("✅ Async Telegram Listener Started")
+            return True
+        except Exception as e:
+            logger.error(f"⚠️ Telegram Initialization Failed: {e}")
+            return False
 
     def send_daily_report(self, wins: int, losses: int, total: int, pnl: float, currency: str) -> None:
         """Sends a comprehensive daily performance report to Telegram with win/loss breakdown and net PnL."""
@@ -253,12 +266,15 @@ class TelegramNotifier:
         """Sends a message to the configured Telegram chat asynchronously."""
         if not (self.bot_token and self.chat_id):
             return
-
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._safe_send(self.chat_id, text))
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.msg_queue.put(text))
         except RuntimeError:
-            logger.warning("Telegram message dropped contextually: no active event loop detected running.")
+            # We are outside of a running event loop (e.g., shutdown sequence)
+            try:
+                asyncio.run(self._safe_send(self.chat_id, text))
+            except Exception as e:
+                logger.warning(f"Failed to send sync Telegram message: {e}")
 
     async def send_shutdown_message(self) -> None:
         """Sends a final shutdown message with a summary of the bot's state."""
@@ -306,11 +322,11 @@ class TelegramNotifier:
     async def send_startup_message(self, win_rate: float, total_trades: int) -> None:
         """Sends a startup message with the latest performance metrics."""
         msg = (
-            f"🚀 *NEXUBOT {VERSION} ONLINE*\n\n"
+            f"🚀 *NEXUBOT {__version__} ONLINE*\n\n"
             f"🤖 *Engine Status:* Deep Learning Linked\n"
             f"📊 *Historical Win Rate:* {win_rate:.1f}%\n"
             f"🔄 *Total Trades Analyzed:* {total_trades}\n\n"
-            f"📡 _Scanning live markets for high-probability setups ..._"
+            f"📡 _Scanning live markets for high-probability setups..._"
         )
         self.send_message(msg)
 

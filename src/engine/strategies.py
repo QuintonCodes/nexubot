@@ -53,8 +53,8 @@ class StrategyAnalyzer:
             signal = self._smc_poi_reversal(curr, active_fvgs, active_obs, is_liquidity_swept)
 
         # 5. VWAP Bounce — only when structural context supports it
+        vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
         if not signal:
-            vwap_val = curr.get("vwap", 0) if isinstance(curr, dict) else curr.get("vwap", 0)
             signal = self._vwap_bounce(curr, vwap_val, is_liquidity_swept)
 
         if signal:
@@ -62,6 +62,9 @@ class StrategyAnalyzer:
             if signal["direction"] == "LONG" and not allow_long:
                 return None
             if signal["direction"] == "SHORT" and not allow_short:
+                return None
+
+            if signal["strategy"] == "FVG Bounce" and signal.get("confidence", 0) < 82.0:
                 return None
 
             signal["is_liquidity_swept"] = is_liquidity_swept

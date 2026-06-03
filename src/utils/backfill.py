@@ -92,19 +92,19 @@ async def _prepare_symbol_data(
     point = symbol_info.get("point", 0.00001)
     is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
-    requested_m1 = 90000
-    requested_h1 = 15000
-    klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m1)
+    requested_m5 = 18000
+    requested_h1 = 5000
+    klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m5)
     klines_htf = await provider.fetch_klines(symbol, "1h", requested_h1)
 
-    actual_m1 = len(klines_main) if klines_main else 0
+    actual_m5 = len(klines_main) if klines_main else 0
     actual_h1 = len(klines_htf) if klines_htf else 0
 
-    if actual_m1 < requested_m1:
-        logger.info(f"📊 {symbol}: Requested {requested_m1} M1 candles, broker capped at {actual_m1}.")
+    if actual_m5 < requested_m5:
+        logger.info(f"📊 {symbol}: Requested {requested_m5} {TIMEFRAME} candles, broker capped at {actual_m5}.")
 
-    if actual_m1 < 1000 or actual_h1 < 100:
-        logger.warning(f"⚠️ Not enough data for {symbol} (M1: {actual_m1}, H1: {actual_h1}). Skipping.")
+    if actual_m5 < 1000 or actual_h1 < 100:
+        logger.warning(f"⚠️ Not enough data for {symbol} ({TIMEFRAME}: {actual_m5}, H1: {actual_h1}). Skipping.")
         return None
 
     df_full = pd.DataFrame(klines_main).sort_values("time").reset_index(drop=True)
@@ -133,7 +133,6 @@ async def _prepare_symbol_data(
     df_full["htf_trend_mapped"] = df_full["htf_trend_mapped"].fillna(0.0)
 
     records = df_full.to_dict("records")
-
     return df_full, records, point, is_volatile_asset
 
 
@@ -148,29 +147,54 @@ def _simulate_trade_outcome(
     """Iterates through the future window to determine if the trade hits SL or TP."""
     won = 0
     max_favorable = 0.0
+    actual_tp_dist = abs(tp - close_price)
+
+    tp1 = close_price + (actual_tp_dist * 0.33) if direction == "LONG" else close_price - (actual_tp_dist * 0.33)
+    tp2 = close_price + (actual_tp_dist * 0.66) if direction == "LONG" else close_price - (actual_tp_dist * 0.66)
+
+    tp1_hit, tp2_hit, tp3_hit = False, False, False
 
     for f_curr in future_window:
         if direction == "LONG":
             max_favorable = max(max_favorable, f_curr["high"] - close_price)
+
             if f_curr["low"] <= sl:
                 break
+
+            if f_curr["high"] >= tp1 and not tp1_hit:
+                tp1_hit = True
+                sl = close_price + (atr * 0.15)
+            if f_curr["high"] >= tp2 and not tp2_hit:
+                tp2_hit = True
+                sl = tp1
             if f_curr["high"] >= tp:
-                won = 1
+                tp3_hit = True
                 break
         else:
             max_favorable = max(max_favorable, close_price - f_curr["low"])
+
             if f_curr["high"] >= sl:
                 break
+
+            if f_curr["low"] <= tp1 and not tp1_hit:
+                tp1_hit = True
+                sl = close_price - (atr * 0.15)
+            if f_curr["low"] <= tp2 and not tp2_hit:
+                tp2_hit = True
+                sl = tp1
             if f_curr["low"] <= tp:
-                won = 1
+                tp3_hit = True
                 break
 
-    if won == 1:
-        gross_dist = abs(tp - close_price)
-        pnl = gross_dist / atr if atr > 0 else 0.0
-    else:
-        gross_dist = abs(sl - close_price)
-        pnl = -gross_dist / atr if atr > 0 else 0.0
+    gross_dist = abs(sl - close_price)
+    pnl = -gross_dist / atr if atr > 0 else 0.0
+
+    if tp3_hit:
+        won, pnl = 1, actual_tp_dist / atr
+    elif tp2_hit:
+        won, pnl = 1, abs(tp2 - close_price) / atr
+    elif tp1_hit:
+        won, pnl = 1, abs(tp1 - close_price) / atr
 
     target_excursion = max_favorable / atr if atr > 0 else 0.0
 

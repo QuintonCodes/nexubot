@@ -38,6 +38,12 @@ class OfflineManager:
         pnl = 0.0
         filled_offline = order_type == "MARKET"
 
+        tp1 = signal.get("tp1")
+        tp2 = signal.get("tp2")
+        atr_buf = signal.get("atr", 0) * 0.15
+
+        tp1_hit, tp2_hit, tp3_hit = False, False, False
+
         for k in klines:
             if k["time"] < start_time:
                 continue
@@ -56,25 +62,50 @@ class OfflineManager:
                 if filled_offline:
                     continue
 
-            if filled_offline:
-                if is_long:
-                    if k["low"] <= sl:
-                        outcome = "LOSS (SL Offline)"
-                        pnl = -risk_val
-                        break
-                    if k["high"] >= tp:
-                        outcome = "WIN (TP Offline)"
-                        pnl = profit_val
-                        break
-                else:
-                    if k["high"] >= sl:
-                        outcome = "LOSS (SL Offline)"
-                        pnl = -risk_val
-                        break
-                    if k["low"] <= tp:
-                        outcome = "WIN (TP Offline)"
-                        pnl = profit_val
-                        break
+            # Multi-TP Check Sequence
+            if is_long:
+                if k["low"] <= sl:
+                    break
+
+                if tp1 and k["high"] >= tp1 and not tp1_hit:
+                    tp1_hit = True
+                    sl = entry + atr_buf
+                if tp2 and k["high"] >= tp2 and not tp2_hit:
+                    tp2_hit = True
+                    sl = tp1
+                if k["high"] >= tp:
+                    tp3_hit = True
+                    break
+            else:
+                if k["high"] >= sl:
+                    break
+
+                if tp1 and k["low"] <= tp1 and not tp1_hit:
+                    tp1_hit = True
+                    sl = entry - atr_buf
+                if tp2 and k["low"] <= tp2 and not tp2_hit:
+                    tp2_hit = True
+                    sl = tp1
+                if k["low"] <= tp:
+                    tp3_hit = True
+                    break
+
+        if outcome == "TIMEOUT (Offline)":
+            return outcome, 0.0, filled_offline
+
+        # Apply identical win/loss structure mirroring backfill
+        if tp3_hit:
+            outcome = "WIN (TP3 Offline)"
+            pnl = profit_val
+        elif tp2_hit:
+            outcome = "WIN (TP2 Offline)"
+            pnl = profit_val * 0.66
+        elif tp1_hit:
+            outcome = "WIN (TP1 Offline)"
+            pnl = profit_val * 0.33
+        else:
+            outcome = "LOSS (SL Offline)"
+            pnl = -risk_val
 
         return outcome, pnl, filled_offline
 
@@ -91,7 +122,7 @@ class OfflineManager:
             self.engine.ai_engine.register_active_trade(symbol, signal.get("strategy", "Unknown"))
 
             elapsed = time.time() - start_time
-            candles_needed = min(math.ceil(elapsed / 60) + 5, 1440)
+            candles_needed = min(math.ceil(elapsed / 300) + 5, 1440)
             klines = await self.engine.provider.fetch_klines(symbol, TIMEFRAME, min(candles_needed, CANDLE_LIMIT))
 
             currency = self.engine.session_stats.get("currency", "USD")

@@ -7,6 +7,7 @@ import time
 from functools import wraps
 from sqlalchemy import select, desc, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError, DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
 from typing import List
@@ -35,6 +36,12 @@ def db_retry(retries=3, delay=2, default_return=None):
             for i in range(retries):
                 try:
                     return await func(*args, **kwargs)
+                except (OperationalError, DBAPIError) as e:
+                    if i < retries - 1:
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error(f"DB Operational Error in {func.__name__}: {e.__class__.__name__}")
+                    break
                 except Exception as e:
                     error_msg = str(e).lower()
                     if (
@@ -214,6 +221,9 @@ class DatabaseManager:
         """
         if not self.engine:
             return 0.5
+
+        if len(self._performance_cache) > 200:
+            self._performance_cache.clear()
 
         # 1. Check Memory Cache (Valid for 10 minutes)
         if symbol in self._performance_cache:

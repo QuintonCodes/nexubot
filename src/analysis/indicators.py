@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Union
 
@@ -22,8 +23,8 @@ class TechnicalAnalyzer:
         high_low = df["high"] - df["low"]
         high_close = (df["high"] - df["close"].shift()).abs()
         low_close = (df["low"] - df["close"].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df["atr"] = tr.rolling(window=14).mean()
+        tr = np.maximum.reduce([high_low, high_close, low_close])
+        df["atr"] = pd.Series(tr).rolling(window=14).mean()
 
         # 2. Daily VWAP
         df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
@@ -63,19 +64,22 @@ class TechnicalAnalyzer:
         df["hour"] = df["datetime"].dt.hour
         asian_mask = (df["hour"] >= 2) & (df["hour"] < 10)
         df["is_asian"] = asian_mask
-
         asian_highs = df[asian_mask].groupby("date_group")["high"].max()
         asian_lows = df[asian_mask].groupby("date_group")["low"].min()
-
         df["asian_high"] = df["date_group"].map(asian_highs)
         df["asian_low"] = df["date_group"].map(asian_lows)
+
+        df["color"] = np.where(df["close"] > df["open"], 1, -1)
+        df["momentum_exhaustion_count"] = df.groupby((df["color"] != df["color"].shift()).cumsum()).cumcount()
 
         # Safely fill price-based columns before global zeroing to prevent SL Cap / VWAP corruption
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.0005)
         df["vwap"] = df["vwap"].ffill().fillna(df["close"])
         df["vol_sma_20"] = df["vol_sma_20"].ffill().fillna(1.0)
+        df["asian_high"] = df["asian_high"].ffill().fillna(df["high"])
+        df["asian_low"] = df["asian_low"].ffill().fillna(df["low"])
 
-        return df.fillna(0)
+        return df
 
     @staticmethod
     def compile_features(
@@ -93,6 +97,8 @@ class TechnicalAnalyzer:
         """Compiles the strict SMC feature set for neural network predictions and training."""
         close_price = curr["close"]
 
+        safe_atr = max(float(atr), 1e-8)
+
         # Alignment Score
         alignment_score = 0.0
         if htf_trend != 0.0:
@@ -101,43 +107,73 @@ class TechnicalAnalyzer:
             alignment_score = 1.0 if (is_long_aligned or is_short_aligned) else -1.0
 
         # Killzone Map
-        dt_hour = (
-            curr["datetime"].hour
-            if "datetime" in curr and isinstance(curr["datetime"], pd.Timestamp)
-            else pd.to_datetime(curr.get("time"), unit="s").hour
+        dt = (
+            curr["datetime"]
+            if isinstance(curr.get("datetime"), pd.Timestamp)
+            else pd.to_datetime(curr.get("time"), unit="s")
         )
+        h, m = dt.hour, dt.minute
 
         active_killzone = 0.0
-        if SESSION_CONFIG["ASIAN_START"] <= dt_hour < SESSION_CONFIG["ASIAN_END"]:
+        kz_start = 0
+        if SESSION_CONFIG["ASIAN_START"] <= h < SESSION_CONFIG["ASIAN_END"]:
             active_killzone = 1.0
-        elif SESSION_CONFIG["LONDON_START"] <= dt_hour < SESSION_CONFIG["LONDON_END"]:
+            kz_start = SESSION_CONFIG["ASIAN_START"]
+        elif SESSION_CONFIG["LONDON_START"] <= h < SESSION_CONFIG["LONDON_END"]:
             active_killzone = 2.0
-        elif SESSION_CONFIG["NY_START"] <= dt_hour < SESSION_CONFIG["NY_END"]:
+            kz_start = SESSION_CONFIG["LONDON_START"]
+        elif SESSION_CONFIG["NY_START"] <= h < SESSION_CONFIG["NY_END"]:
             active_killzone = 3.0
+            kz_start = SESSION_CONFIG["NY_START"]
 
         # Distance & Mitigation Tracking
         dist_nearest_poi_atr = 0.0
-        mitigation_count = 0
         all_zones = active_fvgs + active_ifvgs + active_obs
-
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
             raw_distance = min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price))
-            dist_nearest_poi_atr = raw_distance / atr if atr > 0 else 0.0
-            mitigation_count = nearest_poi.get("mitigations", 0)
+            dist_nearest_poi_atr = raw_distance / safe_atr
+
+        # Using decimal hour for smooth, continuous sinusoidal waves
+        decimal_hour = h + (m / 60.0)
+        hour_sin = math.sin(2 * math.pi * decimal_hour / 24.0)
+        hour_cos = math.cos(2 * math.pi * decimal_hour / 24.0)
+
+        body_ratio = abs(close_price - curr["open"]) / (curr["high"] - curr["low"] + 1e-10)
+        vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
+
+        pdh, pdl = curr.get("pdh"), curr.get("pdl")
+        dist_to_pdh_atr = abs(close_price - pdh) / safe_atr if pdh else 0.0
+        dist_to_pdl_atr = abs(close_price - pdl) / safe_atr if pdl else 0.0
+
+        ah, al = curr.get("asian_high"), curr.get("asian_low")
+        dist_to_asia_extremes_atr = min(abs(close_price - ah), abs(close_price - al)) / safe_atr if ah and al else 0.0
+
+        mins_since_kz_open = float((h - kz_start) * 60 + m) if kz_start != 0 else 0.0
+        sweep_aligned = 1.0 if (is_liquidity_swept >= 2 and alignment_score == 1.0) else 0.0
+        poi_vol_anomaly = vol_ratio if dist_nearest_poi_atr < 0.5 else 0.0
+        sweep_snapback_vel = abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0
 
         return {
             "is_htf_aligned": alignment_score,
-            "is_liquidity_swept": float(is_liquidity_swept),
-            "is_in_fvg": 1.0 if any(f["low"] <= close_price <= f["high"] for f in active_fvgs) else 0.0,
-            "is_in_ifvg": 1.0 if any(i_f["low"] <= close_price <= i_f["high"] for i_f in active_ifvgs) else 0.0,
-            "is_in_orderblock": 1.0 if any(o["low"] <= close_price <= o["high"] for o in active_obs) else 0.0,
-            "structural_break": structure_info.get("structural_break", 0.0),
+            "is_liquidity_swept_tier": float(is_liquidity_swept),
+            "pd_array_status": structure_info.get("pd_array", 0.5),
             "active_killzone": active_killzone,
             "distance_to_poi": dist_nearest_poi_atr,
-            "pd_array_status": structure_info.get("pd_array", 0.5),
-            "mitigation_count": float(mitigation_count),
             "sweep_depth_atr": sweep_depth_atr,
+            "zone_overlap_count": float(len([z for z in all_zones if z["low"] <= close_price <= z["high"]])),
+            "body_ratio": body_ratio,
+            "vol_ratio": vol_ratio,
+            "momentum_exhaustion_count": float(curr.get("momentum_exhaustion_count", 0)),
+            "dist_to_pdh_atr": dist_to_pdh_atr,
+            "dist_to_pdl_atr": dist_to_pdl_atr,
+            "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
+            "hour_sin": hour_sin,
+            "hour_cos": hour_cos,
+            "mins_since_kz_open": mins_since_kz_open,
+            "sweep_aligned": sweep_aligned,
+            "poi_vol_anomaly": poi_vol_anomaly,
+            "sweep_snapback_vel": sweep_snapback_vel,
         }
 
     @staticmethod
@@ -168,7 +204,6 @@ class TechnicalAnalyzer:
             magnitude = 10 ** math.floor(math.log10(price))
             step = magnitude / 10 if magnitude > 10 else 1.0
             closest_round = round(price / step) * step
-            # If price swept a major round number and returned
             return min(abs(high - closest_round), abs(low - closest_round)) < (atr * 0.5)
 
         # Tier 3: Daily Sweeps & Asian Range Manipulations
@@ -197,7 +232,7 @@ class TechnicalAnalyzer:
         elif major_high_50 and recent_high_5 > major_high_50 and close_price < major_high_50:
             is_swept, sweep_depth = 2, (recent_high_5 - major_high_50) / atr
         elif is_round_number_sweep(close_price, recent_high_5, recent_low_5):
-            is_swept, sweep_depth = 2, 0.5  # Fixed default depth for psychological pools
+            is_swept, sweep_depth = 2, 0.5
 
         # Tier 1: Internal Sweeps (Local Structural Pivots)
         elif last_low and recent_low_5 < last_low and close_price > last_low:

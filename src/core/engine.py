@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-from datetime import datetime
 
 from src.core.services.market_scanner import MarketScanner
 from src.core.services.offline_manager import OfflineManager
@@ -29,13 +28,14 @@ class NexubotEngine:
         self.is_running = False
         self.system_status = "IDLE"  # IDLE, BACKFILLING, TRAINING
         self.session_id = f"SESSION_{int(time.time())}"
+
         self.session_stats = {
             "wins": 0,
             "losses": 0,
             "total": 0,
             "pnl": 0.0,
             "currency": "USD",
-            "start": datetime.now(),
+            "start": time.now(),
         }
 
         self.active_signals = []
@@ -44,7 +44,6 @@ class NexubotEngine:
         self.active_forex_list = []
         self.active_indices_list = []
         self.active_metals_list = []
-        self.session_start = time.time()
 
     async def initialize_connection(self, login_id: int, server: str, password: str, mt5_path=None) -> bool:
         """Initializes connection to MT5 with provided credentials. If already connected, it will skip re-initialization."""
@@ -106,18 +105,21 @@ class NexubotEngine:
                 pass
 
         # Cancel monitoring tasks
-        for symbol, task in self.monitored_tasks.items():
+        for task in list(self.monitored_tasks.values()):
             if not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except Exception as e:
+                    logger.error(f"A monitored task surfaced an error during shutdown: {e}")
 
         self.monitored_tasks.clear()
         self.active_signals.clear()
 
-        await self.db.log_session(self.session_id, self.session_stats["start"].timestamp(), self.session_stats)
+        await self.db.log_session(self.session_id, self.session_stats["start"], self.session_stats)
+
         await self.db.close()
         await self.provider.shutdown()
         return True

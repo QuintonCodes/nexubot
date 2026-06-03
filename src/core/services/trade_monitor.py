@@ -16,22 +16,25 @@ class TradeMonitor:
         """Silently tracks if TP3 is eventually hit after an early Breakeven/TP1 exit."""
         logger.info(f"👻 Ghost tracking {symbol} for TP3 hit ...")
         start = time.time()
-        while time.time() - start < 14400 and self.engine.is_running:  # Track up to 4 hrs
-            tick = await self.engine.provider.get_current_tick(symbol)
-            if not tick:
+        try:
+            while time.time() - start < 14400 and self.engine.is_running:  # Track up to 4 hrs
+                tick = await self.engine.provider.get_current_tick(symbol)
+                if not tick:
+                    await asyncio.sleep(2)
+                    continue
+
+                curr_price = tick.bid if is_long else tick.ask
+                hit_tp3 = curr_price >= tp3 if is_long else curr_price <= tp3
+
+                if hit_tp3:
+                    pips = (tp3 - entry) / (point * 10) if is_long else (entry - tp3) / (point * 10)
+                    msg = f"👻 *Ghost Tracker Update:* {symbol} eventually hit TP3 for a theoretical {pips:.1f} Pips!"
+                    self.engine.notifier.send_message(msg)
+                    break
+
                 await asyncio.sleep(2)
-                continue
-
-            curr_price = tick.bid if is_long else tick.ask
-            hit_tp3 = curr_price >= tp3 if is_long else curr_price <= tp3
-
-            if hit_tp3:
-                pips = (tp3 - entry) / (point * 10) if is_long else (entry - tp3) / (point * 10)
-                msg = f"👻 *Ghost Tracker Update:* {symbol} eventually hit TP3 for a theoretical {pips:.1f} Pips!"
-                self.engine.notifier.send_message(msg)
-                break
-
-            await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None) -> None:
         """Monitors an active trade in real-time for TP/SL hits, manages trailing logic, and handles post-trade processing."""
@@ -75,14 +78,15 @@ class TradeMonitor:
                     await asyncio.sleep(interval)
                     continue
 
-                current_bid = tick.bid
-                current_ask = tick.ask
+                current_bid, current_ask = tick.bid, tick.ask
 
                 #   --- 1. TRADE MONITORING (FILLED)   ---
                 curr_price = current_bid if is_long else current_ask
                 curr_dist = (current_bid - entry) if is_long else (entry - current_ask)
+
                 max_favorable_dist = max(max_favorable_dist, curr_dist)
 
+                # SL Evaluation
                 hit_sl = curr_price <= sl if is_long else curr_price >= sl
                 if hit_sl:
                     if be_stage > 0:
@@ -98,7 +102,7 @@ class TradeMonitor:
                     final_pnl = points_lost * tick_value * lot_size
                     break
 
-                # 2. Multi-TP Milestone Tracking (Trailing logic)
+                # TP1 Milestone Tracking
                 if not tp1_hit and tp1 is not None:
                     hit_tp1 = curr_price >= tp1 if is_long else curr_price <= tp1
                     if hit_tp1:
@@ -107,8 +111,9 @@ class TradeMonitor:
                         # Move SL to Breakeven (+ dynamic ATR buffer)
                         buffer = atr * 0.15
                         sl = entry + buffer if is_long else entry - buffer
-                        self.engine.notifier.send_message(f"💰 *{symbol} Hit TP1!* Moving SL to Breakeven.")
+                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP1!* Moving SL to Breakeven.")
 
+                # TP2 Milestone Tracking
                 if tp1_hit and not tp2_hit and tp2 is not None:
                     hit_tp2 = curr_price >= tp2 if is_long else curr_price <= tp2
                     if hit_tp2:
@@ -116,9 +121,9 @@ class TradeMonitor:
                         be_stage = max(be_stage, 2)
                         # Move SL to TP1
                         sl = tp1
-                        self.engine.notifier.send_message(f"💰 *{symbol} Hit TP2!* Trailing SL to TP1.")
+                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP2!* Trailing SL to TP1.")
 
-                # 3. Final TP Evaluation (TP3)
+                # TP3 Final Target
                 if tp3 is not None:
                     hit_tp3 = curr_price >= tp3 if is_long else curr_price <= tp3
                     if hit_tp3:
@@ -163,6 +168,7 @@ class TradeMonitor:
                     self.engine.session_stats["wins"] += 1
                 else:
                     self.engine.session_stats["losses"] += 1
+
                 self.engine.session_stats["total"] += 1
                 self.engine.session_stats["pnl"] += final_pnl
 
@@ -186,11 +192,12 @@ class TradeMonitor:
                 target_excursion = max_favorable_dist / atr if atr > 0 else 0.0
                 self.engine.ai_engine.record_trade_outcome(symbol, won, final_pnl, target_excursion)
 
+        except asyncio.CancelledError:
+            logger.info(f"Monitor for {symbol} cancelled.")
         except Exception as e:
             logger.error(f"Error verifying {symbol}: {e}")
         finally:
             try:
-                # Direct await instead of creating a detached task that raises errors on event loop shutdown
                 await self.engine.db.delete_active_trade(symbol)
             except Exception as e:
                 logger.error(f"Failed to delete active trade during cleanup: {e}")

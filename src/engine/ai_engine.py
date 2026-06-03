@@ -1,3 +1,4 @@
+import collections
 import logging
 import math
 import pandas as pd
@@ -35,11 +36,13 @@ class AITradingEngine:
         self.nn_brain = NeuralPredictor(auto_load=True)
         self.collector = DataCollector()
 
-        self._log_throttle = {}
+        self._log_throttle = collections.OrderedDict()
+        self._poi_cache = collections.OrderedDict()
+        self.htf_cache = collections.OrderedDict()
+        self.signal_history = collections.OrderedDict()
+
         self.active_features = {}
         self.db_manager = None
-        self.htf_cache = {}
-        self.signal_history = {}
         self.user_balance_account = 0.0
         self.currency = "USD"
 
@@ -69,10 +72,7 @@ class AITradingEngine:
         if self.user_balance_account <= 0:
             return None
 
-        # Fetch Exchange Rate if needed (Account USD -> Display ZAR)
-        usdzar_rate = 1.0
-        if self.currency == "USD":
-            usdzar_rate = await provider.get_usdzar_rate()
+        usdzar_rate = await provider.get_usdzar_rate() if self.currency == "USD" else 1.0
 
         ask, bid = tick.ask, tick.bid
         point, tick_value = info["point"], info.get("trade_tick_value", 0)
@@ -112,7 +112,6 @@ class AITradingEngine:
 
         # Determine Opposing POIs to dynamically cap Take Profit
         hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
-
         opposing_pois = []
         if signal["direction"] == "LONG":
             opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > entry_price]
@@ -127,11 +126,8 @@ class AITradingEngine:
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
-
-        # Ensure base TP is natively plotted at MIN_RR to stop auto-rejections
         pred_exit_atr = max(MIN_RR, min(float(nn_result.get("pred_exit_atr", 2.5)), 6.0))
         tp_multiplier = max(pred_exit_atr, 3.5) if self.risk_pct > 3.0 else pred_exit_atr
-
         base_tp_dist = max(atr * tp_multiplier, sl_dist * MIN_RR)
 
         # Absolute Prices
@@ -183,43 +179,30 @@ class AITradingEngine:
             return None
 
         lots = target_risk_account / risk_per_lot
+        balance_in_usd = (
+            self.user_balance_account if self.currency == "USD" else self.user_balance_account / usdzar_rate
+        )
+        max_allowed_pct = get_account_risk_caps(balance_in_usd, self.currency)
+        max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
+
+        actual_risk_account = risk_per_lot * lots
+        if actual_risk_account > max_allowed_val:
+            lots = min(lots, max_allowed_val / risk_per_lot)
+
         try:
             steps = math.floor(lots / vol_step)
             lots = steps * vol_step
-        except (ZeroDivisionError, ValueError, OverflowError):
+        except Exception:
             lots = round(lots / vol_step) * vol_step
 
         lots = round(max(min_vol, min(lots, max_vol, self.max_lot)), 2)
         actual_risk_account = risk_per_lot * lots
 
-        # Convert Account Balance to USD for tier checks if necessary
-        balance_in_usd = (
-            self.user_balance_account if self.currency == "USD" else self.user_balance_account / usdzar_rate
-        )
-
-        # Safety Cap
-        max_allowed_pct = get_account_risk_caps(balance_in_usd, self.currency)
-        max_allowed_val = self.user_balance_account * (max_allowed_pct / 100.0)
-
         # Check if risk exceeds cap
-        if actual_risk_account > max_allowed_val:
-            while actual_risk_account > max_allowed_val and lots > min_vol:
-                lots -= vol_step
-                actual_risk_account = risk_per_lot * lots
-
-            # Final check after reduction
-            lots = round(lots, 2)
-
-            if lots <= min_vol and actual_risk_account > max_allowed_val * 1.2:
-                if is_volatile_asset and (actual_risk_account <= self.user_balance_account * 0.20):
-                    pass  # Micro-Account Override
-                else:
-                    self._log_once(
-                        f"risk_{symbol}",
-                        f"Skipping {symbol}: Risk (R{actual_risk_account:.2f}) > Cap (R{max_allowed_val * 1.2:.2f})",
-                        logging.DEBUG,
-                    )
-                    return None
+        if lots <= min_vol and actual_risk_account > max_allowed_val * 1.2:
+            if not (is_volatile_asset and actual_risk_account <= self.user_balance_account * 0.20):
+                self._log_once(f"risk_{symbol}", f"Skipping {symbol}: Risk exceeds cap", logging.DEBUG)
+                return None
 
         # Profit Calculation
         profit_account = (actual_tp_dist / point) * tick_value * lots
@@ -249,17 +232,20 @@ class AITradingEngine:
         )
         return signal
 
+    def _enforce_cache_limits(self, cache_dict: collections.OrderedDict, max_size: int = 200):
+        """Safely pops the oldest items if caches grow too large."""
+        while len(cache_dict) > max_size:
+            cache_dict.popitem(last=False)
+
     async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> float:
         """Determines the HTF trend direction for the given symbol using cached data when possible."""
         htf_tf = "1h"
         now = time.time()
+        self._enforce_cache_limits(self.htf_cache)
 
         cache_entry = self.htf_cache.get(symbol)
-        if cache_entry:
-            age = now - cache_entry["time"]
-            same_day = datetime.fromtimestamp(cache_entry["time"]).date() == datetime.fromtimestamp(now).date()
-            if same_day and age < 3600:
-                return cache_entry["trend"]
+        if cache_entry and (now - cache_entry["time"]) < 3600:
+            return cache_entry["trend"]
 
         klines = await provider.fetch_klines(symbol, htf_tf, 1000)
         trend = 0.0
@@ -273,17 +259,9 @@ class AITradingEngine:
     def _log_once(self, key: str, message: str, level=logging.INFO):
         """Prevents log spamming for the same event within 5 minutes."""
         now = time.time()
-
-        if len(self._log_throttle) > 1000:
-            stale_keys = [k for k, timestamp in self._log_throttle.items() if now - timestamp > 3600]
-            for k in stale_keys:
-                del self._log_throttle[k]
-            if len(self._log_throttle) > 1000:
-                self._log_throttle.clear()
-
+        self._enforce_cache_limits(self._log_throttle, max_size=500)
         if key in self._log_throttle and now - self._log_throttle[key] < 300:
             return
-
         self._log_throttle[key] = now
         logger.log(level, message)
 
@@ -293,6 +271,7 @@ class AITradingEngine:
 
     def _is_on_cooldown(self, symbol: str) -> bool:
         """Checks if a symbol is on cooldown from last signal."""
+        self._enforce_cache_limits(self.signal_history)
         if symbol in self.signal_history:
             elapsed = time.time() - self.signal_history[symbol]
             if elapsed < PAIR_SIGNAL_COOLDOWN:
@@ -350,15 +329,15 @@ class AITradingEngine:
             if self.db_manager and await self.db_manager.check_recent_loss(symbol):
                 self._log_once(f"loss_{symbol}", f"Skipping {symbol}: Loss Cooldown Active")
                 return None
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Database check failed for {symbol}: {e}. Failing closed.")
+            return None
 
         # Defer intensive logic directly to the generalized snapshot creator
         snapshot = await self.compute_market_snapshot(symbol, provider, klines)
         if not snapshot:
             return None
 
-        atr = snapshot["atr"]
         curr = snapshot["curr"]
 
         # Spread Check
@@ -393,7 +372,7 @@ class AITradingEngine:
             structure_info=snapshot["structure"],
             is_liquidity_swept=snapshot["is_liquidity_swept"],
             sweep_depth_atr=snapshot["sweep_depth_atr"],
-            atr=atr,
+            atr=snapshot["atr"],
         )
 
         engineered_features = self.collector.engineer_features(raw_features)
@@ -406,10 +385,7 @@ class AITradingEngine:
             symbol, final_signal, nn_result["prob"], snapshot["htf_trend"], session_info["multiplier"]
         )
 
-        required_conf = self.min_confidence
-        if is_volatile_pair:
-            required_conf -= 5.0
-
+        required_conf = self.min_confidence - 5.0 if is_volatile_pair else self.min_confidence
         if final_signal["confidence"] < required_conf:
             return None
 
@@ -458,9 +434,27 @@ class AITradingEngine:
         if atr <= 0:
             atr = 1.0
 
+        records = df.to_dict("records")
+        self._enforce_cache_limits(self._poi_cache)
+
+        # Fix Med 6: O(1) Incremental POI Update
+        cache = self._poi_cache.get(symbol, {})
+        if cache and len(records) >= 3 and cache.get("last_time") == records[-2]["time"]:
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.update_pois(
+                records[-3], records[-2], curr, cache["fvgs"], cache["ifvgs"], cache["obs"]
+            )
+        else:
+            active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
+
+        self._poi_cache[symbol] = {
+            "last_time": curr["time"],
+            "fvgs": active_fvgs,
+            "ifvgs": active_ifvgs,
+            "obs": active_obs,
+        }
+
         htf_trend = await self._get_htf_trend(symbol, provider)
         structure = TechnicalAnalyzer.detect_structure(df)
-        active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
 
         curr_time = pd.to_datetime(curr["time"], unit="s")
         last_date = curr_time.date()
@@ -519,7 +513,6 @@ class AITradingEngine:
         allow_trade = is_asian or is_london or is_ny
 
         SESSION_MULTIPLIERS = {"NY": 1.05, "LONDON": 1.03, "ASIAN": 0.97, "NONE": 0.90}
-
         return {
             "allow_trade": allow_trade,
             "active_session": active_session,
@@ -545,10 +538,9 @@ class AITradingEngine:
         for sym in symbols:
             if sym in data_map:
                 df = data_map[sym]
-                if not df.empty and "atr" in df.columns:
-                    if df.iloc[-1]["close"] > 0:
-                        atr_pct = (df.iloc[-1]["atr"] / df.iloc[-1]["close"]) * 100
-                        scored.append((sym, atr_pct))
+                if not df.empty and "atr" in df.columns and df.iloc[-1]["close"] > 0:
+                    atr_pct = (df.iloc[-1]["atr"] / df.iloc[-1]["close"]) * 100
+                    scored.append((sym, atr_pct))
 
         # Sort descending (Highest Volatility first)
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -569,9 +561,7 @@ class AITradingEngine:
                 del self.active_features[symbol]
                 return
 
-            target_win = 1 if won else 0
-
-            self.collector.log_training_data(symbol, strategy, features, target_win, pnl, excursion)
+            self.collector.log_training_data(symbol, strategy, features, 1 if won else 0, pnl, excursion)
             logger.info(f"💾 Live features for {symbol} saved to training data.")
 
             del self.active_features[symbol]

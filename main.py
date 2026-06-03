@@ -10,14 +10,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from src.api.telegram_notifier import TelegramNotifier
 from src.core.engine import NexubotEngine
 from src.utils.logger import setup_logging
-from src.config import VERSION
+from src.config import __version__
 
 load_dotenv()
 setup_logging()
 
 
 async def main() -> None:
-    print(f"🚀 Booting Nexubot {VERSION} (Pure SMC Engine)...")
+    print(f"🚀 Booting Nexubot {__version__} (Pure SMC Engine)...")
     engine = NexubotEngine(None)
 
     await engine.db.init_database()
@@ -42,7 +42,9 @@ async def main() -> None:
     is_connected = await engine.initialize_connection(login, server, password, path)
 
     if is_connected:
-        await notifier.initialize()
+        tg_ready = await notifier.initialize()
+        if not tg_ready:
+            print("⚠️ Running without Telegram alerts. Check Bot Token or Connection.")
 
         # 2. Send Startup message FIRST so Telegram gets the notification immediately
         win_rate = await engine.db.get_total_historical_win_rate()

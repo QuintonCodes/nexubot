@@ -40,9 +40,7 @@ def wipe_legacy_ml_data() -> None:
 
 
 async def main() -> None:
-    print("🚀 Initiating Pure SMC Backfill Engine (M1 Timeframe)...")
-
-    # Force clean environment to prevent Neural Network crashes
+    print("🚀 Initiating Pure SMC Backfill Engine...")
     wipe_legacy_ml_data()
 
     provider = DataProvider()
