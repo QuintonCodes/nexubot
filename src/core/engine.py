@@ -35,7 +35,7 @@ class NexubotEngine:
             "total": 0,
             "pnl": 0.0,
             "currency": "USD",
-            "start": time.now(),
+            "start": time.time(),
         }
 
         self.active_signals = []
