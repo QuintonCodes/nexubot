@@ -79,12 +79,13 @@ class TechnicalAnalyzer:
         df["asian_high"] = df["asian_high"].ffill().fillna(df["high"])
         df["asian_low"] = df["asian_low"].ffill().fillna(df["low"])
 
+        df["atr_regime_percentile"] = df["atr"].rolling(100).rank(pct=True).fillna(0.5)
+
         return df
 
     @staticmethod
     def compile_features(
         curr: Union[pd.Series, dict],
-        htf_trend: float,
         signal_direction: str,
         active_fvgs: list,
         active_ifvgs: list,
@@ -93,18 +94,11 @@ class TechnicalAnalyzer:
         is_liquidity_swept: int,
         sweep_depth_atr: float,
         atr: float,
+        rr_at_entry: float = 0.0,
     ) -> Dict:
         """Compiles the strict SMC feature set for neural network predictions and training."""
         close_price = curr["close"]
-
         safe_atr = max(float(atr), 1e-8)
-
-        # Alignment Score
-        alignment_score = 0.0
-        if htf_trend != 0.0:
-            is_long_aligned = signal_direction == "LONG" and htf_trend == 1.0
-            is_short_aligned = signal_direction == "SHORT" and htf_trend == -1.0
-            alignment_score = 1.0 if (is_long_aligned or is_short_aligned) else -1.0
 
         # Killzone Map
         dt = (
@@ -114,32 +108,35 @@ class TechnicalAnalyzer:
         )
         h, m = dt.hour, dt.minute
 
-        active_killzone = 0.0
         kz_start = 0
         if SESSION_CONFIG["ASIAN_START"] <= h < SESSION_CONFIG["ASIAN_END"]:
-            active_killzone = 1.0
             kz_start = SESSION_CONFIG["ASIAN_START"]
         elif SESSION_CONFIG["LONDON_START"] <= h < SESSION_CONFIG["LONDON_END"]:
-            active_killzone = 2.0
             kz_start = SESSION_CONFIG["LONDON_START"]
         elif SESSION_CONFIG["NY_START"] <= h < SESSION_CONFIG["NY_END"]:
-            active_killzone = 3.0
             kz_start = SESSION_CONFIG["NY_START"]
 
         # Distance & Mitigation Tracking
-        dist_nearest_poi_atr = 0.0
         all_zones = active_fvgs + active_ifvgs + active_obs
+        dist_nearest_poi_atr = 0.0
+        zone_age_bars = 0.0
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
-            raw_distance = min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price))
-            dist_nearest_poi_atr = raw_distance / safe_atr
+            dist_nearest_poi_atr = (
+                min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price)) / safe_atr
+            )
+            zone_age_bars = float(nearest_poi.get("age", 0))
 
         # Using decimal hour for smooth, continuous sinusoidal waves
         decimal_hour = h + (m / 60.0)
-        hour_sin = math.sin(2 * math.pi * decimal_hour / 24.0)
-        hour_cos = math.cos(2 * math.pi * decimal_hour / 24.0)
 
-        body_ratio = abs(close_price - curr["open"]) / (curr["high"] - curr["low"] + 1e-10)
+        body = abs(close_price - curr["open"])
+        rng = curr["high"] - curr["low"] + 1e-10
+        body_ratio = body / rng
+        candle_wick_ratio = (rng - body) / rng
+        upper_wick_pct = (curr["high"] - max(curr["open"], close_price)) / safe_atr
+        lower_wick_pct = (min(curr["open"], close_price) - curr["low"]) / safe_atr
+
         vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
 
         pdh, pdl = curr.get("pdh"), curr.get("pdl")
@@ -149,16 +146,20 @@ class TechnicalAnalyzer:
         ah, al = curr.get("asian_high"), curr.get("asian_low")
         dist_to_asia_extremes_atr = min(abs(close_price - ah), abs(close_price - al)) / safe_atr if ah and al else 0.0
 
-        mins_since_kz_open = float((h - kz_start) * 60 + m) if kz_start != 0 else 0.0
-        sweep_aligned = 1.0 if (is_liquidity_swept >= 2 and alignment_score == 1.0) else 0.0
-        poi_vol_anomaly = vol_ratio if dist_nearest_poi_atr < 0.5 else 0.0
-        sweep_snapback_vel = abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0
+        sweep_recovery_speed = 0.0
+        if is_liquidity_swept > 0:
+            if signal_direction == "LONG":
+                sweep_recovery_speed = (
+                    close_price - min(curr["low"], curr.get("recent_low_5", curr["low"]))
+                ) / safe_atr
+            else:
+                sweep_recovery_speed = (
+                    max(curr["high"], curr.get("recent_high_5", curr["high"])) - close_price
+                ) / safe_atr
 
         return {
-            "is_htf_aligned": alignment_score,
             "is_liquidity_swept_tier": float(is_liquidity_swept),
             "pd_array_status": structure_info.get("pd_array", 0.5),
-            "active_killzone": active_killzone,
             "distance_to_poi": dist_nearest_poi_atr,
             "sweep_depth_atr": sweep_depth_atr,
             "zone_overlap_count": float(len([z for z in all_zones if z["low"] <= close_price <= z["high"]])),
@@ -168,12 +169,19 @@ class TechnicalAnalyzer:
             "dist_to_pdh_atr": dist_to_pdh_atr,
             "dist_to_pdl_atr": dist_to_pdl_atr,
             "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
-            "hour_sin": hour_sin,
-            "hour_cos": hour_cos,
-            "mins_since_kz_open": mins_since_kz_open,
-            "sweep_aligned": sweep_aligned,
-            "poi_vol_anomaly": poi_vol_anomaly,
-            "sweep_snapback_vel": sweep_snapback_vel,
+            "hour_sin": math.sin(2 * math.pi * decimal_hour / 24.0),
+            "hour_cos": math.cos(2 * math.pi * decimal_hour / 24.0),
+            "mins_since_kz_open": float((h - kz_start) * 60 + m) if kz_start != 0 else 0.0,
+            "sweep_snapback_vel": abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0,
+            "candle_wick_ratio": candle_wick_ratio,
+            "upper_wick_pct": upper_wick_pct,
+            "lower_wick_pct": lower_wick_pct,
+            "structure_age_bars": float(structure_info.get("bars_since_break", 0)),
+            "zone_age_bars": zone_age_bars,
+            "atr_regime_percentile": float(curr.get("atr_regime_percentile", 0.5)),
+            "prior_n_candle_direction": float(curr.get("color", 0)),  # simplified proxy
+            "rr_at_entry": rr_at_entry,
+            "sweep_recovery_speed": sweep_recovery_speed,
         }
 
     @staticmethod
@@ -208,13 +216,10 @@ class TechnicalAnalyzer:
 
         # Tier 3: Daily Sweeps & Asian Range Manipulations
         is_london = False
-        if "datetime" in curr and isinstance(curr["datetime"], pd.Timestamp):
-            is_london = 9 <= curr["datetime"].hour <= 11
-        else:
-            time_val = curr.get("time")
-            if time_val:
-                dt = pd.to_datetime(time_val, unit="s" if isinstance(time_val, (int, float)) else None)
-                is_london = 9 <= dt.hour <= 11
+        time_val = curr.get("datetime") or curr.get("time")
+        if time_val:
+            dt = time_val if isinstance(time_val, pd.Timestamp) else pd.to_datetime(time_val, unit="s")
+            is_london = 9 <= dt.hour <= 11
 
         # Tier 3: Daily Sweeps (Most Significant)
         if pdl and recent_low_5 < pdl and close_price > pdl:
@@ -286,9 +291,15 @@ class TechnicalAnalyzer:
 
         # Premium / Discount Calculation (0.0 to 1.0)
         pd_range = last_high - last_low
-        pd_array_status = 0.5
-        if pd_range > 0:
-            pd_array_status = max(0.0, min(1.0, (current_close - last_low) / pd_range))
+        pd_array_status = max(0.0, min(1.0, (current_close - last_low) / pd_range)) if pd_range > 0 else 0.5
+
+        # Approximate bars since last major structural node
+        last_pivot_idx = (
+            confirmed_df[confirmed_df["pivot_high"] | confirmed_df["pivot_low"]].index[-1]
+            if not confirmed_df[confirmed_df["pivot_high"] | confirmed_df["pivot_low"]].empty
+            else df.index[-1]
+        )
+        bars_since = df.index[-1] - last_pivot_idx
 
         return {
             "bos": bos,
@@ -298,6 +309,7 @@ class TechnicalAnalyzer:
             "last_low": last_low,
             "structural_break": structural_break,
             "pd_array": pd_array_status,
+            "bars_since_break": bars_since,
         }
 
     @staticmethod
@@ -346,16 +358,34 @@ class TechnicalAnalyzer:
     ) -> Tuple[List, List, List]:
         """Runs an incremental O(1) state update step for arrays mapping."""
         curr_low, curr_high, curr_close = curr["low"], curr["high"], curr["close"]
-
         surviving_fvgs = []
+
+        for pool in [active_fvgs, active_ifvgs, active_obs]:
+            for z in pool:
+                z["age"] = z.get("age", 0) + 1
+
         for f in active_fvgs[:]:
             if f["type"] == "BULL" and curr_low < f["low"]:
                 active_ifvgs.append(
-                    {"type": "BEAR", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                    {
+                        "type": "BEAR",
+                        "high": f["high"],
+                        "low": f["low"],
+                        "mitigations": 0,
+                        "is_touching": False,
+                        "age": 0,
+                    }
                 )
             elif f["type"] == "BEAR" and curr_high > f["high"]:
                 active_ifvgs.append(
-                    {"type": "BULL", "high": f["high"], "low": f["low"], "mitigations": 0, "is_touching": False}
+                    {
+                        "type": "BULL",
+                        "high": f["high"],
+                        "low": f["low"],
+                        "mitigations": 0,
+                        "is_touching": False,
+                        "age": 0,
+                    }
                 )
             else:
                 surviving_fvgs.append(f)
@@ -364,12 +394,9 @@ class TechnicalAnalyzer:
         for pool, pool_name in [(active_fvgs, "fvg"), (active_ifvgs, "ifvg"), (active_obs, "ob")]:
             surviving_zones = []
             for zone in pool[:]:
-                is_inside = False
-                if zone["type"] == "BULL" and curr_low <= zone["high"]:
-                    is_inside = True
-                elif zone["type"] == "BEAR" and curr_high >= zone["low"]:
-                    is_inside = True
-
+                is_inside = (zone["type"] == "BULL" and curr_low <= zone["high"]) or (
+                    zone["type"] == "BEAR" and curr_high >= zone["low"]
+                )
                 if is_inside:
                     if not zone.get("is_touching", False):
                         zone["mitigations"] += 1
@@ -382,17 +409,17 @@ class TechnicalAnalyzer:
 
                 if pool_name == "ob":
                     if zone["type"] == "BULL" and curr_close < zone["low"]:
-                        zone["type"], zone["tier"], zone["mitigations"] = "BEAR", "BREAKER", 0
+                        zone["type"], zone["tier"], zone["mitigations"], zone["age"] = "BEAR", "BREAKER", 0, 0
                         surviving_zones.append(zone)
                         continue
                     if zone["type"] == "BEAR" and curr_close > zone["high"]:
-                        zone["type"], zone["tier"], zone["mitigations"] = "BULL", "BREAKER", 0
+                        zone["type"], zone["tier"], zone["mitigations"], zone["age"] = "BULL", "BREAKER", 0, 0
                         surviving_zones.append(zone)
                         continue
                 else:
-                    if zone["type"] == "BULL" and curr_close < zone["low"]:
-                        continue
-                    if zone["type"] == "BEAR" and curr_close > zone["high"]:
+                    if (zone["type"] == "BULL" and curr_close < zone["low"]) or (
+                        zone["type"] == "BEAR" and curr_close > zone["high"]
+                    ):
                         continue
 
                 surviving_zones.append(zone)
@@ -406,11 +433,25 @@ class TechnicalAnalyzer:
         if c2_range > 0 and vol_strength >= 1.5 and (c2_body / c2_range) >= 0.70:
             if c1["high"] < curr_low and c2["close"] > c2["open"]:
                 active_fvgs.append(
-                    {"type": "BULL", "high": curr_low, "low": c1["high"], "mitigations": 0, "is_touching": False}
+                    {
+                        "type": "BULL",
+                        "high": curr_low,
+                        "low": c1["high"],
+                        "mitigations": 0,
+                        "is_touching": False,
+                        "age": 0,
+                    }
                 )
             elif c1["low"] > curr_high and c2["close"] < c2["open"]:
                 active_fvgs.append(
-                    {"type": "BEAR", "high": c1["low"], "low": curr_high, "mitigations": 0, "is_touching": False}
+                    {
+                        "type": "BEAR",
+                        "high": c1["low"],
+                        "low": curr_high,
+                        "mitigations": 0,
+                        "is_touching": False,
+                        "age": 0,
+                    }
                 )
 
         is_pivot = c1.get("pivot_high", False) or c1.get("pivot_low", False)
@@ -428,6 +469,7 @@ class TechnicalAnalyzer:
                         "vol_strength": vol_strength,
                         "mitigations": 0,
                         "is_touching": False,
+                        "age": 0,
                     }
                 )
             elif c2["close"] < c2["open"] and c1["close"] > c1["open"] and c2["close"] < c1["low"]:
@@ -440,6 +482,7 @@ class TechnicalAnalyzer:
                         "vol_strength": vol_strength,
                         "mitigations": 0,
                         "is_touching": False,
+                        "age": 0,
                     }
                 )
 

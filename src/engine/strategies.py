@@ -64,9 +64,6 @@ class StrategyAnalyzer:
             if signal["direction"] == "SHORT" and not allow_short:
                 return None
 
-            if signal["strategy"] == "FVG Bounce" and signal.get("confidence", 0) < 82.0:
-                return None
-
             signal["is_liquidity_swept"] = is_liquidity_swept
             return signal
 
@@ -134,7 +131,8 @@ class StrategyAnalyzer:
         if structure["structure"] == "BULL":
             fib_62 = last_high - (range_size * 0.618)
             fib_79 = last_high - (range_size * 0.786)
-            if fib_79 <= close_price <= fib_62 and curr["close"] > curr["open"]:
+            vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
+            if fib_79 <= close_price <= fib_62 and curr["close"] > curr["open"] and vol_ratio > 1.2:
                 return {
                     "strategy": "ICT OTE (Bullish)",
                     "signal": "BUY",
@@ -146,7 +144,8 @@ class StrategyAnalyzer:
         elif structure["structure"] == "BEAR":
             fib_62 = last_low + (range_size * 0.618)
             fib_79 = last_low + (range_size * 0.786)
-            if fib_62 <= close_price <= fib_79 and curr["close"] < curr["open"]:
+            vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
+            if fib_62 <= close_price <= fib_79 and curr["close"] < curr["open"] and vol_ratio > 1.2:
                 return {
                     "strategy": "ICT OTE (Bearish)",
                     "signal": "SELL",
@@ -171,14 +170,14 @@ class StrategyAnalyzer:
             return None
 
         active_obs = active_obs or []
-        atr_buffer = curr["atr"] * 0.5
-        recent_low = curr.get("recent_low_4", 0)
-        recent_high = curr.get("recent_high_4", 0)
         close_price = curr["close"]
 
         # Ensure we are actually bouncing (candle is green for longs, red for shorts)
         is_bouncing_up = close_price > curr["open"]
         is_bouncing_down = close_price < curr["open"]
+
+        if not is_bouncing_up and not is_bouncing_down:
+            return None
 
         # Opposing Blockade Check (Don't buy into a Major Bearish OB, don't sell into a Major Bullish OB)
         blocked_by_bear = any(
@@ -193,6 +192,9 @@ class StrategyAnalyzer:
         )
 
         if is_bouncing_up and not blocked_by_bear:
+            recent_low = curr.get("recent_low_4", 0)
+            atr_buffer = curr["atr"] * 0.5
+
             for i_fvg in active_ifvgs:
                 if i_fvg.get("mitigations", 0) > 2:
                     continue
@@ -209,6 +211,9 @@ class StrategyAnalyzer:
                         }
 
         if is_bouncing_down and not blocked_by_bull:
+            recent_high = curr.get("recent_high_4", 0)
+            atr_buffer = curr["atr"] * 0.5
+
             for i_fvg in active_ifvgs:
                 if i_fvg.get("mitigations", 0) > 2:
                     continue
@@ -237,13 +242,13 @@ class StrategyAnalyzer:
         if is_liquidity_swept < 2:
             return None
 
-        recent_low = curr.get("recent_low_4", 0)
-        recent_high = curr.get("recent_high_4", 0)
         close_price = curr["close"]
-        atr_buffer = curr["atr"] * 0.5
 
         is_bouncing_up = close_price > curr["open"]
         is_bouncing_down = close_price < curr["open"]
+
+        if not is_bouncing_up and not is_bouncing_down:
+            return None
 
         # Extract OBs and newly added Breaker Blocks
         valid_bull_obs = [ob for ob in active_obs if ob["type"] == "BULL" and ob.get("mitigations", 0) <= 2]
@@ -257,7 +262,9 @@ class StrategyAnalyzer:
 
         #   --- BULLISH CONFIRMATIONS   ---
         if is_bouncing_up and not blocked_by_bear:
-            # Breaker and OB require Consequent Encroachment (CE) crossing
+            recent_low = curr.get("recent_low_4", 0)
+            atr_buffer = curr["atr"] * 0.5
+
             for ob in valid_bull_obs:
                 if ob.get("tier") == "MAJOR":
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
@@ -293,6 +300,9 @@ class StrategyAnalyzer:
 
         #   --- BEARISH CONFIRMATIONS   ---
         if is_bouncing_down and not blocked_by_bull:
+            recent_high = curr.get("recent_high_4", 0)
+            atr_buffer = curr["atr"] * 0.5
+
             for ob in valid_bear_obs:
                 if ob.get("tier") == "MAJOR":
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:

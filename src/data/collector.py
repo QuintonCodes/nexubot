@@ -19,6 +19,8 @@ class DataCollector:
         self.filename = filename
         self.max_rows = MAX_ROWS
         self._current_row_count = None
+        self._last_mtime = 0
+        self._is_pruning = False
 
     def _get_row_count(self) -> int:
         """Efficiently counts rows without loading the entire CSV into memory."""
@@ -31,20 +33,13 @@ class DataCollector:
     def engineer_features(raw_features: dict) -> dict:
         """Transforms raw SMC features into the full engineered feature set."""
         f = raw_features
-
-        # Session mappings logic
-        active_killzone = int(f.get("active_killzone", 0))
-        SESSION_SCORE_MAP = {0: 1.0, 1: 0.9, 2: 0.6, 3: 0.55}
-        session_quality_score = SESSION_SCORE_MAP.get(active_killzone, 1.0)
-        pd_array_status = f.get("pd_array_status", 0.5)
         raw_distance = max(0.0, float(f.get("distance_to_poi", 0.0)))
 
         return {
             "log_distance_to_poi": round(float(np.log1p(raw_distance)), 4),
-            "is_htf_aligned": float(f.get("is_htf_aligned", 0.0)),
             "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
             "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
-            "pd_deviation_from_equilibrium": round(abs(pd_array_status - 0.5), 4),
+            "pd_deviation_from_equilibrium": round(abs(f.get("pd_array_status", 0.5) - 0.5), 4),
             "zone_overlap_count": float(f.get("zone_overlap_count", 0.0)),
             "body_ratio": round(f.get("body_ratio", 0.0), 4),
             "vol_ratio": round(f.get("vol_ratio", 0.0), 4),
@@ -56,10 +51,31 @@ class DataCollector:
             "hour_sin": round(f.get("hour_sin", 0.0), 4),
             "hour_cos": round(f.get("hour_cos", 0.0), 4),
             "mins_since_kz_open": float(f.get("mins_since_kz_open", 0.0)),
-            "sweep_aligned": float(f.get("sweep_aligned", 0.0)),
-            "poi_vol_anomaly": round(f.get("poi_vol_anomaly", 0.0), 4),
-            "session_quality_score": session_quality_score,
+            "candle_wick_ratio": round(f.get("candle_wick_ratio", 0.0), 4),
+            "upper_wick_pct": round(f.get("upper_wick_pct", 0.0), 4),
+            "lower_wick_pct": round(f.get("lower_wick_pct", 0.0), 4),
+            "structure_age_bars": float(f.get("structure_age_bars", 0.0)),
+            "zone_age_bars": float(f.get("zone_age_bars", 0.0)),
+            "atr_regime_percentile": round(f.get("atr_regime_percentile", 0.0), 4),
+            "prior_n_candle_direction": round(f.get("prior_n_candle_direction", 0.0), 4),
+            "rr_at_entry": round(f.get("rr_at_entry", 0.0), 4),
+            "sweep_recovery_speed": round(f.get("sweep_recovery_speed", 0.0), 4),
         }
+
+    def _prune_data_background(self):
+        """Background thread function to prune the training data CSV to the latest max_rows entries when it exceeds the threshold."""
+        try:
+            df = pd.read_csv(self.filename, on_bad_lines="skip")
+            temp_file = self.filename + ".tmp"
+            df.tail(self.max_rows).to_csv(temp_file, index=False)
+            os.replace(temp_file, self.filename)
+            self._current_row_count = self.max_rows
+            logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
+        except Exception as e:
+            logger.error(f"Prune background error: {e}")
+
+        finally:
+            self._is_pruning = False
 
     def log_training_data(
         self, symbol: str, strategy: str, features: dict, won: int, pnl: float, excursion: float = 0.0
@@ -78,8 +94,9 @@ class DataCollector:
         try:
             with self._lock:
                 file_exists = os.path.isfile(self.filename)
+                current_mtime = os.path.getmtime(self.filename) if file_exists else 0
 
-                if self._current_row_count is None:
+                if self._current_row_count is None or current_mtime > self._last_mtime + 2:
                     self._current_row_count = self._get_row_count()
 
                 with open(self.filename, mode="a", newline="") as file:
@@ -89,16 +106,10 @@ class DataCollector:
                     writer.writerow(row)
 
                 self._current_row_count += 1
+                self._last_mtime = os.path.getmtime(self.filename)
 
-                # Only run the heavy Pandas prune operation when over maximum + buffer
-                if self._current_row_count > self.max_rows + 500:
-                    df = pd.read_csv(self.filename, on_bad_lines="skip")
-
-                    temp_file = self.filename + ".tmp"
-                    df.tail(self.max_rows).to_csv(temp_file, index=False)
-                    os.replace(temp_file, self.filename)
-
-                    self._current_row_count = self.max_rows
-                    logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
+                if self._current_row_count > self.max_rows + 500 and not self._is_pruning:
+                    self._is_pruning = True
+                    threading.Thread(target=self._prune_data_background, daemon=True).start()
         except Exception as e:
             logger.error(f"Failed to log training data for {symbol}: {e}")

@@ -150,6 +150,7 @@ class OfflineManager:
                     }
                 )
                 await self.engine.db.delete_active_trade(symbol)
+                self.engine.ai_engine.active_features.pop(symbol, None)
 
             # Case 2: Trade Timed Out
             elif outcome == "TIMEOUT (Offline)" or elapsed > 14400:
@@ -189,6 +190,7 @@ class OfflineManager:
                         }
                     )
                 await self.engine.db.delete_active_trade(symbol)
+                self.engine.ai_engine.active_features.pop(symbol, None)
 
             # Case 3: Still Active
             else:

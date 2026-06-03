@@ -35,6 +35,8 @@ class TradeMonitor:
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
             return
+        finally:
+            self.engine.monitored_tasks.pop(f"ghost_{symbol}", None)
 
     async def verify_trade_realtime(self, symbol: str, signal: dict, resume_start_time=None) -> None:
         """Monitors an active trade in real-time for TP/SL hits, manages trailing logic, and handles post-trade processing."""
@@ -78,11 +80,9 @@ class TradeMonitor:
                     await asyncio.sleep(interval)
                     continue
 
-                current_bid, current_ask = tick.bid, tick.ask
-
-                #   --- 1. TRADE MONITORING (FILLED)   ---
-                curr_price = current_bid if is_long else current_ask
-                curr_dist = (current_bid - entry) if is_long else (entry - current_ask)
+                    #   --- 1. TRADE MONITORING (FILLED)   ---
+                curr_price = tick.bid if is_long else tick.ask
+                curr_dist = (tick.bid - entry) if is_long else (entry - tick.ask)
 
                 max_favorable_dist = max(max_favorable_dist, curr_dist)
 
@@ -96,10 +96,9 @@ class TradeMonitor:
                         outcome = "LOSS (SL Hit)"
                         won = False
 
-                    points_lost = (sl - entry) / point if is_long else (entry - sl) / point
-                    points_diff = (curr_price - entry) if is_long else (entry - curr_price)
-                    final_pips = points_diff / (point * 10)
-                    final_pnl = points_lost * tick_value * lot_size
+                    points_diff = (curr_price - entry) / point if is_long else (entry - curr_price) / point
+                    final_pnl = points_diff * tick_value * lot_size
+                    final_pips = abs(curr_price - entry) / (point * 10)
                     break
 
                 # TP1 Milestone Tracking
@@ -172,10 +171,9 @@ class TradeMonitor:
                 self.engine.session_stats["total"] += 1
                 self.engine.session_stats["pnl"] += final_pnl
 
-                unique_id = f"{symbol}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
                 await self.engine.db.log_trade(
                     {
-                        "id": unique_id,
+                        "id": f"{symbol}_{int(time.time())}_{uuid.uuid4().hex[:6]}",
                         "symbol": symbol,
                         "signal": signal["signal"],
                         "confidence": signal["confidence"],
@@ -183,7 +181,7 @@ class TradeMonitor:
                         "exit": tp3 if "TP" in outcome else sl if "SL" in outcome else entry,
                         "won": won,
                         "pnl": final_pnl,
-                        "currency": self.engine.session_stats.get("currency", "USD"),
+                        "currency": currency,
                         "strategy": signal["strategy"],
                         "lot_size": lot_size,
                     }
@@ -199,5 +197,6 @@ class TradeMonitor:
         finally:
             try:
                 await self.engine.db.delete_active_trade(symbol)
+                self.engine.monitored_tasks.pop(symbol, None)
             except Exception as e:
                 logger.error(f"Failed to delete active trade during cleanup: {e}")

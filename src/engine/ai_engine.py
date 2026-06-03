@@ -36,6 +36,8 @@ class AITradingEngine:
         self.nn_brain = NeuralPredictor(auto_load=True)
         self.collector = DataCollector()
 
+        self._acct_cache = {"data": None, "time": 0}
+
         self._log_throttle = collections.OrderedDict()
         self._poi_cache = collections.OrderedDict()
         self.htf_cache = collections.OrderedDict()
@@ -50,6 +52,42 @@ class AITradingEngine:
         self.risk_pct = DEFAULT_RISK_PCT
         self.max_lot = DEFAULT_MAX_LOT
         self.min_confidence = DEFAULT_MIN_CONFIDENCE
+
+    def _calculate_structural_rr(
+        self,
+        signal: dict,
+        close_price: float,
+        atr: float,
+        point: float,
+        is_volatile_asset: bool,
+        active_ifvgs: list,
+        active_obs: list,
+    ) -> float:
+        """Calculates the baseline structural Risk/Reward without ML influence for feature encoding."""
+        sl_multiplier = 1.3 if (is_volatile_asset or atr > (close_price * 0.005)) else 1.0
+        sl_dist = max(atr * sl_multiplier, point * 50)
+
+        if "suggested_sl" in signal:
+            suggested_dist = abs(signal["suggested_sl"] - close_price)
+            if (atr * 0.2) < suggested_dist < (atr * 6.0):
+                sl_dist = suggested_dist
+
+        hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
+
+        if signal["direction"] == "LONG":
+            opposing = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > close_price]
+            nearest = min(opposing) if opposing else None
+            base_tp_dist = max(atr * 4.0, sl_dist * MIN_RR)
+            max_tp = (nearest - point * 15) if nearest else (close_price + base_tp_dist)
+            actual_tp_dist = min(close_price + base_tp_dist, max_tp) - close_price
+        else:
+            opposing = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < close_price]
+            nearest = max(opposing) if opposing else None
+            base_tp_dist = max(atr * 4.0, sl_dist * MIN_RR)
+            max_tp = (nearest + point * 15) if nearest else (close_price - base_tp_dist)
+            actual_tp_dist = close_price - max(close_price - base_tp_dist, max_tp)
+
+        return (actual_tp_dist / sl_dist) if sl_dist > 0 else 1.0
 
     async def _calculate_risk_metrics(
         self,
@@ -112,17 +150,12 @@ class AITradingEngine:
 
         # Determine Opposing POIs to dynamically cap Take Profit
         hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
-        opposing_pois = []
         if signal["direction"] == "LONG":
             opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > entry_price]
+            nearest_opposing_poi = min(opposing_pois) if opposing_pois else None
         else:
             opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < entry_price]
-
-        nearest_opposing_poi = (
-            min(opposing_pois)
-            if signal["direction"] == "LONG" and opposing_pois
-            else (max(opposing_pois) if opposing_pois else None)
-        )
+            nearest_opposing_poi = max(opposing_pois) if opposing_pois else None
 
         # Probability calibration hook
         prob = nn_result.get("prob", 0.5)
@@ -228,6 +261,7 @@ class AITradingEngine:
                 "atr": atr,
                 "is_high_risk": is_volatile_asset,
                 "order_type": order_type,
+                "realized_rr": rr,
             }
         )
         return signal
@@ -237,23 +271,33 @@ class AITradingEngine:
         while len(cache_dict) > max_size:
             cache_dict.popitem(last=False)
 
+    async def _get_cached_account(self, provider: DataProvider) -> dict:
+        now = time.time()
+        if self._acct_cache["data"] and now - self._acct_cache["time"] < 30:
+            return self._acct_cache["data"]
+        data = await provider.get_account_summary()
+        self._acct_cache = {"data": data, "time": now}
+        return data
+
     async def _get_htf_trend(self, symbol: str, provider: DataProvider) -> float:
         """Determines the HTF trend direction for the given symbol using cached data when possible."""
-        htf_tf = "1h"
         now = time.time()
         self._enforce_cache_limits(self.htf_cache)
-
         cache_entry = self.htf_cache.get(symbol)
-        if cache_entry and (now - cache_entry["time"]) < 3600:
-            return cache_entry["trend"]
 
-        klines = await provider.fetch_klines(symbol, htf_tf, 1000)
-        trend = 0.0
+        if cache_entry and (now - cache_entry["time"]) < 3600:
+            latest_h1 = await provider.fetch_klines(symbol, "1h", 1)
+            if latest_h1 and latest_h1[-1]["time"] == cache_entry.get("last_h1_time"):
+                return cache_entry["trend"]
+
+        klines = await provider.fetch_klines(symbol, "1h", 1000)
+        trend, last_time = 0.0, 0
         if klines:
             df = TechnicalAnalyzer.calculate_indicators(pd.DataFrame(klines))
             trend = TechnicalAnalyzer.get_htf_trend(df)
+            last_time = klines[-1]["time"]
 
-        self.htf_cache[symbol] = {"trend": trend, "time": now}
+        self.htf_cache[symbol] = {"trend": trend, "time": now, "last_h1_time": last_time}
         return trend
 
     def _log_once(self, key: str, message: str, level=logging.INFO):
@@ -288,14 +332,17 @@ class AITradingEngine:
     ) -> Dict:
         """Adjusts the confidence score of a signal based on multiple factors:"""
         base_conf = signal["confidence"]
+        direction = signal.get("direction", "")
 
-        # Zero out trend bonus temporarily until aligned is validated in structural data
-        trend_bonus = 0
+        # 1. Trend Boost
+        trend_bonus = (
+            10.0
+            if ((direction == "LONG" and htf_trend == 1.0) or (direction == "SHORT" and htf_trend == -1.0))
+            else (-5.0 if htf_trend != 0.0 else 0.0)
+        )
 
         # 2. Historical Performance
-        hist_win_rate = 0.5
-        if self.db_manager:
-            hist_win_rate = await self.db_manager.get_pair_performance(symbol)
+        hist_win_rate = await self.db_manager.get_pair_performance(symbol) if self.db_manager else 0.5
 
         # Heavy Penalty for losers (< 40% win rate), Small Bonus for winners
         history_factor = -10 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
@@ -309,6 +356,131 @@ class AITradingEngine:
 
         signal["confidence"] = final_conf
         return signal
+
+    async def analyze_for_report(self, symbol: str, provider: DataProvider) -> Optional[str]:
+        """Provides the detailed breakdown logic extracted from cmd_analyze to enforce DRY."""
+        snapshot = await self.compute_market_snapshot(symbol, provider)
+        if not snapshot:
+            return None
+
+        curr, structure, htf_trend = snapshot["curr"], snapshot["structure"], snapshot["htf_trend"]
+        active_fvgs, active_ifvgs, active_obs = (
+            snapshot["active_fvgs"],
+            snapshot["active_ifvgs"],
+            snapshot["active_obs"],
+        )
+        is_liquidity_swept, sweep_depth_atr, killzone_name = (
+            snapshot["is_liquidity_swept"],
+            snapshot["sweep_depth_atr"],
+            snapshot["killzone_name"],
+        )
+
+        final_signal = self.strategy_analyzer.analyze_router(
+            curr, active_fvgs, active_ifvgs, active_obs, structure, is_liquidity_swept
+        )
+
+        if not final_signal:
+            final_signal = {
+                "signal": "BUY" if structure["structure"] == "BULL" else "SELL",
+                "direction": "LONG" if structure["structure"] == "BULL" else "SHORT",
+                "confidence": 60.0,
+                "structural_break_val": structure.get("structural_break", 0.0),
+            }
+        else:
+            final_signal["structural_break_val"] = structure.get("structural_break", 0.0)
+
+        symbol_info = await provider.get_symbol_info(symbol)
+        point = symbol_info.get("point", 0.00001) if symbol_info else 0.00001
+        is_volatile_pair = self._is_high_volatility_symbol(symbol)
+
+        # 1. Provide the structural pre-ML RR feature calculation
+        structural_rr = self._calculate_structural_rr(
+            final_signal, snapshot["close_price"], snapshot["atr"], point, is_volatile_pair, active_ifvgs, active_obs
+        )
+
+        raw_features = TechnicalAnalyzer.compile_features(
+            curr=curr,
+            signal_direction=final_signal["direction"],
+            active_fvgs=active_fvgs,
+            active_ifvgs=active_ifvgs,
+            active_obs=active_obs,
+            structure_info=structure,
+            is_liquidity_swept=is_liquidity_swept,
+            sweep_depth_atr=sweep_depth_atr,
+            atr=snapshot["atr"],
+            rr_at_entry=structural_rr,
+        )
+
+        engineered_features = self.collector.engineer_features(raw_features)
+        nn_result = self.nn_brain.predict(engineered_features)
+        session_info = self.get_session_status()
+
+        adjusted_signal = await self.adjust_confidence(
+            symbol, final_signal, nn_result["prob"], htf_trend, session_info["multiplier"]
+        )
+
+        win_prob = adjusted_signal["confidence"]
+        trend_bonus = (
+            10
+            if (
+                (final_signal["direction"] == "LONG" and htf_trend == 1.0)
+                or (final_signal["direction"] == "SHORT" and htf_trend == -1.0)
+            )
+            else 0
+        )
+
+        htf_text = "BULLISH 🐂" if htf_trend == 1.0 else ("BEARISH 🐻" if htf_trend == -1.0 else "FLAT ➖")
+        pd_status = structure.get("pd_array", 0.5)
+        pd_text = "Equilibrium"
+        if pd_status <= 0.4:
+            pd_text = f"Discount 🟢 ({pd_status:.2f})"
+        elif pd_status >= 0.6:
+            pd_text = f"Premium 🔴 ({pd_status:.2f})"
+
+        struct_break = raw_features.get("structural_break", 0.0)
+        break_text = "None"
+        if struct_break == 1.0:
+            break_text = "Bullish BOS 📈"
+        elif struct_break == -1.0:
+            break_text = "Bearish BOS 📉"
+        elif struct_break == 2.0:
+            break_text = "Bullish CHoCH 🔄"
+        elif struct_break == -2.0:
+            break_text = "Bearish CHoCH 🔄"
+
+        sweep_text = "None"
+        if is_liquidity_swept == 3:
+            sweep_text = f"Daily/Asian High/Low Swept 🔥 ({sweep_depth_atr:.1f} ATR)"
+        elif is_liquidity_swept == 2:
+            sweep_text = f"Major Swing/Psych Swept ⚡ ({sweep_depth_atr:.1f} ATR)"
+        elif is_liquidity_swept == 1:
+            sweep_text = f"Internal Pivot Swept ({sweep_depth_atr:.1f} ATR)"
+
+        vwap_trend = "BULL" if snapshot["close_price"] > curr.get("vwap", 0) else "BEAR"
+
+        if win_prob > 80:
+            ai_thought = "Highly favorable setup forming. Aligning with HTF institutional flow and Killzone momentum."
+        elif win_prob > 60:
+            ai_thought = "Viable environment. Awaiting clear liquidity sweep or decisive structural confirmation."
+        else:
+            ai_thought = "Poor conditions. High probability of chop or false breakouts. Avoiding."
+
+        return (
+            f"🧠 *Deep SMC Analysis: {symbol}*\n\n"
+            f"🌍 *Session Profile:* ({killzone_name})\n"
+            f"📊 *HTF Flow (1H):* {htf_text}\n"
+            f"🧭 *Local Flow ({TIMEFRAME}):* {structure['structure']} | Break: {break_text}\n"
+            f"📏 *PD Array:* Price in {pd_text}\n"
+            f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs\n"
+            f"🎯 *Nearest POI Status:* {raw_features.get('distance_to_poi', 0.0):.1f} ATR Away\n"
+            f"🧹 *Sweep Status:* {sweep_text}\n"
+            f"🌊 *VWAP State:* {vwap_trend}\n\n"
+            f"⚡ *Momentum & Vol:* Vol Ratio {engineered_features.get('vol_ratio', 1.0):.2f}x | Body Ratio {engineered_features.get('body_ratio', 0.0):.2f}\n\n"
+            f"🤖 *Neural Output:*\n"
+            f"• _Trend Alignment:_ {'Aligned ✅' if trend_bonus > 0 else 'Counter ⚠️'}\n"
+            f"• _Calculated AI Confidence:_ *{win_prob:.1f}%*\n"
+            f"• _AI Conclusion:_ {ai_thought}"
+        )
 
     async def analyze_market(self, symbol: str, klines: list, provider: DataProvider) -> Optional[Dict]:
         """Main analysis function that processes market data and generates trade signals with dynamic risk management."""
@@ -361,10 +533,19 @@ class AITradingEngine:
         final_signal["is_high_risk"] = is_volatile_pair
         final_signal["structural_break_val"] = snapshot["structure"].get("structural_break", 0.0)
 
+        structural_rr = self._calculate_structural_rr(
+            final_signal,
+            curr["close"],
+            snapshot["atr"],
+            symbol_info.get("point", 0.00001),
+            is_volatile_pair,
+            snapshot["active_ifvgs"],
+            snapshot["active_obs"],
+        )
+
         # Apply raw features then pipe directly into feature engineer
         raw_features = TechnicalAnalyzer.compile_features(
             curr=curr,
-            htf_trend=snapshot["htf_trend"],
             signal_direction=final_signal["direction"],
             active_fvgs=snapshot["active_fvgs"],
             active_ifvgs=snapshot["active_ifvgs"],
@@ -373,6 +554,7 @@ class AITradingEngine:
             is_liquidity_swept=snapshot["is_liquidity_swept"],
             sweep_depth_atr=snapshot["sweep_depth_atr"],
             atr=snapshot["atr"],
+            rr_at_entry=structural_rr,
         )
 
         engineered_features = self.collector.engineer_features(raw_features)

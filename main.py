@@ -59,7 +59,11 @@ async def main() -> None:
         else:
             print("⚙️ Running Pre-Flight ML Optimization...")
             notifier.send_message("⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly.")
-            await asyncio.to_thread(engine.ai_engine.nn_brain.train_network)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(engine.ai_engine.nn_brain.train_network), timeout=300.0)
+            except asyncio.TimeoutError:
+                print("⚠️ ML Training timed out. Proceeding with existing model.")
+                notifier.send_message("⚠️ ML Training timed out. Running with prior model.")
 
         # 4. Unlock the system status to IDLE -> Scanner can now fire
         engine.system_status = "IDLE"

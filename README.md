@@ -1,6 +1,6 @@
 # 🚀 Nexubot: Institutional-Grade AI Trading System
 
-![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FQuintonCodes%2Fnexubot%2Fmain%2Fsrc%2Fconfig.py&query=%24.__version__&label=version) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
+![Version](https://img.shields.io/badge/version-v1.1.0-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
 
 **Nexubot** is an advanced algorithmic trading engine designed for the MetaTrader 5 ecosystem. Moving beyond standard lagging indicators, Nexubot utilizes a state-of-the-art **Smart Money Concept (SMC) Engine** fused with deep **Neural Network (ML) validation** to identify high-probability institutional liquidity sweeps and trend continuations on the M5 timeframe.
 

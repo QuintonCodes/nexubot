@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # Constants for backfill limits
 MAX_ROWS_PER_SYMBOL = 2000
 MAX_ROWS_PER_STRATEGY = 2000
-FUTURE_WINDOW_SIZE = 400
-WARMUP_PERIOD = 200
+FUTURE_WINDOW_SIZE = 50  # 50 × 5min = ~4.2 hours, matches live timeout
+WARMUP_PERIOD = 200  # EMA-200 needs 200 bars to converge; don't reduce
 
 
 def _calculate_risk_and_tp(
@@ -35,7 +35,7 @@ def _calculate_risk_and_tp(
     is_volatile_asset: bool,
     active_ifvgs: List[Dict],
     active_obs: List[Dict],
-) -> Optional[Tuple[float, float]]:
+) -> Optional[Tuple[float, float, float]]:
     """Calculates Stop Loss and Take Profit distances, returning None if MIN_RR isn't met."""
     sl_multiplier = 1.3 if (is_volatile_asset or atr > (close_price * 0.005)) else 1.0
     sl_dist = max(atr * sl_multiplier, point * 50)
@@ -47,16 +47,12 @@ def _calculate_risk_and_tp(
 
     hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
 
-    if signal["direction"] == "LONG":
-        opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > close_price]
-        nearest_opposing_poi = min(opposing_pois) if opposing_pois else None
-    else:
-        opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < close_price]
-        nearest_opposing_poi = max(opposing_pois) if opposing_pois else None
-
     base_tp_dist = max(atr * 4.0, sl_dist * MIN_RR)
 
     if signal["direction"] == "LONG":
+        opposing_pois = [p["low"] for p in hard_blockades if p["type"] == "BEAR" and p["low"] > close_price]
+        nearest_opposing_poi = min(opposing_pois) if opposing_pois else None
+
         sl = close_price - sl_dist
         max_structural_tp = (
             (nearest_opposing_poi - point * 15) if nearest_opposing_poi else (close_price + base_tp_dist)
@@ -64,6 +60,9 @@ def _calculate_risk_and_tp(
         tp = min(close_price + base_tp_dist, max_structural_tp)
         actual_tp_dist = tp - close_price
     else:
+        opposing_pois = [p["high"] for p in hard_blockades if p["type"] == "BULL" and p["high"] < close_price]
+        nearest_opposing_poi = max(opposing_pois) if opposing_pois else None
+
         sl = close_price + sl_dist
         max_structural_tp = (
             (nearest_opposing_poi + point * 15) if nearest_opposing_poi else (close_price - base_tp_dist)
@@ -75,7 +74,7 @@ def _calculate_risk_and_tp(
     if rr < MIN_RR:
         return None
 
-    return sl, tp
+    return sl, tp, rr
 
 
 async def _prepare_symbol_data(
@@ -283,12 +282,11 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
             if not trade_params:
                 continue  # Skipped due to MIN_RR filter
 
-            sl, tp = trade_params
+            sl, tp, rr = trade_params
 
             # Build feature dictionary using shared analyzer method
             raw_features = TechnicalAnalyzer.compile_features(
                 curr=curr,
-                htf_trend=curr["htf_trend_mapped"],
                 signal_direction=signal["direction"],
                 active_fvgs=active_fvgs,
                 active_ifvgs=active_ifvgs,
@@ -297,6 +295,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 is_liquidity_swept=is_liquidity_swept,
                 sweep_depth_atr=sweep_depth_atr,
                 atr=atr,
+                rr_at_entry=rr,
             )
 
             # Engineer features via the new Matrix

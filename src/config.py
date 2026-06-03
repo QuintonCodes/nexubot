@@ -74,7 +74,6 @@ TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
     "log_distance_to_poi",
-    "is_htf_aligned",
     "is_liquidity_swept_tier",
     "sweep_depth_atr",
     "pd_deviation_from_equilibrium",
@@ -89,9 +88,15 @@ FEATURE_COLS = [
     "hour_sin",
     "hour_cos",
     "mins_since_kz_open",
-    "sweep_aligned",
-    "poi_vol_anomaly",
-    "session_quality_score",
+    "candle_wick_ratio",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "structure_age_bars",
+    "zone_age_bars",
+    "atr_regime_percentile",
+    "prior_n_candle_direction",
+    "rr_at_entry",
+    "sweep_recovery_speed",
 ]
 
 MAX_ROWS = 14000

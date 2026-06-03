@@ -9,6 +9,7 @@ from src.config import (
     FALLBACK_FOREX,
     FALLBACK_INDICES,
     FALLBACK_METALS,
+    GLOBAL_SIGNAL_COOLDOWN,
     MAX_SIGNALS_PER_SCAN,
     SCAN_INTERVAL_CRYPTO,
     SCAN_INTERVAL_FOREX,
@@ -28,6 +29,7 @@ class MarketScanner:
         self.cached_dfs = {}
         self._active_signals_lock = asyncio.Lock()
         self._currently_scanning = set()
+        self._last_signal_time = 0
 
     async def _process_batch(self, symbols: list) -> None:
         """Processes a batch of symbols to find trading signals."""
@@ -38,6 +40,9 @@ class MarketScanner:
 
         for sym in symbols:
             if not self.engine.is_running or signals_found >= MAX_SIGNALS_PER_SCAN:
+                break
+
+            if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
                 break
 
             # 1. State Validation Lock
@@ -67,8 +72,13 @@ class MarketScanner:
 
                     signal = await self.engine.ai_engine.analyze_market(sym, klines, self.engine.provider)
                     if signal:
+                        if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
+                            logger.info(f"⏭️ Skipping valid signal for {sym} due to Global Cooldown.")
+                            continue
+
                         signal.setdefault("symbol", sym)
                         signal["detected_at"] = time.time()
+                        self._last_signal_time = time.time()
                         signals_found += 1
 
                         async with self._active_signals_lock:
@@ -86,7 +96,7 @@ class MarketScanner:
                 # Always release the scanning lock, even if MT5 fails or throws an error
                 async with self._active_signals_lock:
                     if sym in self._currently_scanning:
-                        self._currently_scanning.remove(sym)
+                        self._currently_scanning.discard(sym)
 
     async def _refresh_market_watch_symbols(self) -> None:
         """Fetches the latest list of symbols from the provider and updates the engine's active lists."""
@@ -119,6 +129,7 @@ class MarketScanner:
         """Main loop for continuously scanning the market for new signals and managing active trades."""
         logger.info("🚀 Scanner Loop Initiated...")
 
+        self._currently_scanning.clear()
         last_crypto, last_forex, last_indices, last_metals, last_sort_time = 0, 0, 0, 0, 0
         await self._refresh_market_watch_symbols()
 
@@ -131,14 +142,10 @@ class MarketScanner:
 
                 # Fail-safe: Check if MT5 is actually alive
                 if not self.engine.provider.connected:
-                    logger.warning("⚠️ MT5 Disconnected. Pausing scanner...")
-                    await asyncio.sleep(5)
+                    logger.warning("⚠️ MT5 Disconnected. Attempting reconnect...")
+                    if not await self.engine.provider.initialize():
+                        await asyncio.sleep(30)
                     continue
-
-                # 1. Update Balance context
-                acct = await self.engine.provider.get_account_summary()
-                if acct:
-                    self.engine.ai_engine.set_context(acct["balance"], self.engine.db, acct.get("currency", "USD"))
 
                 now = time.time()
 

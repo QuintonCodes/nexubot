@@ -9,7 +9,7 @@ from src.data.provider import DataProvider
 from src.core.engine import NexubotEngine
 from src.utils.backfill import backfill_data
 from src.utils.logger import setup_logging
-from src.config import CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE, TRAINING_FILE
+from src.config import CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE
 
 load_dotenv()
 setup_logging("backfill.log")
@@ -20,7 +20,7 @@ def wipe_legacy_ml_data() -> None:
     Wipes old ML artifacts to prevent TensorFlow shape mismatches
     now that the engine has transitioned to Pure SMC features.
     """
-    files_to_delete = [CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE, TRAINING_FILE]
+    files_to_delete = [CALIBRATOR_FILE, ENTRY_MODEL_FILE, EXIT_MODEL_FILE, EXIT_SCALER_FILE, SCALER_FILE]
     cleaned = False
 
     print("🧹 Checking for legacy ML artifacts...")

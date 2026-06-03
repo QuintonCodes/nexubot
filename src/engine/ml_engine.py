@@ -26,6 +26,9 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
+MIN_TRAINING_ROWS = 500
+MIN_AUC_GATE = 0.56
+
 
 class NeuralPredictor:
     """
@@ -81,8 +84,8 @@ class NeuralPredictor:
                 df[col] = 0.0
 
         df = df.dropna(subset=FEATURE_COLS + ["target_win"])
-        if len(df) < 50:
-            logger.warning(f"⚠️ Insufficient data ({len(df)} rows). Need 50+ to train.")
+        if len(df) < MIN_TRAINING_ROWS:
+            logger.warning(f"⚠️ Insufficient data ({len(df)} rows). Need {MIN_TRAINING_ROWS}+ to train.")
             return None
 
         return df
@@ -139,21 +142,11 @@ class NeuralPredictor:
 
     def _train_exit_model(self, df: pd.DataFrame, early_stop: EarlyStopping) -> Optional[tf.keras.Model]:
         """Constructs and trains the regression model for trade excursions (winners only)."""
-        winning_df = df[df["target_win"] == 1].copy()
-
-        if len(winning_df) < 10:
-            logger.warning("⚠️ Insufficient winning trades. Falling back to static exit predictions.")
-            return None
-
-        X_winners = winning_df[FEATURE_COLS]
+        X_all = df[FEATURE_COLS]
         self.exit_scaler = StandardScaler()
-        X_winners_scaled = self.exit_scaler.fit_transform(X_winners)
+        X_all_scaled = self.exit_scaler.fit_transform(X_all)
 
-        y_exit = (
-            winning_df["target_excursion"]
-            if "target_excursion" in winning_df.columns
-            else pd.Series([3.0] * len(winning_df))
-        )
+        y_exit = np.where(df["target_win"] == 1, df["target_excursion"], 0.0)
 
         model = tf.keras.models.Sequential(
             [
@@ -165,7 +158,7 @@ class NeuralPredictor:
 
         model.compile(optimizer="adam", loss="mse", metrics=["mae"])
         model.fit(
-            X_winners_scaled,
+            X_all_scaled,
             y_exit,
             epochs=100,
             batch_size=32,
@@ -259,10 +252,8 @@ class NeuralPredictor:
             auc_test = cross_val_score(rf, X_scaled, y_entry, cv=3, scoring="roc_auc").mean()
             logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
 
-            if auc_test < 0.56:
-                logger.error(
-                    "🛑 AUC below threshold (0.56) — engineered features carry insufficient signal. Aborting to protect live deployment."
-                )
+            if auc_test < MIN_AUC_GATE:
+                logger.error("🛑 Pre-train AUC ({auc_test:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
                 return
 
             entry_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
@@ -275,10 +266,8 @@ class NeuralPredictor:
             val_auc = roc_auc_score(y_cal, self.entry_model.predict(X_cal, verbose=0))
             logger.info(f"📊 Live Validation AUC: {val_auc:.4f}")
 
-            if val_auc < 0.53:
-                logger.error(
-                    "🛑 AUC below threshold (0.56) — engineered features carry insufficient signal. Aborting to protect live deployment."
-                )
+            if val_auc < MIN_AUC_GATE:
+                logger.error("🛑 Post-train Validation AUC ({val_auc:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
                 return
 
             # 3. Train Exit Model
