@@ -91,8 +91,8 @@ async def _prepare_symbol_data(
     point = symbol_info.get("point", 0.00001)
     is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
-    requested_m5 = 18000
-    requested_h1 = 5000
+    requested_m5 = 60480  # 288 candles in 1d, 60480 × 5min = ~210 days
+    requested_h1 = 5040  # 24 candles in 1d, 5040 × 1h = ~210 days
     klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m5)
     klines_htf = await provider.fetch_klines(symbol, "1h", requested_h1)
 
