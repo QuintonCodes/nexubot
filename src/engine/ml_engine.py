@@ -4,6 +4,7 @@ import numpy as np
 import os
 import pandas as pd
 import tensorflow as tf
+import threading
 from keras.callbacks import EarlyStopping
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
@@ -43,6 +44,7 @@ class NeuralPredictor:
         self.exit_scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
         self.is_ready: bool = False
+        self._predict_lock = threading.Lock()
 
         if auto_load:
             self._load_artifacts()
@@ -119,7 +121,11 @@ class NeuralPredictor:
         model = tf.keras.models.Sequential(
             [
                 tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
+                tf.keras.layers.Dense(64, activation="relu"),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.Dropout(0.2),
                 tf.keras.layers.Dense(32, activation="relu"),
+                tf.keras.layers.BatchNormalization(),
                 tf.keras.layers.Dropout(0.2),
                 tf.keras.layers.Dense(16, activation="relu"),
                 tf.keras.layers.Dense(1, activation="sigmoid"),
@@ -203,14 +209,20 @@ class NeuralPredictor:
             df_input = pd.DataFrame(data)
 
             # Preprocess and predict entry
-            X_new = self.scaler.transform(df_input)
-            raw_prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
+            with self._predict_lock:
+                X_new = self.scaler.transform(df_input)
 
-            # Calibrate probability if a calibrator is available
-            prob = float(self.calibrator.transform([raw_prob])[0]) if self.calibrator else raw_prob
+                if np.any(np.abs(X_new) > 4.0):
+                    logger.warning("⚠️ Feature Drift Detected: Extrapolating beyond 4σ from training data bounds.")
+                    X_new = np.clip(X_new, -4.0, 4.0)
 
-            # Predict exit ATR (Default to 3.0 if model is missing)
-            pred_exit_atr = self._predict_exit(df_input)
+                raw_prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
+
+                # Calibrate probability if a calibrator is available
+                prob = float(self.calibrator.transform([raw_prob])[0]) if self.calibrator else raw_prob
+
+                # Predict exit ATR (Default to 3.0 if model is missing)
+                pred_exit_atr = self._predict_exit(df_input)
 
             # Calculate dynamic risk sizing based on conviction
             risk_mult = self._calculate_risk_multiplier(prob)
@@ -230,9 +242,7 @@ class NeuralPredictor:
         expected_sparse_features = [
             "is_htf_aligned",
             "sweep_aligned",
-            "momentum_exhaustion_count",
             "sweep_snapback_vel",
-            "poi_vol_anomaly",
             "dist_to_asia_extremes_atr",
         ]
 
@@ -253,7 +263,7 @@ class NeuralPredictor:
             logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
 
             if auc_test < MIN_AUC_GATE:
-                logger.error("🛑 Pre-train AUC ({auc_test:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
+                logger.error(f"🛑 Pre-train AUC ({auc_test:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
                 return
 
             entry_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
@@ -267,7 +277,9 @@ class NeuralPredictor:
             logger.info(f"📊 Live Validation AUC: {val_auc:.4f}")
 
             if val_auc < MIN_AUC_GATE:
-                logger.error("🛑 Post-train Validation AUC ({val_auc:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
+                logger.error(
+                    f"🛑 Post-train Validation AUC ({val_auc:.4f}) below threshold ({MIN_AUC_GATE}). Aborting."
+                )
                 return
 
             # 3. Train Exit Model

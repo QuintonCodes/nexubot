@@ -72,17 +72,18 @@ class MarketScanner:
 
                     signal = await self.engine.ai_engine.analyze_market(sym, klines, self.engine.provider)
                     if signal:
-                        if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
-                            logger.info(f"⏭️ Skipping valid signal for {sym} due to Global Cooldown.")
-                            continue
-
-                        signal.setdefault("symbol", sym)
-                        signal["detected_at"] = time.time()
-                        self._last_signal_time = time.time()
-                        signals_found += 1
-
                         async with self._active_signals_lock:
+                            # TOCTOU Check to prevent a second process appending a signal from race parallel batches
+                            if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
+                                logger.info(f"⏭️ Skipping valid signal for {sym} due to Global Cooldown.")
+                                continue
+
+                            signal.setdefault("symbol", sym)
+                            signal["detected_at"] = time.time()
+                            self._last_signal_time = time.time()
                             self.engine.active_signals.append(signal)
+
+                        signals_found += 1
 
                         # 1. Alert via Telegram
                         if hasattr(self.engine, "notifier"):

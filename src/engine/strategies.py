@@ -46,7 +46,7 @@ class StrategyAnalyzer:
 
         # 3. IFVG Continuation
         if not signal:
-            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs, is_liquidity_swept)
+            signal = self._ifvg_mitigation(curr, active_ifvgs, active_obs)
 
         # 4. POI Reversals — only when a sweep has already occurred
         if not signal:
@@ -161,14 +161,10 @@ class StrategyAnalyzer:
         curr: Union[pd.Series, dict],
         active_ifvgs: List[Dict],
         active_obs: List[Dict] = None,
-        is_liquidity_swept: int = 0,
     ) -> Optional[Dict]:
         """
         Detects bounces off active IFVGs with CE Validation and Overlap Protection.
         """
-        if is_liquidity_swept < 2:
-            return None
-
         active_obs = active_obs or []
         close_price = curr["close"]
 
@@ -260,7 +256,7 @@ class StrategyAnalyzer:
             ob["low"] <= close_price <= ob["high"] for ob in valid_bull_obs if ob.get("tier") in ["MAJOR", "BREAKER"]
         )
 
-        #   --- BULLISH CONFIRMATIONS   ---
+        #  --- BULLISH CONFIRMATIONS   ---
         if is_bouncing_up and not blocked_by_bear:
             recent_low = curr.get("recent_low_4", 0)
             atr_buffer = curr["atr"] * 0.5
@@ -298,7 +294,7 @@ class StrategyAnalyzer:
                     "suggested_sl": recent_low - atr_buffer,
                 }
 
-        #   --- BEARISH CONFIRMATIONS   ---
+        #  --- BEARISH CONFIRMATIONS   ---
         if is_bouncing_down and not blocked_by_bull:
             recent_high = curr.get("recent_high_4", 0)
             atr_buffer = curr["atr"] * 0.5

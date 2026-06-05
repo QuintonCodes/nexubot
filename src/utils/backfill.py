@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Constants for backfill limits
 MAX_ROWS_PER_SYMBOL = 2000
-MAX_ROWS_PER_STRATEGY = 2000
+TARGET_PER_STRAT_PER_SYMBOL = 400
 FUTURE_WINDOW_SIZE = 50  # 50 × 5min = ~4.2 hours, matches live timeout
 WARMUP_PERIOD = 200  # EMA-200 needs 200 bars to converge; don't reduce
 
@@ -91,8 +91,8 @@ async def _prepare_symbol_data(
     point = symbol_info.get("point", 0.00001)
     is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
-    requested_m5 = 60480  # 288 candles in 1d, 60480 × 5min = ~210 days
-    requested_h1 = 5040  # 24 candles in 1d, 5040 × 1h = ~210 days
+    requested_m5 = 105120  # 365 days × 288 candles/day
+    requested_h1 = 8760  # 365 days × 24 candles/day
     klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m5)
     klines_htf = await provider.fetch_klines(symbol, "1h", requested_h1)
 
@@ -208,7 +208,6 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
     strategy_analyzer = StrategyAnalyzer()
     collector = DataCollector()
     total_rows_collected = 0
-    strategy_counts = {}
 
     symbols = target_symbols or (FALLBACK_CRYPTO + FALLBACK_FOREX + FALLBACK_INDICES + FALLBACK_METALS)
     logger.info(f"🔄 Starting SMC Backfill for {len(symbols)} symbols...")
@@ -225,6 +224,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
 
         df_full, records, point, is_volatile_asset = data_bundle
         symbol_rows_collected = 0
+        symbol_strategy_counts = {}
 
         active_fvgs, active_ifvgs, active_obs = [], [], []
 
@@ -267,7 +267,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
 
             # Evaluate strategy cap early to save computation
             strat = signal.get("strategy", "Unknown")
-            if strategy_counts.get(strat, 0) >= MAX_ROWS_PER_STRATEGY:
+            if symbol_strategy_counts.get(strat, 0) >= TARGET_PER_STRAT_PER_SYMBOL:
                 continue
 
             # Filter heavily marginal signals to avoid dataset degradation
@@ -295,6 +295,7 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 is_liquidity_swept=is_liquidity_swept,
                 sweep_depth_atr=sweep_depth_atr,
                 atr=atr,
+                htf_trend=curr.get("htf_trend_mapped", 0.0),
                 rr_at_entry=rr,
             )
 
@@ -311,9 +312,9 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 future_window, signal["direction"], close_price, sl, tp, atr
             )
 
-            strategy_counts[strat] = strategy_counts.get(strat, 0) + 1
+            symbol_strategy_counts[strat] = symbol_strategy_counts.get(strat, 0) + 1
             collector.log_training_data(symbol, strat, engineered_features, won, pnl, target_excursion)
             symbol_rows_collected += 1
             total_rows_collected += 1
 
-    logger.info("✅ SMC Backfill Complete. New dataset generated.")
+    logger.info("✅ SMC Backfill Complete. Diversified representation strategy dataset generated.")

@@ -88,15 +88,18 @@ FEATURE_COLS = [
     "hour_sin",
     "hour_cos",
     "mins_since_kz_open",
-    "candle_wick_ratio",
-    "upper_wick_pct",
-    "lower_wick_pct",
+    "favor_wick_pct",
+    "adverse_wick_pct",
     "structure_age_bars",
     "zone_age_bars",
     "atr_regime_percentile",
-    "prior_n_candle_direction",
     "rr_at_entry",
     "sweep_recovery_speed",
+    "htf_alignment_score",
+    "atr_expansion_ratio",
+    "zone_mitigation_quality",
+    "vwap_distance_atr",
+    "volume_trend_3",
 ]
 
 MAX_ROWS = 14000

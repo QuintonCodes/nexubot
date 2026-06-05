@@ -25,6 +25,9 @@ class TechnicalAnalyzer:
         low_close = (df["low"] - df["close"].shift()).abs()
         tr = np.maximum.reduce([high_low, high_close, low_close])
         df["atr"] = pd.Series(tr).rolling(window=14).mean()
+        df["atr_ema_48"] = df["atr"].ewm(span=48, adjust=False).mean()
+        df["atr_expansion_ratio"] = df["atr"] / df["atr_ema_48"].replace(0, np.nan)
+        df["atr_expansion_ratio"] = df["atr_expansion_ratio"].fillna(1.0)
 
         # 2. Daily VWAP
         df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
@@ -42,6 +45,9 @@ class TechnicalAnalyzer:
 
         # 5. Volume Profile for Institutional Displacement
         df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=1).mean()
+        df["vol_ratio"] = df["volume"] / df["vol_sma_20"].replace(0, np.nan)
+        df["vol_ratio"] = df["vol_ratio"].fillna(1.0)
+        df["volume_trend_3"] = df["vol_ratio"] - df["vol_ratio"].shift(2).fillna(df["vol_ratio"])
 
         # 6. Lookback Windows
         df["recent_low_5"] = df["low"].rolling(5).min()
@@ -94,6 +100,7 @@ class TechnicalAnalyzer:
         is_liquidity_swept: int,
         sweep_depth_atr: float,
         atr: float,
+        htf_trend: float,
         rr_at_entry: float = 0.0,
     ) -> Dict:
         """Compiles the strict SMC feature set for neural network predictions and training."""
@@ -120,6 +127,8 @@ class TechnicalAnalyzer:
         all_zones = active_fvgs + active_ifvgs + active_obs
         dist_nearest_poi_atr = 0.0
         zone_age_bars = 0.0
+        zone_mitigation_quality = 1.0
+
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
             dist_nearest_poi_atr = (
@@ -127,17 +136,27 @@ class TechnicalAnalyzer:
             )
             zone_age_bars = float(nearest_poi.get("age", 0))
 
-        # Using decimal hour for smooth, continuous sinusoidal waves
+            mits = nearest_poi.get("mitigations", 0)
+            if mits == 1:
+                zone_mitigation_quality = 0.67
+            elif mits == 2:
+                zone_mitigation_quality = 0.33
+            elif mits >= 3:
+                zone_mitigation_quality = 0.0
+
         decimal_hour = h + (m / 60.0)
 
         body = abs(close_price - curr["open"])
         rng = curr["high"] - curr["low"] + 1e-10
         body_ratio = body / rng
-        candle_wick_ratio = (rng - body) / rng
         upper_wick_pct = (curr["high"] - max(curr["open"], close_price)) / safe_atr
         lower_wick_pct = (min(curr["open"], close_price) - curr["low"]) / safe_atr
 
-        vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
+        favor_wick_pct = lower_wick_pct if signal_direction == "LONG" else upper_wick_pct
+        adverse_wick_pct = upper_wick_pct if signal_direction == "LONG" else lower_wick_pct
+
+        vol_ratio = curr.get("vol_ratio", 1.0)
+        volume_trend_3 = curr.get("volume_trend_3", 0.0)
 
         pdh, pdl = curr.get("pdh"), curr.get("pdl")
         dist_to_pdh_atr = abs(close_price - pdh) / safe_atr if pdh else 0.0
@@ -157,31 +176,48 @@ class TechnicalAnalyzer:
                     max(curr["high"], curr.get("recent_high_5", curr["high"])) - close_price
                 ) / safe_atr
 
+        htf_alignment_score = 0.0
+        if signal_direction == "LONG":
+            if htf_trend == 1.0:
+                htf_alignment_score = 1.0
+            elif htf_trend == -1.0:
+                htf_alignment_score = -1.0
+        elif signal_direction == "SHORT":
+            if htf_trend == -1.0:
+                htf_alignment_score = 1.0
+            elif htf_trend == 1.0:
+                htf_alignment_score = -1.0
+
+        vwap_distance_atr = (close_price - curr.get("vwap", close_price)) / safe_atr
+
         return {
-            "is_liquidity_swept_tier": float(is_liquidity_swept),
-            "pd_array_status": structure_info.get("pd_array", 0.5),
             "distance_to_poi": dist_nearest_poi_atr,
+            "is_liquidity_swept_tier": float(is_liquidity_swept),
             "sweep_depth_atr": sweep_depth_atr,
+            "pd_array_status": structure_info.get("pd_array", 0.5),
             "zone_overlap_count": float(len([z for z in all_zones if z["low"] <= close_price <= z["high"]])),
             "body_ratio": body_ratio,
             "vol_ratio": vol_ratio,
             "momentum_exhaustion_count": float(curr.get("momentum_exhaustion_count", 0)),
             "dist_to_pdh_atr": dist_to_pdh_atr,
             "dist_to_pdl_atr": dist_to_pdl_atr,
+            "sweep_snapback_vel": abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0,
             "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
             "hour_sin": math.sin(2 * math.pi * decimal_hour / 24.0),
             "hour_cos": math.cos(2 * math.pi * decimal_hour / 24.0),
             "mins_since_kz_open": float((h - kz_start) * 60 + m) if kz_start != 0 else 0.0,
-            "sweep_snapback_vel": abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0,
-            "candle_wick_ratio": candle_wick_ratio,
-            "upper_wick_pct": upper_wick_pct,
-            "lower_wick_pct": lower_wick_pct,
+            "favor_wick_pct": favor_wick_pct,
+            "adverse_wick_pct": adverse_wick_pct,
             "structure_age_bars": float(structure_info.get("bars_since_break", 0)),
             "zone_age_bars": zone_age_bars,
             "atr_regime_percentile": float(curr.get("atr_regime_percentile", 0.5)),
-            "prior_n_candle_direction": float(curr.get("color", 0)),  # simplified proxy
             "rr_at_entry": rr_at_entry,
             "sweep_recovery_speed": sweep_recovery_speed,
+            "htf_alignment_score": htf_alignment_score,
+            "atr_expansion_ratio": float(curr.get("atr_expansion_ratio", 1.0)),
+            "zone_mitigation_quality": zone_mitigation_quality,
+            "vwap_distance_atr": vwap_distance_atr,
+            "volume_trend_3": volume_trend_3,
         }
 
     @staticmethod

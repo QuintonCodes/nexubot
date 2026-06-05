@@ -136,7 +136,10 @@ class AITradingEngine:
         # Use Dynamic SL if provided
         if "suggested_sl" in signal:
             suggested_dist = abs(signal["suggested_sl"] - entry_price)
-            if (atr * 0.2) < suggested_dist < (atr * 6.0):
+            sl_on_correct_side = (signal["direction"] == "LONG" and signal["suggested_sl"] < entry_price) or (
+                signal["direction"] == "SHORT" and signal["suggested_sl"] > entry_price
+            )
+            if sl_on_correct_side and (atr * 0.2) < suggested_dist < (atr * 6.0):
                 sl_dist = suggested_dist
 
         # Excursion / Stop-Loss Cap Filter
@@ -408,6 +411,7 @@ class AITradingEngine:
             is_liquidity_swept=is_liquidity_swept,
             sweep_depth_atr=sweep_depth_atr,
             atr=snapshot["atr"],
+            htf_trend=htf_trend,
             rr_at_entry=structural_rr,
         )
 
@@ -554,6 +558,7 @@ class AITradingEngine:
             is_liquidity_swept=snapshot["is_liquidity_swept"],
             sweep_depth_atr=snapshot["sweep_depth_atr"],
             atr=snapshot["atr"],
+            htf_trend=snapshot["htf_trend"],
             rr_at_entry=structural_rr,
         )
 
@@ -628,11 +633,12 @@ class AITradingEngine:
         else:
             active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.extract_active_pois(df)
 
+        MAX_POI_PER_TYPE = 50
         self._poi_cache[symbol] = {
             "last_time": curr["time"],
-            "fvgs": active_fvgs,
-            "ifvgs": active_ifvgs,
-            "obs": active_obs,
+            "fvgs": active_fvgs[-MAX_POI_PER_TYPE:],
+            "ifvgs": active_ifvgs[-MAX_POI_PER_TYPE:],
+            "obs": active_obs[-MAX_POI_PER_TYPE:],
         }
 
         htf_trend = await self._get_htf_trend(symbol, provider)
