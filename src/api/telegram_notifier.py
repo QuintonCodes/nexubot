@@ -66,7 +66,7 @@ class TelegramNotifier:
                 return
             except Exception as e:
                 if i < retries - 1:
-                    await asyncio.sleep(5)  # Wait 5 seconds before retrying
+                    await asyncio.sleep(2**i)
                 else:
                     logger.warning(f"Failed to send Telegram messageafter {retries} attempts: {e.__class__.__name__}")
 
@@ -110,7 +110,7 @@ class TelegramNotifier:
         await update.message.reply_text(
             f"🚀 *Nexubot {__version__} Online*\n"
             f"• `/analyze [SYMBOL]` to run a deep SMC scan.\n"
-            f"• `/focus [SYMBOLS]` to isolate specific pairs (e.g., `/focus XAUUSDm EURUSDm`).\n"
+            f"• `/focus [SYMBOLS]` to isolate specific pairs.\n"
             f"• `/focus ALL` to resume full market scanning.",
             parse_mode="Markdown",
         )
@@ -130,7 +130,7 @@ class TelegramNotifier:
             logger.error(f"⚠️ Telegram Initialization Failed: {e}")
             return False
 
-    def send_daily_report(self, wins: int, losses: int, total: int, pnl: float, currency: str) -> None:
+    async def send_daily_report(self, wins: int, losses: int, total: int, pnl: float, currency: str) -> None:
         """Sends a comprehensive daily performance report to Telegram with win/loss breakdown and net PnL."""
         win_rate = (wins / total * 100) if total > 0 else 0.0
         curr_sym = self._get_currency_symbol(currency)
@@ -143,14 +143,14 @@ class TelegramNotifier:
             f"🎯 *Win Rate:* {win_rate:.1f}%\n\n"
             f"💵 *Net PnL:* {curr_sym}{pnl:.2f}\n\n"
         )
-        self.send_message(msg)
+        await self._safe_send(self.chat_id, msg)
 
-    def send_message(self, text: str) -> None:
+    async def send_message(self, text: str) -> None:
         """Sends a message to the configured Telegram chat asynchronously."""
         if not (self.bot_token and self.chat_id):
             return
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.create_task(self.msg_queue.put(text))
         except RuntimeError:
             try:
@@ -167,9 +167,9 @@ class TelegramNotifier:
             f"🔌 Disconnecting from Broker.\n\n"
             f"💤 _System Offline._"
         )
-        self.send_message(msg)
+        await self._safe_send(self.chat_id, msg)
 
-    def send_signal_alert(self, symbol: str, signal: dict) -> None:
+    async def send_signal_alert(self, symbol: str, signal: dict) -> None:
         """Formats and sends a detailed signal alert to Telegram."""
         header = "🟢 *BUY SIGNAL DETECTED* 🟢" if signal["signal"] == "BUY" else "🔴 *SELL SIGNAL DETECTED* 🔴"
         direction = "LONG" if signal["signal"] == "BUY" else "SHORT"
@@ -199,7 +199,7 @@ class TelegramNotifier:
             f"💰 *TP3:* {tp3_str}\n\n"
             f"⚖️ *Recommended Lot:* {signal.get('lot_size', 0.01)}"
         )
-        self.send_message(msg)
+        await self._safe_send(self.chat_id, msg)
 
     async def send_startup_message(self, win_rate: float, total_trades: int) -> None:
         """Sends a startup message with the latest performance metrics."""
@@ -210,9 +210,11 @@ class TelegramNotifier:
             f"🔄 *Total Trades Analyzed:* {total_trades}\n\n"
             f"📡 _Scanning live markets for high-probability setups..._"
         )
-        self.send_message(msg)
+        await self._safe_send(self.chat_id, msg)
 
-    def send_trade_result(self, symbol: str, outcome: str, pips: float, won: bool, pnl: float, currency: str) -> None:
+    async def send_trade_result(
+        self, symbol: str, outcome: str, pips: float, won: bool, pnl: float, currency: str
+    ) -> None:
         """Sends a trade result summary to Telegram with clear win/loss indicators and performance metrics."""
         result_emoji = "🏆" if won else "💔"
         curr_sym = self._get_currency_symbol(currency)
@@ -223,4 +225,4 @@ class TelegramNotifier:
             f"📏 *Pips:* {pips:.1f} Pips\n"
             f"💵 *Net PnL:* {curr_sym}{pnl:.2f}\n"
         )
-        self.send_message(msg)
+        await self._safe_send(self.chat_id, msg)

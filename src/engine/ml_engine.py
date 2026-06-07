@@ -9,7 +9,6 @@ from keras.callbacks import EarlyStopping
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 from typing import Dict, Optional, Tuple
@@ -17,8 +16,7 @@ from typing import Dict, Optional, Tuple
 from src.config import (
     CALIBRATOR_FILE,
     ENTRY_MODEL_FILE,
-    EXIT_MODEL_FILE,
-    EXIT_SCALER_FILE,
+    EXIT_MULTIPLIERS_FILE,
     FEATURE_COLS,
     MIN_RR,
     SCALER_FILE,
@@ -39,10 +37,9 @@ class NeuralPredictor:
 
     def __init__(self, auto_load: bool = False):
         self.entry_model: Optional[tf.keras.Model] = None
-        self.exit_model: Optional[tf.keras.Model] = None
         self.scaler: Optional[StandardScaler] = None
-        self.exit_scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
+        self.strategy_exit_multipliers: Dict[str, float] = {}
         self.is_ready: bool = False
         self._predict_lock = threading.Lock()
 
@@ -63,12 +60,10 @@ class NeuralPredictor:
             try:
                 self.entry_model = tf.keras.models.load_model(ENTRY_MODEL_FILE)
                 self.scaler = joblib.load(SCALER_FILE)
-                if os.path.exists(EXIT_MODEL_FILE):
-                    self.exit_model = tf.keras.models.load_model(EXIT_MODEL_FILE)
-                if os.path.exists(EXIT_SCALER_FILE):
-                    self.exit_scaler = joblib.load(EXIT_SCALER_FILE)
                 if os.path.exists(CALIBRATOR_FILE):
                     self.calibrator = joblib.load(CALIBRATOR_FILE)
+                if os.path.exists(EXIT_MULTIPLIERS_FILE):
+                    self.strategy_exit_multipliers = joblib.load(EXIT_MULTIPLIERS_FILE)
                 self.is_ready = True
                 logger.info("✅ ML Artifacts loaded successfully on init.")
             except Exception as e:
@@ -92,22 +87,13 @@ class NeuralPredictor:
 
         return df
 
-    def _predict_exit(self, df_input: pd.DataFrame) -> float:
-        """Helper to safely predict the exit ATR with boundaries."""
-        if not self.exit_model or not self.exit_scaler:
-            return 3.0
-
-        X_new_exit = self.exit_scaler.transform(df_input)
-        raw_exit = float(self.exit_model.predict(X_new_exit, verbose=0)[0][0])
-        return max(MIN_RR, min(raw_exit, 6.0))
-
     def _train_entry_model(
         self, X_scaled: np.ndarray, y_entry: np.ndarray, early_stop: EarlyStopping
     ) -> Tuple[tf.keras.Model, np.ndarray, np.ndarray]:
         """Constructs and trains the binary classification model for entries."""
-        X_train, X_cal, y_train, y_cal = train_test_split(
-            X_scaled, y_entry, test_size=0.15, random_state=42, stratify=y_entry
-        )
+        split_idx = int(len(X_scaled) * 0.80)
+        X_train, X_cal = X_scaled[:split_idx], X_scaled[split_idx:]
+        y_train, y_cal = y_entry[:split_idx], y_entry[split_idx:]
 
         classes = np.unique(y_train)
         if len(classes) > 1:
@@ -118,16 +104,17 @@ class NeuralPredictor:
             logger.warning("⚠️ Only one target class found in training split! Falling back to 1.0 weights.")
             class_weight_dict = {0: 1.0, 1: 1.0}
 
+        # 32 -> 16 -> 8 -> 1 Architecture
         model = tf.keras.models.Sequential(
             [
                 tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
-                tf.keras.layers.Dense(64, activation="relu"),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.2),
                 tf.keras.layers.Dense(32, activation="relu"),
                 tf.keras.layers.BatchNormalization(),
                 tf.keras.layers.Dropout(0.2),
                 tf.keras.layers.Dense(16, activation="relu"),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.Dropout(0.2),
+                tf.keras.layers.Dense(8, activation="relu"),
                 tf.keras.layers.Dense(1, activation="sigmoid"),
             ]
         )
@@ -146,34 +133,18 @@ class NeuralPredictor:
 
         return model, X_cal, y_cal
 
-    def _train_exit_model(self, df: pd.DataFrame, early_stop: EarlyStopping) -> Optional[tf.keras.Model]:
-        """Constructs and trains the regression model for trade excursions (winners only)."""
-        X_all = df[FEATURE_COLS]
-        self.exit_scaler = StandardScaler()
-        X_all_scaled = self.exit_scaler.fit_transform(X_all)
-
-        y_exit = np.where(df["target_win"] == 1, df["target_excursion"], 0.0)
-
-        model = tf.keras.models.Sequential(
-            [
-                tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
-                tf.keras.layers.Dense(16, activation="relu"),
-                tf.keras.layers.Dense(1, activation="linear"),
-            ]
-        )
-
-        model.compile(optimizer="adam", loss="mse", metrics=["mae"])
-        model.fit(
-            X_all_scaled,
-            y_exit,
-            epochs=100,
-            batch_size=32,
-            verbose=1,
-            validation_split=0.15,
-            callbacks=[early_stop],
-        )
-
-        return model
+    def _train_strategy_exit_multipliers(self, df: pd.DataFrame) -> Dict[str, float]:
+        # Train strictly on wins
+        df_wins = df[df["target_win"] == 1]
+        multipliers = {}
+        for strat in df["strategy"].unique():
+            strat_wins = df_wins[df_wins["strategy"] == strat]
+            if not strat_wins.empty:
+                strat_mean = strat_wins["target_excursion"].mean()
+                multipliers[strat] = max(MIN_RR, min(strat_mean, 6.0))
+            else:
+                multipliers[strat] = 3.0
+        return multipliers
 
     def _train_calibrator(self, X_cal: np.ndarray, y_cal: np.ndarray) -> IsotonicRegression:
         """Trains the Isotonic Regression model to align raw probabilities with reality."""
@@ -190,16 +161,14 @@ class NeuralPredictor:
         """Saves models, scalers, and calibrators to disk."""
         if self.entry_model:
             self.entry_model.save(ENTRY_MODEL_FILE)
-        if self.exit_model:
-            self.exit_model.save(EXIT_MODEL_FILE)
         if self.scaler:
             joblib.dump(self.scaler, SCALER_FILE)
-        if self.exit_scaler:
-            joblib.dump(self.exit_scaler, EXIT_SCALER_FILE)
         if self.calibrator:
             joblib.dump(self.calibrator, CALIBRATOR_FILE)
+        if self.strategy_exit_multipliers:
+            joblib.dump(self.strategy_exit_multipliers, EXIT_MULTIPLIERS_FILE)
 
-    def predict(self, features: dict) -> Dict[str, float]:
+    def predict(self, features: dict, strategy: str = "Unknown") -> Dict[str, float]:
         """Predicts entry probability, dynamic risk sizing, and optimal exit ATR."""
         if not self.is_ready or self.entry_model is None:
             return {"prob": 0.5, "risk_mult": 1.0, "pred_exit_atr": 3.0}
@@ -212,9 +181,12 @@ class NeuralPredictor:
             with self._predict_lock:
                 X_new = self.scaler.transform(df_input)
 
-                if np.any(np.abs(X_new) > 4.0):
-                    logger.warning("⚠️ Feature Drift Detected: Extrapolating beyond 4σ from training data bounds.")
-                    X_new = np.clip(X_new, -4.0, 4.0)
+                # Feature Distribution Drift Check (Runtime assertion)
+                z_scores = np.abs(X_new[0])
+                drifted_indices = np.where(z_scores > 4.0)[0]
+                if len(drifted_indices) > 0:
+                    drifted_features = [FEATURE_COLS[i] for i in drifted_indices]
+                    logger.warning(f"⚠️ Feature Drift Detected on {drifted_features}: values exceeded 4σ.")
 
                 raw_prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
 
@@ -222,7 +194,7 @@ class NeuralPredictor:
                 prob = float(self.calibrator.transform([raw_prob])[0]) if self.calibrator else raw_prob
 
                 # Predict exit ATR (Default to 3.0 if model is missing)
-                pred_exit_atr = self._predict_exit(df_input)
+                pred_exit_atr = self.strategy_exit_multipliers.get(strategy, 3.0)
 
             # Calculate dynamic risk sizing based on conviction
             risk_mult = self._calculate_risk_multiplier(prob)
@@ -239,18 +211,6 @@ class NeuralPredictor:
         if df is None:
             return
 
-        expected_sparse_features = [
-            "is_htf_aligned",
-            "sweep_aligned",
-            "sweep_snapback_vel",
-            "dist_to_asia_extremes_atr",
-        ]
-
-        for col in FEATURE_COLS:
-            zero_pct = (df[col] == 0.0).mean()
-            if zero_pct > 0.95 and col not in expected_sparse_features:
-                logger.warning(f"⚠️ Schema mismatch detected: {col} is >95% zeros. Consider wiping legacy ML data.")
-
         try:
             X = df[FEATURE_COLS]
             y_entry = df["target_win"].values
@@ -259,7 +219,10 @@ class NeuralPredictor:
             X_scaled = self.scaler.fit_transform(X)
 
             rf = RandomForestClassifier(n_estimators=50, class_weight="balanced", n_jobs=-1, random_state=42)
-            auc_test = cross_val_score(rf, X_scaled, y_entry, cv=3, scoring="roc_auc").mean()
+            # Use chronological CV split evaluation
+            split_idx = int(len(X_scaled) * 0.8)
+            rf.fit(X_scaled[:split_idx], y_entry[:split_idx])
+            auc_test = roc_auc_score(y_entry[split_idx:], rf.predict_proba(X_scaled[split_idx:])[:, 1])
             logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
 
             if auc_test < MIN_AUC_GATE:
@@ -267,7 +230,6 @@ class NeuralPredictor:
                 return
 
             entry_stop = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1)
-            exit_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=1)
 
             # 2. Train Entry Model
             logger.info("🧠 Training SMC Entry Model...")
@@ -282,9 +244,9 @@ class NeuralPredictor:
                 )
                 return
 
-            # 3. Train Exit Model
-            logger.info("🧠 Training SMC Exit Model...")
-            self.exit_model = self._train_exit_model(df, exit_stop)
+            # 3. Train Exit Multipliers
+            logger.info("🧠 Generating Exit Multipliers...")
+            self.strategy_exit_multipliers = self._train_strategy_exit_multipliers(df)
 
             # 4. Calibrate Predictions
             logger.info("⚖️ Calibrating Probabilities...")

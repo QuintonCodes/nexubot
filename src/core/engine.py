@@ -79,8 +79,7 @@ class NexubotEngine:
             acct = await self.provider.get_account_summary()
             if acct:
                 self.session_stats["currency"] = acct.get("currency", "USD")
-
-            self.ai_engine.set_context(acct["balance"], self.db, acct.get("currency", "USD"))
+                self.ai_engine.set_context(acct.get("balance", 0.0), self.db, acct.get("currency", "USD"))
 
             await self.offline.check_offline_trades()
 
@@ -119,7 +118,6 @@ class NexubotEngine:
         self.active_signals.clear()
 
         await self.db.log_session(self.session_id, self.session_stats["start"], self.session_stats)
-
         await self.db.close()
         await self.provider.shutdown()
         return True

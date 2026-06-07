@@ -70,36 +70,30 @@ EXIT_MODEL_FILE = "nexubot_exit.keras"
 SCALER_FILE = "nexubot_scaler.pkl"
 EXIT_SCALER_FILE = "nexubot_exit_scaler.pkl"
 CALIBRATOR_FILE = "nexubot_calibrator.pkl"
+EXIT_MULTIPLIERS_FILE = "nexubot_exit_multipliers.pkl"
 TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
-    "log_distance_to_poi",
-    "is_liquidity_swept_tier",
-    "sweep_depth_atr",
     "pd_deviation_from_equilibrium",
-    "zone_overlap_count",
-    "body_ratio",
-    "vol_ratio",
-    "momentum_exhaustion_count",
+    "log_distance_to_poi",
     "dist_to_pdh_atr",
     "dist_to_pdl_atr",
-    "sweep_snapback_vel",
     "dist_to_asia_extremes_atr",
-    "hour_sin",
-    "hour_cos",
-    "mins_since_kz_open",
+    "vwap_distance_atr",
+    "is_liquidity_swept_tier",
+    "sweep_depth_atr",
+    "sweep_recovery_speed",
+    "body_ratio",
     "favor_wick_pct",
     "adverse_wick_pct",
+    "vol_ratio",
+    "volume_trend_3",
+    "atr_expansion_ratio",
+    "rr_at_entry",
+    "hour_sin",
+    "hour_cos",
     "structure_age_bars",
     "zone_age_bars",
-    "atr_regime_percentile",
-    "rr_at_entry",
-    "sweep_recovery_speed",
-    "htf_alignment_score",
-    "atr_expansion_ratio",
-    "zone_mitigation_quality",
-    "vwap_distance_atr",
-    "volume_trend_3",
 ]
 
 MAX_ROWS = 14000

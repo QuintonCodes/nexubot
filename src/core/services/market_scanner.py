@@ -42,13 +42,13 @@ class MarketScanner:
             if not self.engine.is_running or signals_found >= MAX_SIGNALS_PER_SCAN:
                 break
 
-            if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
-                break
-
             # 1. State Validation Lock
             async with self._active_signals_lock:
                 if sym in self._currently_scanning:
                     continue
+
+                if time.time() - self._last_signal_time < GLOBAL_SIGNAL_COOLDOWN:
+                    break
 
                 active_syms = [s.get("symbol") for s in self.engine.active_signals]
 
@@ -87,7 +87,7 @@ class MarketScanner:
 
                         # 1. Alert via Telegram
                         if hasattr(self.engine, "notifier"):
-                            self.engine.notifier.send_signal_alert(sym, signal)
+                            await self.engine.notifier.send_signal_alert(sym, signal)
 
                         # 2. Start monitoring the trade for TP/SL
                         self.engine.monitored_tasks[sym] = asyncio.create_task(

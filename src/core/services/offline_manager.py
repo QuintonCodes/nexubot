@@ -118,7 +118,8 @@ class OfflineManager:
             logger.info("✅ No interrupted trades found.")
             return
 
-        for symbol, signal, start_time in active_trades:
+        async def process_trade(trade_data):
+            symbol, signal, start_time = trade_data
             self.engine.ai_engine.register_active_trade(symbol, signal.get("strategy", "Unknown"))
 
             elapsed = time.time() - start_time
@@ -199,3 +200,7 @@ class OfflineManager:
                 self.engine.monitored_tasks[symbol] = asyncio.create_task(
                     self.engine.monitor.verify_trade_realtime(symbol, signal, start_time)
                 )
+
+        # Parallelise Processing
+        tasks = [process_trade(t) for t in active_trades]
+        await asyncio.gather(*tasks)

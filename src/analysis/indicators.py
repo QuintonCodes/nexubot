@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Union
 
-from src.config import SESSION_CONFIG
+from src.config import CANDLE_LIMIT
 
 
 class TechnicalAnalyzer:
@@ -28,6 +28,7 @@ class TechnicalAnalyzer:
         df["atr_ema_48"] = df["atr"].ewm(span=48, adjust=False).mean()
         df["atr_expansion_ratio"] = df["atr"] / df["atr_ema_48"].replace(0, np.nan)
         df["atr_expansion_ratio"] = df["atr_expansion_ratio"].fillna(1.0)
+        df.loc[df.index[:48], "atr_expansion_ratio"] = 1.0
 
         # 2. Daily VWAP
         df["pv"] = ((df["high"] + df["low"] + df["close"]) / 3) * df["volume"]
@@ -76,7 +77,6 @@ class TechnicalAnalyzer:
         df["asian_low"] = df["date_group"].map(asian_lows)
 
         df["color"] = np.where(df["close"] > df["open"], 1, -1)
-        df["momentum_exhaustion_count"] = df.groupby((df["color"] != df["color"].shift()).cumsum()).cumcount()
 
         # Safely fill price-based columns before global zeroing to prevent SL Cap / VWAP corruption
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.0005)
@@ -84,8 +84,6 @@ class TechnicalAnalyzer:
         df["vol_sma_20"] = df["vol_sma_20"].ffill().fillna(1.0)
         df["asian_high"] = df["asian_high"].ffill().fillna(df["high"])
         df["asian_low"] = df["asian_low"].ffill().fillna(df["low"])
-
-        df["atr_regime_percentile"] = df["atr"].rolling(100).rank(pct=True).fillna(0.5)
 
         return df
 
@@ -114,20 +112,12 @@ class TechnicalAnalyzer:
             else pd.to_datetime(curr.get("time"), unit="s")
         )
         h, m = dt.hour, dt.minute
-
-        kz_start = 0
-        if SESSION_CONFIG["ASIAN_START"] <= h < SESSION_CONFIG["ASIAN_END"]:
-            kz_start = SESSION_CONFIG["ASIAN_START"]
-        elif SESSION_CONFIG["LONDON_START"] <= h < SESSION_CONFIG["LONDON_END"]:
-            kz_start = SESSION_CONFIG["LONDON_START"]
-        elif SESSION_CONFIG["NY_START"] <= h < SESSION_CONFIG["NY_END"]:
-            kz_start = SESSION_CONFIG["NY_START"]
+        decimal_hour = h + (m / 60.0)
 
         # Distance & Mitigation Tracking
         all_zones = active_fvgs + active_ifvgs + active_obs
         dist_nearest_poi_atr = 0.0
         zone_age_bars = 0.0
-        zone_mitigation_quality = 1.0
 
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
@@ -135,16 +125,6 @@ class TechnicalAnalyzer:
                 min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price)) / safe_atr
             )
             zone_age_bars = float(nearest_poi.get("age", 0))
-
-            mits = nearest_poi.get("mitigations", 0)
-            if mits == 1:
-                zone_mitigation_quality = 0.67
-            elif mits == 2:
-                zone_mitigation_quality = 0.33
-            elif mits >= 3:
-                zone_mitigation_quality = 0.0
-
-        decimal_hour = h + (m / 60.0)
 
         body = abs(close_price - curr["open"])
         rng = curr["high"] - curr["low"] + 1e-10
@@ -176,48 +156,29 @@ class TechnicalAnalyzer:
                     max(curr["high"], curr.get("recent_high_5", curr["high"])) - close_price
                 ) / safe_atr
 
-        htf_alignment_score = 0.0
-        if signal_direction == "LONG":
-            if htf_trend == 1.0:
-                htf_alignment_score = 1.0
-            elif htf_trend == -1.0:
-                htf_alignment_score = -1.0
-        elif signal_direction == "SHORT":
-            if htf_trend == -1.0:
-                htf_alignment_score = 1.0
-            elif htf_trend == 1.0:
-                htf_alignment_score = -1.0
-
         vwap_distance_atr = (close_price - curr.get("vwap", close_price)) / safe_atr
 
         return {
-            "distance_to_poi": dist_nearest_poi_atr,
-            "is_liquidity_swept_tier": float(is_liquidity_swept),
-            "sweep_depth_atr": sweep_depth_atr,
             "pd_array_status": structure_info.get("pd_array", 0.5),
-            "zone_overlap_count": float(len([z for z in all_zones if z["low"] <= close_price <= z["high"]])),
-            "body_ratio": body_ratio,
-            "vol_ratio": vol_ratio,
-            "momentum_exhaustion_count": float(curr.get("momentum_exhaustion_count", 0)),
+            "distance_to_poi": dist_nearest_poi_atr,
             "dist_to_pdh_atr": dist_to_pdh_atr,
             "dist_to_pdl_atr": dist_to_pdl_atr,
-            "sweep_snapback_vel": abs(close_price - curr["open"]) / safe_atr if is_liquidity_swept > 0 else 0.0,
             "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
-            "hour_sin": math.sin(2 * math.pi * decimal_hour / 24.0),
-            "hour_cos": math.cos(2 * math.pi * decimal_hour / 24.0),
-            "mins_since_kz_open": float((h - kz_start) * 60 + m) if kz_start != 0 else 0.0,
+            "vwap_distance_atr": vwap_distance_atr,
+            "is_liquidity_swept_tier": float(is_liquidity_swept),
+            "sweep_depth_atr": sweep_depth_atr,
+            "sweep_recovery_speed": sweep_recovery_speed,
+            "body_ratio": body_ratio,
             "favor_wick_pct": favor_wick_pct,
             "adverse_wick_pct": adverse_wick_pct,
+            "vol_ratio": vol_ratio,
+            "volume_trend_3": volume_trend_3,
+            "atr_expansion_ratio": float(curr.get("atr_expansion_ratio", 1.0)),
+            "rr_at_entry": rr_at_entry,
+            "hour_sin": math.sin(2 * math.pi * decimal_hour / 24.0),
+            "hour_cos": math.cos(2 * math.pi * decimal_hour / 24.0),
             "structure_age_bars": float(structure_info.get("bars_since_break", 0)),
             "zone_age_bars": zone_age_bars,
-            "atr_regime_percentile": float(curr.get("atr_regime_percentile", 0.5)),
-            "rr_at_entry": rr_at_entry,
-            "sweep_recovery_speed": sweep_recovery_speed,
-            "htf_alignment_score": htf_alignment_score,
-            "atr_expansion_ratio": float(curr.get("atr_expansion_ratio", 1.0)),
-            "zone_mitigation_quality": zone_mitigation_quality,
-            "vwap_distance_atr": vwap_distance_atr,
-            "volume_trend_3": volume_trend_3,
         }
 
     @staticmethod
@@ -349,7 +310,9 @@ class TechnicalAnalyzer:
         }
 
     @staticmethod
-    def extract_active_pois(data: Union[pd.DataFrame, list], lookback_limit: int = 500) -> Tuple[list, list, list]:
+    def extract_active_pois(
+        data: Union[pd.DataFrame, list], lookback_limit: int = CANDLE_LIMIT
+    ) -> Tuple[list, list, list]:
         """Extracts POIs, handles conversions, and tracks their Mitigation Count."""
         active_fvgs, active_ifvgs, active_obs = [], [], []
         records = data.to_dict("records") if isinstance(data, pd.DataFrame) else data

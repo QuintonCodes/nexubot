@@ -22,9 +22,19 @@ logger = logging.getLogger(__name__)
 
 # Constants for backfill limits
 MAX_ROWS_PER_SYMBOL = 2000
-TARGET_PER_STRAT_PER_SYMBOL = 400
 FUTURE_WINDOW_SIZE = 50  # 50 × 5min = ~4.2 hours, matches live timeout
 WARMUP_PERIOD = 200  # EMA-200 needs 200 bars to converge; don't reduce
+
+# Rebalancing Strategy Data Representation
+TARGET_PER_STRAT_PER_SYMBOL = {
+    "Daily/Asian Sweep": 800,
+    "Major Swing Sweep": 800,
+    "MAJOR OB CE Bounce": 800,
+    "FVG Bounce": 800,
+    "IFVG Re-Test": 300,
+    "BREAKER OB CE Bounce": 300,
+    "VWAP Bounce": 300,
+}
 
 
 def _calculate_risk_and_tp(
@@ -45,8 +55,11 @@ def _calculate_risk_and_tp(
         if (atr * 0.2) < suggested_dist < (atr * 6.0):
             sl_dist = suggested_dist
 
-    hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
+    MAX_SL_CAP = atr * 3.5
+    if sl_dist > MAX_SL_CAP:
+        return None
 
+    hard_blockades = active_ifvgs + [ob for ob in active_obs if ob.get("tier") == "MAJOR"]
     base_tp_dist = max(atr * 4.0, sl_dist * MIN_RR)
 
     if signal["direction"] == "LONG":
@@ -225,7 +238,6 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
         df_full, records, point, is_volatile_asset = data_bundle
         symbol_rows_collected = 0
         symbol_strategy_counts = {}
-
         active_fvgs, active_ifvgs, active_obs = [], [], []
 
         # --- SIMULATION ENGINE ---
@@ -267,7 +279,8 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
 
             # Evaluate strategy cap early to save computation
             strat = signal.get("strategy", "Unknown")
-            if symbol_strategy_counts.get(strat, 0) >= TARGET_PER_STRAT_PER_SYMBOL:
+            target_limit = TARGET_PER_STRAT_PER_SYMBOL.get(strat, 400)
+            if symbol_strategy_counts.get(strat, 0) >= target_limit:
                 continue
 
             # Filter heavily marginal signals to avoid dataset degradation

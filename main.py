@@ -78,7 +78,7 @@ async def main() -> None:
             print("Initiating Graceful Shutdown...")
             stats = engine.session_stats
 
-            notifier.send_daily_report(
+            await notifier.send_daily_report(
                 stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
             )
             await notifier.send_shutdown_message()

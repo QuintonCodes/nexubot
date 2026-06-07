@@ -37,7 +37,6 @@ class AITradingEngine:
         self.collector = DataCollector()
 
         self._acct_cache = {"data": None, "time": 0}
-
         self._log_throttle = collections.OrderedDict()
         self._poi_cache = collections.OrderedDict()
         self.htf_cache = collections.OrderedDict()
@@ -258,6 +257,7 @@ class AITradingEngine:
                 "risk_zar": round(actual_risk_zar, 2),
                 "profit_zar": round(profit_zar, 2),
                 "risk_account": round(actual_risk_account, 2),
+                "profit_account": round(profit_account, 2),
                 "currency": self.currency,
                 "tick_value": tick_value,
                 "point": point,
@@ -289,9 +289,7 @@ class AITradingEngine:
         cache_entry = self.htf_cache.get(symbol)
 
         if cache_entry and (now - cache_entry["time"]) < 3600:
-            latest_h1 = await provider.fetch_klines(symbol, "1h", 1)
-            if latest_h1 and latest_h1[-1]["time"] == cache_entry.get("last_h1_time"):
-                return cache_entry["trend"]
+            return cache_entry["trend"]
 
         klines = await provider.fetch_klines(symbol, "1h", 1000)
         trend, last_time = 0.0, 0
@@ -416,7 +414,7 @@ class AITradingEngine:
         )
 
         engineered_features = self.collector.engineer_features(raw_features)
-        nn_result = self.nn_brain.predict(engineered_features)
+        nn_result = self.nn_brain.predict(engineered_features, strategy=final_signal.get("strategy", "Unknown"))
         session_info = self.get_session_status()
 
         adjusted_signal = await self.adjust_confidence(
@@ -441,7 +439,7 @@ class AITradingEngine:
         elif pd_status >= 0.6:
             pd_text = f"Premium 🔴 ({pd_status:.2f})"
 
-        struct_break = raw_features.get("structural_break", 0.0)
+        struct_break = final_signal.get("structural_break_val", 0.0)
         break_text = "None"
         if struct_break == 1.0:
             break_text = "Bullish BOS 📈"
@@ -565,7 +563,7 @@ class AITradingEngine:
         engineered_features = self.collector.engineer_features(raw_features)
 
         # Inference from read-only bundled model
-        nn_result = self.nn_brain.predict(engineered_features)
+        nn_result = self.nn_brain.predict(engineered_features, strategy=final_signal.get("strategy", "Unknown"))
 
         # Confidence Adjustment
         final_signal = await self.adjust_confidence(
@@ -751,7 +749,6 @@ class AITradingEngine:
 
             self.collector.log_training_data(symbol, strategy, features, 1 if won else 0, pnl, excursion)
             logger.info(f"💾 Live features for {symbol} saved to training data.")
-
             del self.active_features[symbol]
 
     def register_active_trade(self, symbol: str, strategy: str = "Unknown") -> None:

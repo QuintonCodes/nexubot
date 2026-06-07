@@ -35,43 +35,43 @@ class DataCollector:
         f = raw_features
         raw_distance = max(0.0, float(f.get("distance_to_poi", 0.0)))
 
+        # Clip severe outliers
+        vwap_dist = float(f.get("vwap_distance_atr", 0.0))
+        vol_trend = float(f.get("volume_trend_3", 0.0))
+        vwap_dist_clipped = float(np.clip(vwap_dist, -5.0, 5.0))
+        vol_trend_clipped = float(np.clip(vol_trend, -3.0, 3.0))
+
         return {
-            "log_distance_to_poi": round(float(np.log1p(raw_distance)), 4),
-            "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
-            "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
             "pd_deviation_from_equilibrium": round(abs(f.get("pd_array_status", 0.5) - 0.5), 4),
-            "zone_overlap_count": float(f.get("zone_overlap_count", 0.0)),
-            "body_ratio": round(f.get("body_ratio", 0.0), 4),
-            "vol_ratio": round(f.get("vol_ratio", 0.0), 4),
-            "momentum_exhaustion_count": round(float(np.log1p(f.get("momentum_exhaustion_count", 0.0))), 4),
+            "log_distance_to_poi": round(float(np.log1p(raw_distance)), 4),
             "dist_to_pdh_atr": round(f.get("dist_to_pdh_atr", 0.0), 4),
             "dist_to_pdl_atr": round(f.get("dist_to_pdl_atr", 0.0), 4),
-            "sweep_snapback_vel": round(f.get("sweep_snapback_vel", 0.0), 4),
             "dist_to_asia_extremes_atr": round(f.get("dist_to_asia_extremes_atr", 0.0), 4),
-            "hour_sin": round(f.get("hour_sin", 0.0), 4),
-            "hour_cos": round(f.get("hour_cos", 0.0), 4),
-            "mins_since_kz_open": float(f.get("mins_since_kz_open", 0.0)),
+            "vwap_distance_atr": round(vwap_dist_clipped, 4),
+            "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
+            "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
+            "sweep_recovery_speed": round(f.get("sweep_recovery_speed", 0.0), 4),
+            "body_ratio": round(f.get("body_ratio", 0.0), 4),
             "favor_wick_pct": round(f.get("favor_wick_pct", 0.0), 4),
             "adverse_wick_pct": round(f.get("adverse_wick_pct", 0.0), 4),
+            "vol_ratio": round(f.get("vol_ratio", 0.0), 4),
+            "volume_trend_3": round(vol_trend_clipped, 4),
+            "atr_expansion_ratio": round(f.get("atr_expansion_ratio", 1.0), 4),
+            "rr_at_entry": round(f.get("rr_at_entry", 0.0), 4),
+            "hour_sin": round(f.get("hour_sin", 0.0), 4),
+            "hour_cos": round(f.get("hour_cos", 0.0), 4),
             "structure_age_bars": float(f.get("structure_age_bars", 0.0)),
             "zone_age_bars": round(float(np.log1p(f.get("zone_age_bars", 0.0))), 4),
-            "atr_regime_percentile": round(f.get("atr_regime_percentile", 0.0), 4),
-            "rr_at_entry": round(f.get("rr_at_entry", 0.0), 4),
-            "sweep_recovery_speed": round(f.get("sweep_recovery_speed", 0.0), 4),
-            "htf_alignment_score": float(f.get("htf_alignment_score", 0.0)),
-            "atr_expansion_ratio": round(f.get("atr_expansion_ratio", 1.0), 4),
-            "zone_mitigation_quality": round(f.get("zone_mitigation_quality", 1.0), 4),
-            "vwap_distance_atr": round(f.get("vwap_distance_atr", 0.0), 4),
-            "volume_trend_3": round(f.get("volume_trend_3", 0.0), 4),
         }
 
     def _prune_data_background(self):
         """Background thread function to prune the training data CSV to the latest max_rows entries when it exceeds the threshold."""
         try:
+            df = pd.read_csv(self.filename, on_bad_lines="skip")
+            temp_file = self.filename + ".tmp"
+            df.tail(self.max_rows).to_csv(temp_file, index=False)
+
             with self._lock:
-                df = pd.read_csv(self.filename, on_bad_lines="skip")
-                temp_file = self.filename + ".tmp"
-                df.tail(self.max_rows).to_csv(temp_file, index=False)
                 os.replace(temp_file, self.filename)
                 self._current_row_count = self.max_rows
             logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")

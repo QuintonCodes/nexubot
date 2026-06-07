@@ -156,7 +156,7 @@ class TradeMonitor:
             logger.info(f"🏁 Result ({symbol}): {outcome} | PnL: {curr_sym}{final_pnl:.2f} | Pips: {final_pips:.1f}")
 
             if is_filled:
-                self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won, final_pnl, currency)
+                await self.engine.notifier.send_trade_result(symbol, outcome, final_pips, won, final_pnl, currency)
 
                 # Initiate Ghost Tracking for Early Exits
                 if "Stopped in Profit/BE" in outcome:

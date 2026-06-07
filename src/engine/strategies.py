@@ -262,13 +262,10 @@ class StrategyAnalyzer:
             atr_buffer = curr["atr"] * 0.5
 
             for ob in valid_bull_obs:
-                if ob.get("tier") == "MAJOR":
+                if ob.get("tier") in ["MAJOR", "BREAKER"]:
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
                         continue
-                if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_low <= ob["high"]:
-                    ce = (ob["high"] + ob["low"]) / 2
-                    # Must close past 50% CE to prove momentum
-                    if close_price > ce:
+                    if recent_low <= ob["high"] and close_price > ((ob["high"] + ob["low"]) / 2):
                         return {
                             "strategy": f"{ob['tier']} OB CE Bounce",
                             "signal": "BUY",
@@ -300,12 +297,10 @@ class StrategyAnalyzer:
             atr_buffer = curr["atr"] * 0.5
 
             for ob in valid_bear_obs:
-                if ob.get("tier") == "MAJOR":
+                if ob.get("tier") in ["MAJOR", "BREAKER"]:
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
                         continue
-                if ob.get("tier") in ["MAJOR", "BREAKER"] and recent_high >= ob["low"]:
-                    ce = (ob["high"] + ob["low"]) / 2
-                    if close_price < ce:
+                    if recent_high >= ob["low"] and close_price < ((ob["high"] + ob["low"]) / 2):
                         return {
                             "strategy": f"{ob['tier']} OB CE Bounce",
                             "signal": "SELL",
