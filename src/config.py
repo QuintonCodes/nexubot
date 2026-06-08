@@ -24,7 +24,7 @@ MT5_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe"
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 FALLBACK_CRYPTO: list[str] = ["BTCUSDm", "ETHUSDm"]
-FALLBACK_FOREX: list[str] = ["EURUSDm"]
+FALLBACK_FOREX: list[str] = ["EURUSDm", "GBPUSDm", "USDJPYm"]
 FALLBACK_METALS: list[str] = ["XAUUSDm", "XAGUSDm"]
 FALLBACK_INDICES: list[str] = ["US30m"]
 
@@ -66,23 +66,19 @@ MAX_SIGNALS_PER_SCAN = 3
 # NEURAL NETWORK
 # ---------------------------------------------------------
 ENTRY_MODEL_FILE = "nexubot_entry.keras"
-EXIT_MODEL_FILE = "nexubot_exit.keras"
+EXIT_MODEL_FILE = "nexubot_exit.pkl"
 SCALER_FILE = "nexubot_scaler.pkl"
-EXIT_SCALER_FILE = "nexubot_exit_scaler.pkl"
 CALIBRATOR_FILE = "nexubot_calibrator.pkl"
-EXIT_MULTIPLIERS_FILE = "nexubot_exit_multipliers.pkl"
 TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
     "pd_deviation_from_equilibrium",
-    "log_distance_to_poi",
     "dist_to_pdh_atr",
     "dist_to_pdl_atr",
     "dist_to_asia_extremes_atr",
     "vwap_distance_atr",
     "is_liquidity_swept_tier",
     "sweep_depth_atr",
-    "sweep_recovery_speed",
     "body_ratio",
     "favor_wick_pct",
     "adverse_wick_pct",
@@ -94,9 +90,10 @@ FEATURE_COLS = [
     "hour_cos",
     "structure_age_bars",
     "zone_age_bars",
+    "interaction_structure_pd",
 ]
 
-MAX_ROWS = 14000
+MAX_ROWS = 18000
 
 
 # ---------------------------------------------------------

@@ -33,24 +33,27 @@ class DataCollector:
     def engineer_features(raw_features: dict) -> dict:
         """Transforms raw SMC features into the full engineered feature set."""
         f = raw_features
-        raw_distance = max(0.0, float(f.get("distance_to_poi", 0.0)))
 
-        # Clip severe outliers
+        # Clip severe outliers to prevent scaler corruption
+        dist_to_pdh_atr = float(np.clip(f.get("dist_to_pdh_atr", 0.0), 0.0, 30.0))
+        dist_to_pdl_atr = float(np.clip(f.get("dist_to_pdl_atr", 0.0), 0.0, 30.0))
         vwap_dist = float(f.get("vwap_distance_atr", 0.0))
         vol_trend = float(f.get("volume_trend_3", 0.0))
         vwap_dist_clipped = float(np.clip(vwap_dist, -5.0, 5.0))
         vol_trend_clipped = float(np.clip(vol_trend, -3.0, 3.0))
 
+        # Base calculations used across multiple terms
+        pd_deviation = round(abs(f.get("pd_array_status", 0.5) - 0.5), 4)
+        structure_age = float(f.get("structure_age_bars", 0.0))
+
         return {
-            "pd_deviation_from_equilibrium": round(abs(f.get("pd_array_status", 0.5) - 0.5), 4),
-            "log_distance_to_poi": round(float(np.log1p(raw_distance)), 4),
-            "dist_to_pdh_atr": round(f.get("dist_to_pdh_atr", 0.0), 4),
-            "dist_to_pdl_atr": round(f.get("dist_to_pdl_atr", 0.0), 4),
+            "pd_deviation_from_equilibrium": pd_deviation,
+            "dist_to_pdh_atr": round(dist_to_pdh_atr, 4),
+            "dist_to_pdl_atr": round(dist_to_pdl_atr, 4),
             "dist_to_asia_extremes_atr": round(f.get("dist_to_asia_extremes_atr", 0.0), 4),
             "vwap_distance_atr": round(vwap_dist_clipped, 4),
             "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
             "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
-            "sweep_recovery_speed": round(f.get("sweep_recovery_speed", 0.0), 4),
             "body_ratio": round(f.get("body_ratio", 0.0), 4),
             "favor_wick_pct": round(f.get("favor_wick_pct", 0.0), 4),
             "adverse_wick_pct": round(f.get("adverse_wick_pct", 0.0), 4),
@@ -60,20 +63,22 @@ class DataCollector:
             "rr_at_entry": round(f.get("rr_at_entry", 0.0), 4),
             "hour_sin": round(f.get("hour_sin", 0.0), 4),
             "hour_cos": round(f.get("hour_cos", 0.0), 4),
-            "structure_age_bars": float(f.get("structure_age_bars", 0.0)),
+            "structure_age_bars": structure_age,
             "zone_age_bars": round(float(np.log1p(f.get("zone_age_bars", 0.0))), 4),
+            "interaction_structure_pd": round(structure_age * pd_deviation, 4),
         }
 
     def _prune_data_background(self):
         """Background thread function to prune the training data CSV to the latest max_rows entries when it exceeds the threshold."""
         try:
-            df = pd.read_csv(self.filename, on_bad_lines="skip")
-            temp_file = self.filename + ".tmp"
-            df.tail(self.max_rows).to_csv(temp_file, index=False)
-
+            # Enforce lock on file read operation to circumvent threading vs async race conditions
             with self._lock:
+                df = pd.read_csv(self.filename, on_bad_lines="skip")
+                temp_file = self.filename + ".tmp"
+                df.tail(self.max_rows).to_csv(temp_file, index=False)
                 os.replace(temp_file, self.filename)
                 self._current_row_count = self.max_rows
+
             logger.info(f"🧹 Training data pruned to latest {self.max_rows} rows.")
         except Exception as e:
             logger.error(f"Prune background error: {e}")

@@ -117,6 +117,10 @@ class NexubotEngine:
         self.monitored_tasks.clear()
         self.active_signals.clear()
 
+        # Send termination injection sentinel value directly into notifier thread
+        if self.notifier:
+            await self.notifier.shutdown()
+
         await self.db.log_session(self.session_id, self.session_stats["start"], self.session_stats)
         await self.db.close()
         await self.provider.shutdown()

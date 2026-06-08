@@ -32,8 +32,10 @@ TARGET_PER_STRAT_PER_SYMBOL = {
     "MAJOR OB CE Bounce": 800,
     "FVG Bounce": 800,
     "IFVG Re-Test": 300,
-    "BREAKER OB CE Bounce": 300,
-    "VWAP Bounce": 300,
+    "BREAKER OB CE Bounce": 200,
+    "VWAP Bounce": 200,
+    "ICT OTE (Bullish)": 400,
+    "ICT OTE (Bearish)": 400,
 }
 
 
@@ -308,7 +310,6 @@ async def backfill_data(provider: DataProvider, target_symbols: Optional[List[st
                 is_liquidity_swept=is_liquidity_swept,
                 sweep_depth_atr=sweep_depth_atr,
                 atr=atr,
-                htf_trend=curr.get("htf_trend_mapped", 0.0),
                 rr_at_entry=rr,
             )
 

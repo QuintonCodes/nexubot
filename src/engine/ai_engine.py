@@ -409,7 +409,6 @@ class AITradingEngine:
             is_liquidity_swept=is_liquidity_swept,
             sweep_depth_atr=sweep_depth_atr,
             atr=snapshot["atr"],
-            htf_trend=htf_trend,
             rr_at_entry=structural_rr,
         )
 
@@ -556,7 +555,6 @@ class AITradingEngine:
             is_liquidity_swept=snapshot["is_liquidity_swept"],
             sweep_depth_atr=snapshot["sweep_depth_atr"],
             atr=snapshot["atr"],
-            htf_trend=snapshot["htf_trend"],
             rr_at_entry=structural_rr,
         )
 

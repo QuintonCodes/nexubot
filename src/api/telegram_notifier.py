@@ -47,6 +47,9 @@ class TelegramNotifier:
         """Background daemon processing the telegram message queue."""
         while True:
             text = await self.msg_queue.get()
+            if text is None:  # Shutdown sentinel
+                self.msg_queue.task_done()
+                break
             await self._safe_send(self.chat_id, text)
             self.msg_queue.task_done()
 
@@ -62,7 +65,7 @@ class TelegramNotifier:
         """Attempts to send a message multiple times if the network drops."""
         for i in range(retries):
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
                 return
             except Exception as e:
                 if i < retries - 1:
@@ -145,7 +148,7 @@ class TelegramNotifier:
         )
         await self._safe_send(self.chat_id, msg)
 
-    async def send_message(self, text: str) -> None:
+    def send_message(self, text: str) -> None:
         """Sends a message to the configured Telegram chat asynchronously."""
         if not (self.bot_token and self.chat_id):
             return
@@ -226,3 +229,7 @@ class TelegramNotifier:
             f"💵 *Net PnL:* {curr_sym}{pnl:.2f}\n"
         )
         await self._safe_send(self.chat_id, msg)
+
+    async def shutdown(self) -> None:
+        """Injects sentinel value to safely shut down the drain queue loop."""
+        await self.msg_queue.put(None)

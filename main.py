@@ -60,7 +60,7 @@ async def main() -> None:
             print("⚙️ Running Pre-Flight ML Optimization...")
             notifier.send_message("⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly.")
             try:
-                await asyncio.wait_for(asyncio.to_thread(engine.ai_engine.nn_brain.train_network), timeout=300.0)
+                await asyncio.wait_for(asyncio.to_thread(engine.ai_engine.nn_brain.train_network), timeout=600.0)
             except asyncio.TimeoutError:
                 print("⚠️ ML Training timed out. Proceeding with existing model.")
                 notifier.send_message("⚠️ ML Training timed out. Running with prior model.")

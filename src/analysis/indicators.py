@@ -48,7 +48,9 @@ class TechnicalAnalyzer:
         df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=1).mean()
         df["vol_ratio"] = df["volume"] / df["vol_sma_20"].replace(0, np.nan)
         df["vol_ratio"] = df["vol_ratio"].fillna(1.0)
-        df["volume_trend_3"] = df["vol_ratio"] - df["vol_ratio"].shift(2).fillna(df["vol_ratio"])
+
+        # Vol Trend calculated over a stronger 5-bar delta threshold instead of 2-bars
+        df["volume_trend_3"] = df["vol_ratio"] - df["vol_ratio"].shift(5).fillna(df["vol_ratio"])
 
         # 6. Lookback Windows
         df["recent_low_5"] = df["low"].rolling(5).min()
@@ -98,7 +100,6 @@ class TechnicalAnalyzer:
         is_liquidity_swept: int,
         sweep_depth_atr: float,
         atr: float,
-        htf_trend: float,
         rr_at_entry: float = 0.0,
     ) -> Dict:
         """Compiles the strict SMC feature set for neural network predictions and training."""
@@ -116,14 +117,10 @@ class TechnicalAnalyzer:
 
         # Distance & Mitigation Tracking
         all_zones = active_fvgs + active_ifvgs + active_obs
-        dist_nearest_poi_atr = 0.0
         zone_age_bars = 0.0
 
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
-            dist_nearest_poi_atr = (
-                min(abs(nearest_poi["high"] - close_price), abs(nearest_poi["low"] - close_price)) / safe_atr
-            )
             zone_age_bars = float(nearest_poi.get("age", 0))
 
         body = abs(close_price - curr["open"])
@@ -145,29 +142,16 @@ class TechnicalAnalyzer:
         ah, al = curr.get("asian_high"), curr.get("asian_low")
         dist_to_asia_extremes_atr = min(abs(close_price - ah), abs(close_price - al)) / safe_atr if ah and al else 0.0
 
-        sweep_recovery_speed = 0.0
-        if is_liquidity_swept > 0:
-            if signal_direction == "LONG":
-                sweep_recovery_speed = (
-                    close_price - min(curr["low"], curr.get("recent_low_5", curr["low"]))
-                ) / safe_atr
-            else:
-                sweep_recovery_speed = (
-                    max(curr["high"], curr.get("recent_high_5", curr["high"])) - close_price
-                ) / safe_atr
-
         vwap_distance_atr = (close_price - curr.get("vwap", close_price)) / safe_atr
 
         return {
             "pd_array_status": structure_info.get("pd_array", 0.5),
-            "distance_to_poi": dist_nearest_poi_atr,
             "dist_to_pdh_atr": dist_to_pdh_atr,
             "dist_to_pdl_atr": dist_to_pdl_atr,
             "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
             "vwap_distance_atr": vwap_distance_atr,
             "is_liquidity_swept_tier": float(is_liquidity_swept),
             "sweep_depth_atr": sweep_depth_atr,
-            "sweep_recovery_speed": sweep_recovery_speed,
             "body_ratio": body_ratio,
             "favor_wick_pct": favor_wick_pct,
             "adverse_wick_pct": adverse_wick_pct,
@@ -290,13 +274,12 @@ class TechnicalAnalyzer:
         pd_range = last_high - last_low
         pd_array_status = max(0.0, min(1.0, (current_close - last_low) / pd_range)) if pd_range > 0 else 0.5
 
-        # Approximate bars since last major structural node
-        last_pivot_idx = (
-            confirmed_df[confirmed_df["pivot_high"] | confirmed_df["pivot_low"]].index[-1]
-            if not confirmed_df[confirmed_df["pivot_high"] | confirmed_df["pivot_low"]].empty
-            else df.index[-1]
-        )
-        bars_since = df.index[-1] - last_pivot_idx
+        pivots = confirmed_df[confirmed_df["pivot_high"] | confirmed_df["pivot_low"]]
+        if not pivots.empty:
+            last_pivot_idx_pos = df.index.get_loc(pivots.index[-1])
+            bars_since = len(df) - last_pivot_idx_pos - 1
+        else:
+            bars_since = len(df)
 
         return {
             "bos": bos,
