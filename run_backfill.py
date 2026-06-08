@@ -13,9 +13,7 @@ from src.config import (
     CALIBRATOR_FILE,
     ENTRY_MODEL_FILE,
     EXIT_MODEL_FILE,
-    EXIT_SCALER_FILE,
     SCALER_FILE,
-    EXIT_MULTIPLIERS_FILE,
 )
 
 load_dotenv()
@@ -35,9 +33,7 @@ def wipe_legacy_ml_data() -> None:
         CALIBRATOR_FILE,
         ENTRY_MODEL_FILE,
         EXIT_MODEL_FILE,
-        EXIT_SCALER_FILE,
         SCALER_FILE,
-        EXIT_MULTIPLIERS_FILE,
     ]
     cleaned = False
 
