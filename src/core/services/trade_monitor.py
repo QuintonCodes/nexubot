@@ -29,7 +29,7 @@ class TradeMonitor:
                 if hit_tp3:
                     pips = (tp3 - entry) / (point * 10) if is_long else (entry - tp3) / (point * 10)
                     msg = f"👻 *Ghost Tracker Update:* {symbol} eventually hit TP3 for a theoretical {pips:.1f} Pips!"
-                    self.engine.notifier.send_message(msg)
+                    await self.engine.notifier.send_message(msg)
                     break
 
                 await asyncio.sleep(2)
@@ -110,7 +110,7 @@ class TradeMonitor:
                         # Move SL to Breakeven (+ dynamic ATR buffer)
                         buffer = atr * 0.15
                         sl = entry + buffer if is_long else entry - buffer
-                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP1!* Moving SL to Breakeven.")
+                        await self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP1!* Moving SL to Breakeven.")
 
                 # TP2 Milestone Tracking
                 if tp1_hit and not tp2_hit and tp2 is not None:
@@ -120,7 +120,7 @@ class TradeMonitor:
                         be_stage = max(be_stage, 2)
                         # Move SL to TP1
                         sl = tp1
-                        self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP2!* Trailing SL to TP1.")
+                        await self.engine.notifier.send_message(f"🎯 *{symbol} Hit TP2!* Trailing SL to TP1.")
 
                 # TP3 Final Target
                 if tp3 is not None:

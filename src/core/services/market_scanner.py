@@ -157,7 +157,7 @@ class MarketScanner:
                     # Prevent spamming Telegram during dead market hours
                     session_status = self.engine.ai_engine.get_session_status()
                     if session_status.get("allow_trade", True):
-                        self.engine.notifier.send_message(
+                        await self.engine.notifier.send_message(
                             "📊 *Market Scanner Update*\nRe-ranking pairs by volatility and hunting for high-probability setups..."
                         )
 

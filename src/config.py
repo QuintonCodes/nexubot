@@ -72,18 +72,11 @@ CALIBRATOR_FILE = "nexubot_calibrator.pkl"
 TRAINING_FILE = "training_data.csv"
 
 FEATURE_COLS = [
-    "pd_deviation_from_equilibrium",
-    "dist_to_pdh_atr",
-    "dist_to_pdl_atr",
-    "dist_to_asia_extremes_atr",
-    "vwap_distance_atr",
     "is_liquidity_swept_tier",
-    "sweep_depth_atr",
     "body_ratio",
     "favor_wick_pct",
     "adverse_wick_pct",
     "vol_ratio",
-    "volume_trend_3",
     "atr_expansion_ratio",
     "rr_at_entry",
     "hour_sin",
@@ -91,9 +84,21 @@ FEATURE_COLS = [
     "structure_age_bars",
     "zone_age_bars",
     "interaction_structure_pd",
+    "vwap_distance_atr",
+    "candle_momentum_score",
+    "fib_ote_zone_score",
+    "dist_to_nearest_daily_level_atr",
+    "daily_level_side",
+    "bos_displacement_quality",
+    "price_vs_session_open_atr",
+    "ob_freshness_score",
+    "has_relevant_ob",
+    "is_near_asian_extreme",
+    "consecutive_directional_closes",
+    "has_active_zone",
 ]
 
-MAX_ROWS = 18000
+MAX_ROWS = 24000
 
 
 # ---------------------------------------------------------

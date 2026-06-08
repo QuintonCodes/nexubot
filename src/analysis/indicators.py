@@ -49,9 +49,6 @@ class TechnicalAnalyzer:
         df["vol_ratio"] = df["volume"] / df["vol_sma_20"].replace(0, np.nan)
         df["vol_ratio"] = df["vol_ratio"].fillna(1.0)
 
-        # Vol Trend calculated over a stronger 5-bar delta threshold instead of 2-bars
-        df["volume_trend_3"] = df["vol_ratio"] - df["vol_ratio"].shift(5).fillna(df["vol_ratio"])
-
         # 6. Lookback Windows
         df["recent_low_5"] = df["low"].rolling(5).min()
         df["recent_high_5"] = df["high"].rolling(5).max()
@@ -78,9 +75,14 @@ class TechnicalAnalyzer:
         df["asian_high"] = df["date_group"].map(asian_highs)
         df["asian_low"] = df["date_group"].map(asian_lows)
 
-        df["color"] = np.where(df["close"] > df["open"], 1, -1)
+        # Vectorized sequential momentum sequences
+        df["color"] = np.where(df["close"] > df["open"], 1, np.where(df["close"] < df["open"], -1, 0))
+        df["consec_green"] = df.groupby((df["color"] != 1).cumsum()).cumcount()
+        df["consec_red"] = df.groupby((df["color"] != -1).cumsum()).cumcount()
+        df["consec_green_before"] = df["consec_green"].shift(1).fillna(0)
+        df["consec_red_before"] = df["consec_red"].shift(1).fillna(0)
 
-        # Safely fill price-based columns before global zeroing to prevent SL Cap / VWAP corruption
+        # Fallbacks
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.0005)
         df["vwap"] = df["vwap"].ffill().fillna(df["close"])
         df["vol_sma_20"] = df["vol_sma_20"].ffill().fillna(1.0)
@@ -118,6 +120,7 @@ class TechnicalAnalyzer:
         # Distance & Mitigation Tracking
         all_zones = active_fvgs + active_ifvgs + active_obs
         zone_age_bars = 0.0
+        has_active_zone = 1.0 if all_zones else 0.0
 
         if all_zones:
             nearest_poi = min(all_zones, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
@@ -132,37 +135,110 @@ class TechnicalAnalyzer:
         favor_wick_pct = lower_wick_pct if signal_direction == "LONG" else upper_wick_pct
         adverse_wick_pct = upper_wick_pct if signal_direction == "LONG" else lower_wick_pct
 
-        vol_ratio = curr.get("vol_ratio", 1.0)
-        volume_trend_3 = curr.get("volume_trend_3", 0.0)
+        # Candle Conviction Feature
+        candle_momentum_score = np.clip((close_price - curr["open"]) / safe_atr, -3.0, 3.0)
 
+        # Daily Extreme Tracking
         pdh, pdl = curr.get("pdh"), curr.get("pdl")
-        dist_to_pdh_atr = abs(close_price - pdh) / safe_atr if pdh else 0.0
-        dist_to_pdl_atr = abs(close_price - pdl) / safe_atr if pdl else 0.0
+        dist_pdh = abs(close_price - pdh) / safe_atr if pdh else float("inf")
+        dist_pdl = abs(close_price - pdl) / safe_atr if pdl else float("inf")
+        dist_to_nearest_daily_level_atr = min(dist_pdh, dist_pdl) if (pdh or pdl) else 0.0
 
+        daily_level_side = 0.0
+        if pdh or pdl:
+            nearest = pdh if dist_pdh < dist_pdl else pdl
+            if nearest > close_price:
+                daily_level_side = 1.0
+            elif nearest < close_price:
+                daily_level_side = -1.0
+
+        # Fib OTE Score Representation
+        last_high = structure_info.get("last_high")
+        last_low = structure_info.get("last_low")
+        fib_ote_score = 0.0
+        if last_high and last_low:
+            swing_range = last_high - last_low
+            if swing_range > 0:
+                fib_62 = (
+                    last_high - swing_range * 0.618 if signal_direction == "LONG" else last_low + swing_range * 0.618
+                )
+                fib_79 = (
+                    last_high - swing_range * 0.786 if signal_direction == "LONG" else last_low + swing_range * 0.786
+                )
+                if signal_direction == "LONG":
+                    if fib_79 <= close_price <= fib_62:
+                        zone_mid = (fib_62 + fib_79) / 2
+                        fib_ote_score = 1.0 - abs(close_price - zone_mid) / ((fib_62 - fib_79) / 2)
+                    elif close_price > fib_62:
+                        fib_ote_score = -0.5
+                    else:
+                        fib_ote_score = -1.0
+                else:
+                    if fib_62 <= close_price <= fib_79:
+                        zone_mid = (fib_62 + fib_79) / 2
+                        fib_ote_score = 1.0 - abs(close_price - zone_mid) / ((fib_79 - fib_62) / 2)
+                    elif close_price < fib_62:
+                        fib_ote_score = -0.5
+                    else:
+                        fib_ote_score = -1.0
+
+        # BOS Conviction
+        bos_displacement_quality = (
+            abs(close_price - curr["open"]) / safe_atr if structure_info.get("structural_break", 0.0) != 0.0 else 0.0
+        )
+
+        # AMD Cycle Tracking
+        price_vs_session_open_atr = np.clip((close_price - curr.get("daily_open", close_price)) / safe_atr, -5.0, 5.0)
+
+        # Composite Quality Weights
+        relevant_obs = [ob for ob in active_obs if ob["type"] == ("BULL" if signal_direction == "LONG" else "BEAR")]
+        if relevant_obs:
+            nearest_ob = min(relevant_obs, key=lambda x: min(abs(x["high"] - close_price), abs(x["low"] - close_price)))
+            vol_strength = nearest_ob.get("vol_strength", 1.0)
+            age = nearest_ob.get("age", 0)
+            mitigations = nearest_ob.get("mitigations", 0)
+            ob_freshness_score = vol_strength / (math.log1p(age) * max(mitigations + 1, 1))
+            has_relevant_ob = 1.0
+        else:
+            ob_freshness_score = 0.0
+            has_relevant_ob = 0.0
+
+        # Discrete Proxies replacing Noisy Continuous
         ah, al = curr.get("asian_high"), curr.get("asian_low")
-        dist_to_asia_extremes_atr = min(abs(close_price - ah), abs(close_price - al)) / safe_atr if ah and al else 0.0
+        is_near_asian_extreme = (
+            1.0 if ah and al and min(abs(close_price - ah), abs(close_price - al)) / safe_atr < 0.5 else 0.0
+        )
 
+        # Momentum Tracker
+        consec_key = "consec_green_before" if signal_direction == "LONG" else "consec_red_before"
+        consecutive_directional_closes = math.log1p(min(curr.get(consec_key, 0), 10))
         vwap_distance_atr = (close_price - curr.get("vwap", close_price)) / safe_atr
 
         return {
-            "pd_array_status": structure_info.get("pd_array", 0.5),
-            "dist_to_pdh_atr": dist_to_pdh_atr,
-            "dist_to_pdl_atr": dist_to_pdl_atr,
-            "dist_to_asia_extremes_atr": dist_to_asia_extremes_atr,
-            "vwap_distance_atr": vwap_distance_atr,
             "is_liquidity_swept_tier": float(is_liquidity_swept),
-            "sweep_depth_atr": sweep_depth_atr,
             "body_ratio": body_ratio,
             "favor_wick_pct": favor_wick_pct,
             "adverse_wick_pct": adverse_wick_pct,
-            "vol_ratio": vol_ratio,
-            "volume_trend_3": volume_trend_3,
+            "vol_ratio": curr.get("vol_ratio", 1.0),
             "atr_expansion_ratio": float(curr.get("atr_expansion_ratio", 1.0)),
             "rr_at_entry": rr_at_entry,
             "hour_sin": math.sin(2 * math.pi * decimal_hour / 24.0),
             "hour_cos": math.cos(2 * math.pi * decimal_hour / 24.0),
             "structure_age_bars": float(structure_info.get("bars_since_break", 0)),
             "zone_age_bars": zone_age_bars,
+            "pd_array_status": structure_info.get("pd_array", 0.5),
+            "vwap_distance_atr": vwap_distance_atr,
+            "candle_momentum_score": candle_momentum_score,
+            "fib_ote_zone_score": fib_ote_score,
+            "dist_to_nearest_daily_level_atr": dist_to_nearest_daily_level_atr,
+            "daily_level_side": daily_level_side,
+            "bos_displacement_quality": bos_displacement_quality,
+            "price_vs_session_open_atr": price_vs_session_open_atr,
+            "ob_freshness_score": ob_freshness_score,
+            "has_relevant_ob": has_relevant_ob,
+            "is_near_asian_extreme": is_near_asian_extreme,
+            "consecutive_directional_closes": consecutive_directional_closes,
+            "has_active_zone": has_active_zone,
         }
 
     @staticmethod

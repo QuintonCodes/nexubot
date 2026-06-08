@@ -21,19 +21,19 @@ from src.config import (
 logger = logging.getLogger(__name__)
 
 # Constants for backfill limits
-MAX_ROWS_PER_SYMBOL = 2000
+MAX_ROWS_PER_SYMBOL = 3000
 FUTURE_WINDOW_SIZE = 50  # 50 × 5min = ~4.2 hours, matches live timeout
 WARMUP_PERIOD = 200  # EMA-200 needs 200 bars to converge; don't reduce
 
 # Rebalancing Strategy Data Representation
 TARGET_PER_STRAT_PER_SYMBOL = {
-    "Daily/Asian Sweep": 800,
+    "Daily/Asian Sweep": 150,
     "Major Swing Sweep": 800,
     "MAJOR OB CE Bounce": 800,
     "FVG Bounce": 800,
     "IFVG Re-Test": 300,
-    "BREAKER OB CE Bounce": 200,
-    "VWAP Bounce": 200,
+    "BREAKER OB CE Bounce": 150,
+    "VWAP Bounce": 150,
     "ICT OTE (Bullish)": 400,
     "ICT OTE (Bearish)": 400,
 }
@@ -106,8 +106,10 @@ async def _prepare_symbol_data(
     point = symbol_info.get("point", 0.00001)
     is_volatile_asset = any(x in symbol for x in HIGH_VOLATILITY_IDENTIFIERS)
 
-    requested_m5 = 105120  # 365 days × 288 candles/day
-    requested_h1 = 8760  # 365 days × 24 candles/day
+    # days * candles
+    requested_m5 = 1095 * 288
+    requested_h1 = 1095 * 24
+
     klines_main = await provider.fetch_klines(symbol, TIMEFRAME, requested_m5)
     klines_htf = await provider.fetch_klines(symbol, "1h", requested_h1)
 

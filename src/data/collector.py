@@ -34,38 +34,47 @@ class DataCollector:
         """Transforms raw SMC features into the full engineered feature set."""
         f = raw_features
 
-        # Clip severe outliers to prevent scaler corruption
-        dist_to_pdh_atr = float(np.clip(f.get("dist_to_pdh_atr", 0.0), 0.0, 30.0))
-        dist_to_pdl_atr = float(np.clip(f.get("dist_to_pdl_atr", 0.0), 0.0, 30.0))
-        vwap_dist = float(f.get("vwap_distance_atr", 0.0))
-        vol_trend = float(f.get("volume_trend_3", 0.0))
-        vwap_dist_clipped = float(np.clip(vwap_dist, -5.0, 5.0))
-        vol_trend_clipped = float(np.clip(vol_trend, -3.0, 3.0))
-
-        # Base calculations used across multiple terms
+        # Transform structurally-aged parameters to distribute variance dynamically.
+        structure_age_bars_raw = float(f.get("structure_age_bars", 0.0))
+        structure_age = round(float(np.log1p(structure_age_bars_raw)), 4)
         pd_deviation = round(abs(f.get("pd_array_status", 0.5) - 0.5), 4)
-        structure_age = float(f.get("structure_age_bars", 0.0))
+
+        # Fix right-skew and inverse monotonic signal on RR parameter.
+        rr_raw = float(f.get("rr_at_entry", 2.0))
+        rr_clipped = np.clip(rr_raw, 2.0, 8.0)
+        rr_normalized = round((rr_clipped - 2.0) / 6.0, 4)
+
+        # Clip Expansion Ratio
+        atr_exp = round(float(np.clip(f.get("atr_expansion_ratio", 1.0), 0.3, 3.0)), 4)
+
+        # Add Companion binary state for missing logic to distinguish from real 0
+        zone_age = round(float(np.log1p(f.get("zone_age_bars", 0.0))), 4) if f.get("has_active_zone", 0.0) else 0.0
 
         return {
-            "pd_deviation_from_equilibrium": pd_deviation,
-            "dist_to_pdh_atr": round(dist_to_pdh_atr, 4),
-            "dist_to_pdl_atr": round(dist_to_pdl_atr, 4),
-            "dist_to_asia_extremes_atr": round(f.get("dist_to_asia_extremes_atr", 0.0), 4),
-            "vwap_distance_atr": round(vwap_dist_clipped, 4),
             "is_liquidity_swept_tier": float(f.get("is_liquidity_swept_tier", 0.0)),
-            "sweep_depth_atr": float(f.get("sweep_depth_atr", 0.0)),
-            "body_ratio": round(f.get("body_ratio", 0.0), 4),
-            "favor_wick_pct": round(f.get("favor_wick_pct", 0.0), 4),
-            "adverse_wick_pct": round(f.get("adverse_wick_pct", 0.0), 4),
-            "vol_ratio": round(f.get("vol_ratio", 0.0), 4),
-            "volume_trend_3": round(vol_trend_clipped, 4),
-            "atr_expansion_ratio": round(f.get("atr_expansion_ratio", 1.0), 4),
-            "rr_at_entry": round(f.get("rr_at_entry", 0.0), 4),
-            "hour_sin": round(f.get("hour_sin", 0.0), 4),
-            "hour_cos": round(f.get("hour_cos", 0.0), 4),
+            "body_ratio": round(float(f.get("body_ratio", 0.0)), 4),
+            "favor_wick_pct": round(float(f.get("favor_wick_pct", 0.0)), 4),
+            "adverse_wick_pct": round(float(f.get("adverse_wick_pct", 0.0)), 4),
+            "vol_ratio": round(float(f.get("vol_ratio", 1.0)), 4),
+            "atr_expansion_ratio": atr_exp,
+            "rr_at_entry": rr_normalized,
+            "hour_sin": round(float(f.get("hour_sin", 0.0)), 4),
+            "hour_cos": round(float(f.get("hour_cos", 0.0)), 4),
             "structure_age_bars": structure_age,
-            "zone_age_bars": round(float(np.log1p(f.get("zone_age_bars", 0.0))), 4),
+            "zone_age_bars": zone_age,
             "interaction_structure_pd": round(structure_age * pd_deviation, 4),
+            "vwap_distance_atr": round(float(np.clip(f.get("vwap_distance_atr", 0.0), -5.0, 5.0)), 4),
+            "candle_momentum_score": round(float(f.get("candle_momentum_score", 0.0)), 4),
+            "fib_ote_zone_score": round(float(f.get("fib_ote_zone_score", 0.0)), 4),
+            "dist_to_nearest_daily_level_atr": round(float(f.get("dist_to_nearest_daily_level_atr", 0.0)), 4),
+            "daily_level_side": float(f.get("daily_level_side", 0.0)),
+            "bos_displacement_quality": round(float(f.get("bos_displacement_quality", 0.0)), 4),
+            "price_vs_session_open_atr": round(float(f.get("price_vs_session_open_atr", 0.0)), 4),
+            "ob_freshness_score": round(float(f.get("ob_freshness_score", 0.0)), 4),
+            "has_relevant_ob": float(f.get("has_relevant_ob", 0.0)),
+            "is_near_asian_extreme": float(f.get("is_near_asian_extreme", 0.0)),
+            "consecutive_directional_closes": round(float(f.get("consecutive_directional_closes", 0.0)), 4),
+            "has_active_zone": float(f.get("has_active_zone", 0.0)),
         }
 
     def _prune_data_background(self):

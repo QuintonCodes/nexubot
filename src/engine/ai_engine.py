@@ -348,8 +348,8 @@ class AITradingEngine:
         # Heavy Penalty for losers (< 40% win rate), Small Bonus for winners
         history_factor = -10 if hist_win_rate < 0.4 else (10 if hist_win_rate > 0.6 else 0)
 
-        # 3. Neural Network Weighting
-        nn_factor = (nn_prob - 0.5) * 40
+        # 3. Adjusted NN Multiplier boundary threshold implementation
+        nn_factor = (nn_prob - self.nn_brain.threshold) * 40
 
         # Apply Advanced Session Multiplier
         final_conf = (base_conf + trend_bonus + history_factor + nn_factor) * session_multiplier
@@ -473,7 +473,6 @@ class AITradingEngine:
             f"🧭 *Local Flow ({TIMEFRAME}):* {structure['structure']} | Break: {break_text}\n"
             f"📏 *PD Array:* Price in {pd_text}\n"
             f"💧 *Liquidity Profile:* {len(active_fvgs)} FVGs | {len(active_ifvgs)} IFVGs | {len(active_obs)} OBs\n"
-            f"🎯 *Nearest POI Status:* {raw_features.get('distance_to_poi', 0.0):.1f} ATR Away\n"
             f"🧹 *Sweep Status:* {sweep_text}\n"
             f"🌊 *VWAP State:* {vwap_trend}\n\n"
             f"⚡ *Momentum & Vol:* Vol Ratio {engineered_features.get('vol_ratio', 1.0):.2f}x | Body Ratio {engineered_features.get('body_ratio', 0.0):.2f}\n\n"
@@ -620,9 +619,16 @@ class AITradingEngine:
         records = df.to_dict("records")
         self._enforce_cache_limits(self._poi_cache)
 
-        # Fix Med 6: O(1) Incremental POI Update
+        # Hard boundary safety fallback preventing O(N) evaluations strictly bounded inside live fast-tick contexts
         cache = self._poi_cache.get(symbol, {})
-        if cache and len(records) >= 3 and cache.get("last_time") == records[-2]["time"]:
+        last_idx = cache.get("last_idx", 0)
+
+        if (
+            cache
+            and len(records) >= 3
+            and cache.get("last_time") == records[-2]["time"]
+            and last_idx >= len(records) - 3
+        ):
             active_fvgs, active_ifvgs, active_obs = TechnicalAnalyzer.update_pois(
                 records[-3], records[-2], curr, cache["fvgs"], cache["ifvgs"], cache["obs"]
             )
@@ -632,6 +638,7 @@ class AITradingEngine:
         MAX_POI_PER_TYPE = 50
         self._poi_cache[symbol] = {
             "last_time": curr["time"],
+            "last_idx": len(records),
             "fvgs": active_fvgs[-MAX_POI_PER_TYPE:],
             "ifvgs": active_ifvgs[-MAX_POI_PER_TYPE:],
             "obs": active_obs[-MAX_POI_PER_TYPE:],
@@ -739,7 +746,6 @@ class AITradingEngine:
             features = data.get("features", {})
             strategy = data.get("strategy", "Unknown")
 
-            # Skip logging corrupted empty feature sets from recovered offline trades
             if not features:
                 logger.info(f"⏭️ Skipping ML log for {symbol}: Offline recovered trade has no stored features.")
                 del self.active_features[symbol]

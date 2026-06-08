@@ -65,7 +65,7 @@ class TelegramNotifier:
         """Attempts to send a message multiple times if the network drops."""
         for i in range(retries):
             try:
-                self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
                 return
             except Exception as e:
                 if i < retries - 1:
@@ -148,7 +148,7 @@ class TelegramNotifier:
         )
         await self._safe_send(self.chat_id, msg)
 
-    def send_message(self, text: str) -> None:
+    async def send_message(self, text: str) -> None:
         """Sends a message to the configured Telegram chat asynchronously."""
         if not (self.bot_token and self.chat_id):
             return
@@ -157,7 +157,7 @@ class TelegramNotifier:
             loop.create_task(self.msg_queue.put(text))
         except RuntimeError:
             try:
-                asyncio.run(self._safe_send(self.chat_id, text))
+                await self._safe_send(self.chat_id, text)
             except Exception as e:
                 logger.warning(f"Failed to send sync Telegram message: {e}")
 

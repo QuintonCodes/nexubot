@@ -124,11 +124,21 @@ class StrategyAnalyzer:
         if not last_low or not last_high:
             return None
 
+        # Hard-filter against exact HTF Trend alignments.
+        htf_trend = curr.get("htf_trend_mapped", 0.0)
+        if htf_trend == 0.0:
+            ema_50 = curr.get("ema_50", 0)
+            ema_200 = curr.get("ema_200", 0)
+            if ema_50 > ema_200:
+                htf_trend = 1.0
+            elif ema_50 < ema_200:
+                htf_trend = -1.0
+
         close_price = curr["close"]
         atr_buffer = curr["atr"] * 0.2
         range_size = last_high - last_low
 
-        if structure["structure"] == "BULL":
+        if structure["structure"] == "BULL" and htf_trend == 1.0:
             fib_62 = last_high - (range_size * 0.618)
             fib_79 = last_high - (range_size * 0.786)
             vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
@@ -141,7 +151,7 @@ class StrategyAnalyzer:
                     "order_type": "MARKET",
                     "suggested_sl": last_low - atr_buffer,
                 }
-        elif structure["structure"] == "BEAR":
+        elif structure["structure"] == "BEAR" and htf_trend == -1.0:
             fib_62 = last_low + (range_size * 0.618)
             fib_79 = last_low + (range_size * 0.786)
             vol_ratio = curr.get("volume", 0) / max(curr.get("vol_sma_20", 1.0), 1.0)
@@ -266,11 +276,12 @@ class StrategyAnalyzer:
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
                         continue
                     if recent_low <= ob["high"] and close_price > ((ob["high"] + ob["low"]) / 2):
+                        conf = 80.0 if ob.get("tier") == "BREAKER" else 78.0
                         return {
                             "strategy": f"{ob['tier']} OB CE Bounce",
                             "signal": "BUY",
                             "direction": "LONG",
-                            "confidence": 78.0,
+                            "confidence": conf,
                             "order_type": "MARKET",
                             "suggested_sl": recent_low - atr_buffer,
                         }
@@ -301,11 +312,12 @@ class StrategyAnalyzer:
                     if ob.get("vol_strength", 0) < 2.0 or is_liquidity_swept < 2:
                         continue
                     if recent_high >= ob["low"] and close_price < ((ob["high"] + ob["low"]) / 2):
+                        conf = 80.0 if ob.get("tier") == "BREAKER" else 78.0
                         return {
                             "strategy": f"{ob['tier']} OB CE Bounce",
                             "signal": "SELL",
                             "direction": "SHORT",
-                            "confidence": 78.0,
+                            "confidence": conf,
                             "order_type": "MARKET",
                             "suggested_sl": recent_high + atr_buffer,
                         }
@@ -358,7 +370,7 @@ class StrategyAnalyzer:
                 "strategy": "VWAP Bounce",
                 "signal": "BUY",
                 "direction": "LONG",
-                "confidence": 73.0,
+                "confidence": 80.0,
                 "order_type": "MARKET",
                 "suggested_sl": recent_low - atr_buffer,
             }
@@ -368,7 +380,7 @@ class StrategyAnalyzer:
                 "strategy": "VWAP Bounce",
                 "signal": "SELL",
                 "direction": "SHORT",
-                "confidence": 73.0,
+                "confidence": 80.0,
                 "order_type": "MARKET",
                 "suggested_sl": recent_high + atr_buffer,
             }

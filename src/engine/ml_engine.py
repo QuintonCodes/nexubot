@@ -9,6 +9,7 @@ from keras.callbacks import EarlyStopping
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 from typing import Dict, Optional, Tuple
@@ -26,7 +27,7 @@ from src.config import (
 logger = logging.getLogger(__name__)
 
 MIN_TRAINING_ROWS = 500
-MIN_AUC_GATE = 0.56
+MIN_AUC_GATE = 0.60
 
 
 class NeuralPredictor:
@@ -41,6 +42,7 @@ class NeuralPredictor:
         self.calibrator: Optional[IsotonicRegression] = None
         self.exit_regressor: Optional[GradientBoostingRegressor] = None
         self.is_ready: bool = False
+        self.threshold = 0.55
         self._predict_lock = threading.Lock()
 
         if auto_load:
@@ -102,38 +104,38 @@ class NeuralPredictor:
         return df
 
     def _train_entry_model(
-        self, X_scaled: np.ndarray, y_entry: np.ndarray, early_stop: EarlyStopping
-    ) -> Tuple[tf.keras.Model, np.ndarray, np.ndarray]:
+        self, X_train: np.ndarray, y_train: np.ndarray, early_stop: EarlyStopping, class_weight_dict: dict
+    ) -> tf.keras.Model:
         """Constructs and trains the binary classification model for entries."""
-        split_idx = int(len(X_scaled) * 0.80)
-        X_train, X_cal = X_scaled[:split_idx], X_scaled[split_idx:]
-        y_train, y_cal = y_entry[:split_idx], y_entry[split_idx:]
 
-        classes = np.unique(y_train)
-        if len(classes) > 1:
-            weights = compute_class_weight("balanced", classes=classes, y=y_train)
-            class_weight_dict = dict(zip(classes, weights))
-            logger.info(f"⚖️ Applied Dynamic Class Weights: {class_weight_dict}")
-        else:
-            logger.warning("⚠️ Only one target class found in training split! Falling back to 1.0 weights.")
-            class_weight_dict = {0: 1.0, 1: 1.0}
-
-        # Optimized regularized topology: 24 -> 12 -> 8 -> 1 Architecture
+        # Optimised Deep Neural Topology
         model = tf.keras.models.Sequential(
             [
                 tf.keras.layers.Input(shape=(len(FEATURE_COLS),)),
-                tf.keras.layers.Dense(24, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.Dense(48, kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.LeakyReLU(0.1),
                 tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(12, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.Dropout(0.15),
+                tf.keras.layers.Dense(24, kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.LeakyReLU(0.1),
                 tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(8, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.Dropout(0.20),
+                tf.keras.layers.Dense(12, kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.LeakyReLU(0.1),
+                tf.keras.layers.Dropout(0.25),
                 tf.keras.layers.Dense(1, activation="sigmoid"),
             ]
         )
 
-        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+        # Advanced Scheduling
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.001, decay_steps=3000, alpha=0.0001
+        )
+        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+        loss = tf.keras.losses.BinaryFocalCrossentropy(alpha=0.25, gamma=2.0)
+
+        model.compile(optimizer=optimizer, loss=loss, metrics=["accuracy"])
         model.fit(
             X_train,
             y_train,
@@ -145,7 +147,7 @@ class NeuralPredictor:
             callbacks=[early_stop],
         )
 
-        return model, X_cal, y_cal
+        return model
 
     def _train_exit_model(self, df: pd.DataFrame) -> Optional[GradientBoostingRegressor]:
         """Trains localized exit strategy models relying on non-linear interaction patterns."""
@@ -191,25 +193,19 @@ class NeuralPredictor:
 
         try:
             data = {k: [features.get(k, 0.0)] for k in FEATURE_COLS}
-            df_input = pd.DataFrame(data)
-
-            # Critical Inference Protection Hook
-            df_input = df_input.fillna(0.0)
+            df_input = pd.DataFrame(data).fillna(0.0)
 
             # Preprocess and predict entry
             with self._predict_lock:
                 X_new = self.scaler.transform(df_input)
-
-                # Feature Distribution Drift Check (Runtime assertion)
                 z_scores = np.abs(X_new[0])
                 drifted_indices = np.where(z_scores > 4.0)[0]
+
                 if len(drifted_indices) > 0:
                     drifted_features = [FEATURE_COLS[i] for i in drifted_indices]
                     logger.warning(f"⚠️ Feature Drift Detected on {drifted_features}: values exceeded 4σ.")
 
                 raw_prob = float(self.entry_model.predict(X_new, verbose=0)[0][0])
-
-                # Calibrate probability if a calibrator is available
                 prob = float(self.calibrator.transform([raw_prob])[0]) if self.calibrator else raw_prob
 
                 # Predict exit ATR (Default to 3.0 if model is missing)
@@ -234,13 +230,18 @@ class NeuralPredictor:
             return
 
         try:
-            # Upsample targeted strategic categories manually
+            # Safely oversample underrepresented models explicitly.
             daily_sweeps = df[df["strategy"] == "Daily/Asian Sweep"]
+            major_sweeps = df[df["strategy"] == "Major Swing Sweep"]
+
+            dfs_to_concat = [df]
             if not daily_sweeps.empty:
-                logger.info(
-                    f"📈 Applying synthetic oversampling mapping to {len(daily_sweeps)} Daily/Asian Sweep instances..."
-                )
-                df = pd.concat([df, daily_sweeps, daily_sweeps, daily_sweeps], ignore_index=True)
+                logger.info(f"📈 Synthetic Mapping: Upsampling {len(daily_sweeps)} Daily/Asian Sweep instances...")
+                dfs_to_concat.extend([daily_sweeps] * 4)
+            if not major_sweeps.empty:
+                dfs_to_concat.extend([major_sweeps] * 2)
+
+            df = pd.concat(dfs_to_concat, ignore_index=True)
 
             X = df[FEATURE_COLS]
             y_entry = df["target_win"].values
@@ -249,22 +250,39 @@ class NeuralPredictor:
             X_scaled = self.scaler.fit_transform(X)
 
             rf = RandomForestClassifier(n_estimators=50, class_weight="balanced", n_jobs=-1, random_state=42)
-            # Use chronological CV split evaluation
-            split_idx = int(len(X_scaled) * 0.8)
-            rf.fit(X_scaled[:split_idx], y_entry[:split_idx])
-            auc_test = roc_auc_score(y_entry[split_idx:], rf.predict_proba(X_scaled[split_idx:])[:, 1])
+
+            # Use StratifiedShuffleSplit implementation to keep ratios balanced in CV evaluating.
+            df["strat_target"] = df["strategy"] + "_" + df["target_win"].astype(str)
+            try:
+                X_train, X_cal, y_train, y_cal = train_test_split(
+                    X_scaled, y_entry, test_size=0.2, stratify=df["strat_target"], random_state=42
+                )
+            except ValueError:
+                X_train, X_cal, y_train, y_cal = train_test_split(
+                    X_scaled, y_entry, test_size=0.2, stratify=y_entry, random_state=42
+                )
+
+            rf.fit(X_train, y_train)
+            auc_test = roc_auc_score(y_cal, rf.predict_proba(X_cal)[:, 1])
             logger.info(f"🧠 Pre-training signal quality AUC Test: {auc_test:.4f}")
 
             if auc_test < MIN_AUC_GATE:
                 logger.error(f"🛑 Pre-train AUC ({auc_test:.4f}) below threshold ({MIN_AUC_GATE}). Aborting.")
                 return
 
-            # Shortened Patience Thresholds
+            classes = np.unique(y_train)
+            if len(classes) > 1:
+                weights = compute_class_weight("balanced", classes=classes, y=y_train)
+                class_weight_dict = dict(zip(classes, weights))
+                logger.info(f"⚖️ Applied Dynamic Class Weights: {class_weight_dict}")
+            else:
+                class_weight_dict = {0: 1.0, 1: 1.0}
+
             entry_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=1)
 
             # 2. Train Entry Model
             logger.info("🧠 Training SMC Entry Model...")
-            self.entry_model, X_cal, y_cal = self._train_entry_model(X_scaled, y_entry, entry_stop)
+            self.entry_model = self._train_entry_model(X_train, y_train, entry_stop, class_weight_dict)
 
             val_auc = roc_auc_score(y_cal, self.entry_model.predict(X_cal, verbose=0))
             logger.info(f"📊 Live Validation AUC: {val_auc:.4f}")

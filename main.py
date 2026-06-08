@@ -32,7 +32,7 @@ async def main() -> None:
     path = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
 
     if not all([login, password, server]):
-        notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
+        await notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
         print("❌ Boot Error: Missing MT5 credentials in .env file.")
         return
 
@@ -55,15 +55,17 @@ async def main() -> None:
         # 3. Auto-Train Neural Network while Scanner is paused
         if not os.path.exists("training_data.csv"):
             print("⚠️ WARNING: 'training_data.csv' not found. Run 'python run_backfill.py' first.")
-            notifier.send_message("⚠️ *Warning:* No ML training data found. Please run backfill.")
+            await notifier.send_message("⚠️ *Warning:* No ML training data found. Please run backfill.")
         else:
             print("⚙️ Running Pre-Flight ML Optimization...")
-            notifier.send_message("⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly.")
+            await notifier.send_message(
+                "⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly."
+            )
             try:
                 await asyncio.wait_for(asyncio.to_thread(engine.ai_engine.nn_brain.train_network), timeout=600.0)
             except asyncio.TimeoutError:
                 print("⚠️ ML Training timed out. Proceeding with existing model.")
-                notifier.send_message("⚠️ ML Training timed out. Running with prior model.")
+                await notifier.send_message("⚠️ ML Training timed out. Running with prior model.")
 
         # 4. Unlock the system status to IDLE -> Scanner can now fire
         engine.system_status = "IDLE"
