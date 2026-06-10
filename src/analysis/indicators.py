@@ -197,7 +197,8 @@ class TechnicalAnalyzer:
             vol_strength = nearest_ob.get("vol_strength", 1.0)
             age = nearest_ob.get("age", 0)
             mitigations = nearest_ob.get("mitigations", 0)
-            ob_freshness_score = vol_strength / (math.log1p(age) * max(mitigations + 1, 1))
+
+            ob_freshness_score = vol_strength / ((math.log1p(age) + 1.0) * max(mitigations + 1, 1))
             has_relevant_ob = 1.0
         else:
             ob_freshness_score = 0.0
