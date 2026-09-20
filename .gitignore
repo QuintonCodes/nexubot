@@ -1,37 +1,90 @@
-# --- Python Standard ---
+# ==========================================
+# NEXUBOT .gitignore
+# ==========================================
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+.env.local
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Python byte code & cache
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# --- Virtual Environments ---
-venv/
-env/
-.env
-.venv/
+# Unit tests, coverage & typing
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+htmlcov/
+.mypy_cache/
+.pytype/
+.ruff_cache/
 
-# --- IDE Settings ---
-.vscode/
-.idea/
-*.sublime-project
-
-# --- Nexubot Logs & Databases ---
+# Logs & runtime artifacts
 *.log
-nexubot.log
+logs/
+*.pid
+*.seed
+
+# Local SQLite / temporary databases
+*.sqlite
 *.sqlite3
 *.db
-*.sqlite
-*.bak
 
-# --- Nexubot ML Artifacts (Generated) ---
-# Specific model files defined in config.py
-nexubot_entry.keras
-nexubot_exit.keras
-nexubot_scaler.pkl
-*.h5
-*.keras
-*.pkl
+# Operating System specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
 
-# --- Nexubot Data ---
-# Auto-generated training data
-training_data.csv
-*.csv
+# IDE & Editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# Docker & Container artifacts
+*.tar
+docker-compose.override.yml

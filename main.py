@@ -1,103 +1,91 @@
+"""
+Nexubot - Full Cloud Production Entry Point.
+Initializes Database, loads initial data, starts background schedulers,
+connects to WebSocket, and begins Telegram polling
+"""
+
 import asyncio
-import os
 import sys
-import warnings
-from dotenv import load_dotenv
+import pandas as pd
 
-warnings.filterwarnings("ignore", category=FutureWarning, message=".*np.object.*")
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+from config.settings import settings
+from utils.logger import logger
+from data.twelve_data_client import TwelveDataClient
+from data.candle_store import candle_store
+from data.normalizer import normalize_ohlcv
+from db.database import init_pool, close_pool
+from strategies.confluence import ConfluenceEngine
+from scheduler.jobs import setup_scheduler
+from bot.dispatcher import start_bot, broadcast_signal
+from bot.formatters.signal_formatter import format_trade_signal
 
-from src.api.telegram_notifier import TelegramNotifier
-from src.core.engine import NexubotEngine
-from src.utils.logger import setup_logging
-from src.config import __version__
 
-load_dotenv()
-setup_logging()
+async def bootstrap_historical_data(client: TwelveDataClient, symbol: str):
+    """Fetches initial data for all timeframes on startup."""
+    timeframes = settings.HTF_TIMEFRAMES + [settings.ENTRY_TIMEFRAME]
+
+    for tf in timeframes:
+        logger.info("bootstrapping_data", symbol=symbol, timeframe=tf)
+        raw_df = await client.get_historical_ohlcv(symbol, tf, outputsize=500)
+        norm_df = normalize_ohlcv(raw_df)
+        await candle_store.initialize(symbol, tf, norm_df)
+
+    # Run initial HTF and MTF scans immediately to populate DB with existing state
+    engine = ConfluenceEngine(symbol)
+    await engine.scan_htf()
+    await engine.scan_mtf()
+
+
+async def on_candle_close(symbol: str, timeframe: str, candle: pd.Series) -> None:
+    """Callback fired by WebSocket tick aggregator precisely on 5-minute rollovers."""
+    # 1. Add the new LTF candle to the store
+    await candle_store.add_candle(symbol, timeframe, candle)
+
+    # 2. Trigger the Confluence Engine to check for setups
+    engine = ConfluenceEngine(symbol)
+    signal = await engine.scan_ltf_entry()
+
+    # 3. If a signal is generated, format and broadcast it to Telegram
+    if signal:
+        logger.info("signal_confirmed_broadcasting", signal_id=signal.signal_id)
+        msg_html = format_trade_signal(signal)
+        await broadcast_signal(msg_html)
 
 
 async def main() -> None:
-    print(f"🚀 Booting Nexubot {__version__} (Pure SMC Engine)...")
-    engine = NexubotEngine(None)
+    logger.info("starting_nexubot_production", symbols=settings.SYMBOLS)
+    client = TwelveDataClient()
+    symbol = settings.SYMBOLS[0]
 
-    await engine.db.init_database()
-    await engine.db.cleanup_db()
+    try:
+        # 1. Initialize PostgreSQL Connection Pool
+        await init_pool()
 
-    notifier = TelegramNotifier(engine=engine)
-    engine.notifier = notifier
+        # 2. Bootstrap Market Data
+        await bootstrap_historical_data(client, symbol)
 
-    login = os.getenv("MT5_LOGIN")
-    password = os.getenv("MT5_PASSWORD")
-    server = os.getenv("MT5_SERVER")
-    path = os.getenv("MT5_PATH", r"C:\Program Files\Metatrader 5\terminal64.exe")
+        # 3. Start APScheduler (Background HTF/MTF Refreshes)
+        scheduler = setup_scheduler(client)
+        scheduler.start()
+        logger.info("scheduler_started")
 
-    if not all([login, password, server]):
-        await notifier.send_message("❌ *Boot Error:* Missing MT5 credentials in .env file.")
-        print("❌ Boot Error: Missing MT5 credentials in .env file.")
-        return
+        # 4. Start concurrent runtime tasks (Telegram + WebSocket)
+        ws_task = asyncio.create_task(client.start_websocket_stream(settings.SYMBOLS, on_candle_close))
+        bot_task = asyncio.create_task(start_bot())
 
-    # 1. Lock the system status BEFORE connecting so the scanner pauses immediately
-    engine.system_status = "TRAINING"
+        # Keep the event loop running
+        await asyncio.gather(ws_task, bot_task)
 
-    is_connected = await engine.initialize_connection(login, server, password, path)
-
-    if is_connected:
-        tg_ready = await notifier.initialize()
-        if not tg_ready:
-            print("⚠️ Running without Telegram alerts. Check Bot Token or Connection.")
-
-        # 2. Send Startup message FIRST so Telegram gets the notification immediately
-        win_rate = await engine.db.get_total_historical_win_rate()
-        recent_trades = await engine.db.get_recent_trades(limit=1000)
-        total_trades = len(recent_trades)
-        await notifier.send_startup_message(win_rate, total_trades)
-
-        # 3. Auto-Train Neural Network while Scanner is paused
-        if not os.path.exists("training_data.csv"):
-            print("⚠️ WARNING: 'training_data.csv' not found. Run 'python run_backfill.py' first.")
-            await notifier.send_message("⚠️ *Warning:* No ML training data found. Please run backfill.")
-        else:
-            print("⚙️ Running Pre-Flight ML Optimization...")
-            await notifier.send_message(
-                "⚙️ *System Note:* Neural Network Training initiated. Scanning will resume shortly."
-            )
-            try:
-                await asyncio.wait_for(asyncio.to_thread(engine.ai_engine.nn_brain.train_network), timeout=600.0)
-            except asyncio.TimeoutError:
-                print("⚠️ ML Training timed out. Proceeding with existing model.")
-                await notifier.send_message("⚠️ ML Training timed out. Running with prior model.")
-
-        # 4. Unlock the system status to IDLE -> Scanner can now fire
-        engine.system_status = "IDLE"
-        print("✅ Training Complete. Scanner Activated.")
-
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            print("Received Cancellation Signal.")
-        finally:
-            print("Initiating Graceful Shutdown...")
-            stats = engine.session_stats
-
-            await notifier.send_daily_report(
-                stats["wins"], stats["losses"], stats["total"], stats["pnl"], stats.get("currency", "USD")
-            )
-            await notifier.send_shutdown_message()
-
-            await engine.stop_session()
-
-            # Catch all pending fire-and-forget tasks
-            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            if pending:
-                print(f"Waiting for {len(pending)} background tasks to complete delivery...")
-                await asyncio.gather(*pending, return_exceptions=True)
-    else:
-        print(f"❌ *MT5 Connection Failed.* Check console logs.")
+    except Exception as e:
+        logger.error("fatal_runtime_error", error=str(e))
+    finally:
+        await close_pool()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Nexubot Shutdown Complete.")
+        logger.info("shutdown_requested_by_user")
+        # Python's asyncio handles the graceful cleanup of tasks on interrupt

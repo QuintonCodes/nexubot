@@ -1,111 +1,307 @@
-# 🚀 Nexubot: Institutional-Grade AI Trading System
+# 🚀 Nexubot — Cloud-Native SMC Trading Signal Engine
 
-![Version](https://img.shields.io/badge/version-v1.1.0-blue.svg) ![Platform](https://img.shields.io/badge/platform-MetaTrader5-green.svg) ![Account](https://img.shields.io/badge/currency-ZAR-orange.svg)
+![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)
 
-**Nexubot** is an advanced algorithmic trading engine designed for the MetaTrader 5 ecosystem. Moving beyond standard lagging indicators, Nexubot utilizes a state-of-the-art **Smart Money Concept (SMC) Engine** fused with deep **Neural Network (ML) validation** to identify high-probability institutional liquidity sweeps and trend continuations on the M5 timeframe.
+**Nexubot** is a cloud-native, asynchronous Telegram signal trading bot built specifically for **XAU/USD (Gold)** on the **M5 timeframe**. It implements algorithmic Smart Money Concepts (SMC)—including Market Structure Shifts (BOS, CHoCH, MSS, CISD), Order Blocks, ICT Optimal Trade Entries (OTE), and Liquidity Sweeps—operating 24/7 in a headless Linux container environment.
 
-## 🧠 Core Architecture
+## 1. Architectural Highlights
 
-### 1. Smart Money Concepts (SMC) Engine
+- **Headless Cloud Deployment:** Completely removes the Windows COM bridge and local MetaTrader 5 (MT5) terminal dependencies. Runs on Linux containers (Docker / Railway) without sleep cycles.
+- **Dedicated Single-Asset Engine:** Locked to Gold (`XAU/USD`) with M5 execution, minimizing external API calls and maximizing signal resolution.
+- **Streaming & Aggregated Data Layer:** Uses Twelve Data REST API for initial historical bootstrapping and real-time WebSockets (`wss://ws.twelvedata.com`) for live tick ingestion and M5 candle-close detection.
+- **Async Persistence Layer:** Direct PostgreSQL integration via `asyncpg` with a pooled connection to Neon PostgreSQL, persisting Order Block zones, structure events, and signal history across container restarts.
+- **Fully Asynchronous Bot Interface:** Built on `aiogram v3` with HTML formatting, channel broadcast dispatching, and role-based command routing (Public vs. Admin).
+- **Background Scheduling:** Non-blocking multi-timeframe scans driven by `APScheduler` (4H Macro Bias refresh every 4 hours, 1H Order Block scan every hour).
 
-Nexubot reads price action exactly how institutional traders do, featuring a stateless, dynamically updating memory system:
+## 2. Technology Stack
 
-- **Structural Mapping:** Real-time detection of Break of Structure (BOS) and Change of Character (CHoCH) aligned with Higher Timeframe (HTF) trends.
-- **Liquidity Zones:** Dynamic, unmitigated mapping of Fair Value Gaps (FVGs) and Order Blocks (OBs). The bot tracks price sweeps and performs automatic garbage collection to ensure pristine memory management.
-- **Session Awareness:** Automatically adapts strategies (Trend, Breakout, Mean Reversion) based on the current active global trading session (Asian, London, NY).
+| Layer                   | Technology        | Purpose                                            |
+| :---------------------- | :---------------- | :------------------------------------------------- |
+| **Language**            | Python 3.12       | Core runtime environment                           |
+| **Hosting**             | Railway           | Headless Linux container hosting (24/7 uptime)     |
+| **Market Data**         | Twelve Data       | REST history + WebSocket live tick streaming       |
+| **Database**            | Neon PostgreSQL   | Hosted serverless PostgreSQL with `asyncpg`        |
+| **Telegram Framework**  | aiogram v3        | Asynchronous Telegram bot framework                |
+| **Task Scheduler**      | APScheduler       | Non-blocking periodic multi-timeframe scans        |
+| **Data Processing**     | pandas & numpy    | Vectorized OHLCV candle normalization and SMC math |
+| **Config & Validation** | pydantic-settings | Strict type checking and `.env` validation         |
+| **Logging**             | structlog         | Structured JSON logging for cloud log aggregation  |
 
-### 2. Deep Learning Validation (Continuous Learning Loop)
+---
 
-A bespoke TensorFlow/Keras neural network acts as the final gatekeeper:
+## 3. Project Directory Structure
 
-- **Entry Model:** Evaluates strict SMC features (Distance to VWAP, MTF Alignment, Volatility Ratio, FVG Proximity) to predict trade success probability.
-- **Exit Model:** Dynamically predicts optimal Take Profit ranges based on real-time Average True Range (ATR) expansion.
-- **Self-Correction (The 20k Loop):** Every live trade outcome and its exact feature state is silently logged to a capped 20,000-row training dataset. Nexubot auto-trains its neural weights on startup to adapt to shifting market regimes.
+```bash
+nexubot/
+│
+├── .env # Local environment secrets (ignored by git)
+├── .env.example # Environment configuration template
+├── .gitignore # Git exclusions
+├── Dockerfile # Production container specification (python:3.12-slim)
+├── railway.toml # Railway deployment instructions
+├── requirements.txt # Production Python dependencies
+├── README.md # Project documentation
+│
+├── main.py # Application bootstrap and asyncio orchestrator
+│
+├── config/
+│ ├── init.py
+│ └── settings.py # Pydantic Settings singleton with strict validation
+│
+├── data/
+│ ├── init.py
+│ ├── twelve_data_client.py # Twelve Data REST + WebSocket client
+│ ├── candle_store.py # In-memory rolling candle buffer (deque + asyncio.Lock)
+│ └── normalizer.py # Standardizes incoming OHLCV schemas to UTC DataFrames
+│
+├── strategies/
+│ ├── init.py
+│ ├── models.py # Dataclasses for Swings, Zones, Events, and Signals
+│ ├── structure.py # ZigZag swings, BOS, CHoCH, MSS, and CISD logic
+│ ├── smc.py # Order Blocks, ICT OTE zones, and Liquidity Sweeps
+│ └── confluence.py # Multi-timeframe waterfall (4H Bias → 1H Zone → 5M Entry)
+│
+├── db/
+│ ├── init.py
+│ ├── database.py # asyncpg connection pool singleton
+│ ├── migrations/
+│ │ ├── 001_existing_schema.sql # Reference schema documentation
+│ │ └── 002_smc_tables.sql # SMC tables (order_blocks, structure_events, signals)
+│ └── repositories/
+│ ├── init.py
+│ ├── order_blocks.py # Order Block persistence and mitigation tracking
+│ ├── signals.py # Signal history, audit trail, and deduplication
+│ └── structure_events.py # Historical BOS / CHoCH bias retrieval
+│
+├── bot/
+│ ├── init.py
+│ ├── dispatcher.py # Bot initialization and channel broadcast functions
+│ ├── handlers/
+│ │ ├── init.py
+│ │ ├── commands.py # Public commands (/start, /status, /bias, /signals)
+│ │ └── admin.py # Admin-only commands (/zones, /scan)
+│ └── formatters/
+│ ├── init.py
+│ └── signal_formatter.py # HTML message templates for signals
+│
+├── scheduler/
+│ ├── init.py
+│ └── jobs.py # APScheduler job definitions for 4H and 1H cycles
+│
+├── utils/
+│ ├── init.py
+│ ├── logger.py # structlog JSON logging configuration
+│ ├── rate_limiter.py # Twelve Data REST rate limiter (800 calls/day budget)
+│ └── math_helpers.py # Gold pip converters, RRR, and Fibonacci calculations
+│
+└── tests/
+├── init.py
+├── conftest.py # Deterministic synthetic market data fixtures
+├── test_data_layer.py # Normalizer and CandleStore unit tests
+├── test_structure.py # Swings, BOS, and CHoCH validation tests
+├── test_smc.py # Order Block, OTE, and Liquidity Sweep tests
+└── test_confluence.py # Integration test for the multi-timeframe engine
+```
 
-### 3. Dynamic ZAR Risk Core, Multi-TP & Offline Recovery System
+## 4. SMC Trading Strategy Architecture
 
-Designed specifically for precision risk management and trailing profits:
+Nexubot operates on a 3-step multi-timeframe confluence waterfall:
 
-- **Multi-Tier Targets:** Calculates and executes staggered TP1, TP2, and TP3 milestones.
-- **Aggressive Trailing & Ghost Tracking:** Automatically locks in breakeven at TP1, trails stops, and invisibly ghost-tracks exited trades to map theoretical TP3 hits.
-- **Offline Trade Recovery:** Gracefully resumes monitoring active trades upon system reboot to prevent orphaned orders.
-- **Cross-Market Scaling:** Dynamically adjusts slippage tolerances and volatility thresholds for **Indices**, **Forex**, and **Crypto**.
-- **Auto-Conversion:** Automatically calculates precise lot sizing based on live `USDZAR` rates.
+```
+[Step 1: 4H Macro Bias]
+└── detect_swings() -> classify_structure() -> detect_bos()
+└── Determines directional bias: BULLISH or BEARISH
 
-### 4. Asynchronous Telegram Command Center
+[Step 2: 1H Zone Identification]
+└── Runs detect_order_blocks() aligned with 4H Bias
+└── Persists active zones to Neon PostgreSQL
+└── Continuously tracks 50% midpoint mitigation
 
-Operates a dedicated, non-blocking Telegram application alongside the trading engine:
+[Step 3: 5M Execution Trigger]
+└── WebSocket tick-to-candle boundary detection on M5 rollover
+└── Confirms price is inside an active, unmitigated 1H Order Block or OTE Zone
+└── Checks for preceding Liquidity Sweep (EQH / EQL)
+└── Evaluates signal deduplication against the cooldown window (default 4 hours)
+└── Dispatches formatted HTML alert to the Telegram channel
+```
 
-- **Live Notifications:** Instant alerts for detected setups, milestone hits (TP1/TP2), and closed Pips/PnL.
-- **On-Demand AI Analyst:** Query specific markets via `/analyze [SYMBOL]` to receive a deep-dive breakdown of HTF flow, local structure, and the neural network's live probability assessment.
-- **Market Isolation:** Use `/focus [SYMBOLS]` to selectively isolate pairs for the scanner, or `/focus ALL` to resume global market scanning.
+## 5. Local Setup & Installation
 
-## 🛠️ Tech Stack
+#### Prerequisites
 
-- **Core:** Python 3.12+ (AsyncIO concurrent event loop)
-- **Connectivity:** MetaTrader 5 Python API
-- **AI/ML:** TensorFlow, Scikit-Learn (StandardScaler)
-- **Data & Math:** Pandas, NumPy
-- **Database:** PostgreSQL (NeonDB) via SQLAlchemy & AsyncPG
-- **Interface:** `python-telegram-bot` (Fully Asynchronous)
+- Python 3.12+
+- Neon PostgreSQL account
+- Twelve Data API Key
+- Telegram Bot Token (from `@BotFather`)
 
-## ⚙️ Configuration
-
-The bot is fully configurable via `src/config.py`:
-
-| Setting            | Default      | Description                                                           |
-| :----------------- | :----------- | :-------------------------------------------------------------------- |
-| **Timeframe**      | `M5`         | Optimized for intraday structural stability.                          |
-| **Risk Per Trade** | `2.0%`       | Hard cap on equity risk per signal.                                   |
-| **Max Signals**    | `3 per scan` | Limits concurrent exposure.                                           |
-| **Markets**        | `Dynamic`    | Auto-fetches active Crypto, Forex, and Indices from MT5 Market Watch. |
-
-## 🛠️ Installation & Setup
-
-1. **Clone the Repository**
+#### 1. Clone & Environment Setup
 
 ```bash
 git clone https://github.com/QuintonCodes/nexubot.git
 cd nexubot
-```
 
-2. **Install Dependencies**
-
-```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-3. **Environment Setup**
+#### 2. Environment Configuration
 
-Create a .env file in the root directory:
-
-```
-MT5_LOGIN=your_broker_login_id
-MT5_PASSWORD=your_broker_password
-MT5_SERVER=Your-Broker-Server
-DATABASE_URL="postgresql+asyncpg://user:pass@host/dbname"
-TELEGRAM_BOT_TOKEN="your_botfather_token"
-TELEGRAM_CHAT_ID="your_personal_chat_id"
-```
-
-4. **Initialize Training Data**
-
-Generate the baseline ML dataset by simulating past market environments:
+Copy the example environment file and populate your credentials:
 
 ```bash
-python run_backfill.py
+cp .env.example .env
 ```
 
-5. **Launch the Engine**
+Edit `.env`:
+
+```
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+TELEGRAM_CHANNEL_ID=-1001234567890
+TELEGRAM_ADMIN_ID=123456789
+
+# Twelve Data
+TWELVE_DATA_API_KEY=your_twelve_data_api_key_here
+MAX_DAILY_API_CALLS=800
+
+# Neon PostgreSQL
+DATABASE_URL=postgresql://neondb_owner:password@ep-sample-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require
+
+# Asset Scope & Timeframes
+SYMBOLS=XAU/USD
+HTF_TIMEFRAMES=4h,1h
+LTF_TIMEFRAMES=15min,5min
+ENTRY_TIMEFRAME=5min
+CANDLE_BUFFER_SIZE=500
+
+# Risk & Strategy Calibration
+RISK_PERCENT=1.0
+MIN_CONFLUENCE_SCORE=70
+SIGNAL_COOLDOWN_HOURS=4
+XAUUSD_PIP_TOLERANCE=40.0
+SHADOW_MODE=false
+```
+
+#### 3. Database Schema Migration
+
+Open the SQL Editor in your Neon Dashboard and execute the DDL script located at `db/migrations/002_smc_tables.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS order_blocks (
+    id UUID PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('bullish', 'bearish')),
+    ob_high DECIMAL(18, 5) NOT NULL,
+    ob_low DECIMAL(18, 5) NOT NULL,
+    ob_50 DECIMAL(18, 5) NOT NULL,
+    strength_score DECIMAL(3, 2) NOT NULL DEFAULT 0.0,
+    is_mitigated BOOLEAN NOT NULL DEFAULT FALSE,
+    origin_timestamp TIMESTAMPTZ NOT NULL,
+    mitigation_timestamp TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ob_active ON order_blocks(symbol, timeframe, is_mitigated)
+    WHERE is_mitigated = FALSE;
+
+CREATE TABLE IF NOT EXISTS structure_events (
+    id UUID PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('BOS', 'CHoCH', 'MSS', 'CISD')),
+    direction TEXT NOT NULL CHECK (direction IN ('bullish', 'bearish')),
+    price_level DECIMAL(18, 5) NOT NULL,
+    event_timestamp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_se_recent ON structure_events(symbol, timeframe, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id UUID PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
+    signal_type TEXT NOT NULL,
+    entry_price DECIMAL(18, 5) NOT NULL,
+    stop_loss DECIMAL(18, 5) NOT NULL,
+    take_profit_1 DECIMAL(18, 5) NOT NULL,
+    take_profit_2 DECIMAL(18, 5) NOT NULL,
+    risk_reward DECIMAL(5, 2) NOT NULL,
+    confluence_score INTEGER,
+    confluence_factors TEXT[],
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    telegram_message_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_recent ON signals(symbol, direction, sent_at DESC);
+```
+
+## 6. Running Tests
+
+Run the full deterministic unit test suite:
 
 ```bash
-python main.py
+python -m pytest tests/ -v
 ```
 
-Nexubot will auto-train its neural network on boot, connect to your broker, initialize the Telegram listener, and begin scanning.
+Run tests by module:
 
-## ⚠️ Disclaimer
+```bash
+# Test Data Layer (Normalizer & In-Memory Store)
+python -m pytest tests/test_data_layer.py -v
 
-Algorithmic trading involves significant risk and is not suitable for all investors. This software is an educational tool for signal generation and automation, not a guarantee of profit. Deep learning models map historical probabilities, which do not guarantee future performance in unprecedented market conditions. Trade responsibly.
+# Test Market Structure (Swings, BOS, CHoCH)
+python -m pytest tests/test_structure.py -v
 
-Copyright © 2026 Nexubot Systems.
+# Test SMC Entry Models (Order Blocks, OTE, Sweeps)
+python -m pytest tests/test_smc.py -v
+
+# Test Confluence Engine (Integration & Mocked Repositories)
+python -m pytest tests/test_confluence.py -v
+```
+
+## 7. Telegram Commands
+
+#### Public Commands
+
+- `/start` — Displays the bot overview and operational status.
+- `/status` — Displays system health, asset scope, active timeframes, and shadow mode status.
+- `/bias` — Queries Neon PostgreSQL for the latest 4H macro trend direction.
+- `/signals` — Fetches and displays the last 5 dispatched trading alerts.
+
+#### Admin Commands (Restricted to `TELEGRAM_ADMIN_ID`)
+
+- `/zones` — Lists all unmitigated 1H Order Blocks currently tracked in the database.
+- `/scan` — Forces an immediate evaluation of current market structure for entry triggers.
+
+## 8. Production Deployment (Railway)
+
+#### 1. Pre-Deployment Docker Verification
+
+Build and test the container locally:
+
+```bash
+docker build -t nexubot .
+docker run --env-file .env nexubot
+```
+
+#### 2. Deploy to Railway
+
+1. Push your code to a private GitHub repository.
+2. Log in to [Railway](https://railway.com/) and create a New Project.
+
+3. Select Deploy from GitHub repo and link your `nexubot` repository.
+
+4. In the project dashboard, navigate to the Variables tab and add all variables defined in `.env.example`.
+
+5. Railway will detect the `Dockerfile` and `railway.toml`, build the image, and start the application.
+
+6. Verify startup logs in the Railway deployment console:
+   - `database_pool_initialized`
+   - `bootstrapping_data`
+   - `scheduler_started`
+   - `websocket_connected`
+   - `telegram_bot_polling_started`

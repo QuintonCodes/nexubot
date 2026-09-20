@@ -1,15 +1,36 @@
-python-dotenv
+# ==========================================
+# NEXUBOT CLOUD RUNTIME DEPENDENCIES
+# Target: Python 3.13 (Linux / Railway)
+# Asset Target: XAUUSD (M5 Execution)
+# ==========================================
+
+# Async & Telegram Bot Framework
+aiogram
+aiohttp
+
+# Market Data Layer (Twelve Data REST + WebSocket)
+twelvedata
+
+# Database Layer (Neon PostgreSQL Async Engine)
+asyncpg
+psycopg[binary]
+
+# Task Scheduling & Event Loop Management
+APScheduler
+
+# Data Science & Numerical Computations
 pandas
 numpy
-sqlalchemy
-asyncpg
-greenlet
-MetaTrader5
-scipy
-scikit-learn
-imbalanced-learn
-tensorflow
-joblib
-cryptography
-python-telegram-bot
-requests
+
+# Configuration, Validation & Serialization
+pydantic
+pydantic-settings
+python-dotenv
+
+# Utilities, Timezones & Structured Logging
+pytz
+structlog
+
+# Testing Framework
+pytest
+pytest-asyncio
