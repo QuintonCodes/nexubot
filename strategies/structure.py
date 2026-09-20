@@ -8,6 +8,7 @@ import pandas as pd
 from typing import List, Literal, Optional
 
 from strategies.models import SwingPoint, StructureEvent
+from utils.math_helpers import price_to_pips
 
 
 def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
@@ -68,9 +69,7 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
 
 
 def classify_structure(swings: List[SwingPoint]) -> Literal["bullish", "bearish", "ranging"]:
-    """
-    Determines the current market bias based on the sequence of the last few swings.
-    """
+    """Used strictly as a bootstrap heuristic on cold starts."""
     if len(swings) < 4:
         return "ranging"
 
@@ -94,8 +93,6 @@ def detect_bos(df: pd.DataFrame, swings: List[SwingPoint], symbol: str, tf: str)
         return None
 
     last_candle = df.iloc[-1]
-
-    # Get the most recent swing high and low
     highs = [s for s in swings if s.type == "high"]
     lows = [s for s in swings if s.type == "low"]
 
@@ -152,5 +149,62 @@ def detect_choch(
     if current_structure == "bearish" and bos_event.direction == "bullish":
         bos_event.event_type = "CHoCH"
         return bos_event
+
+    return None
+
+
+def detect_mss(
+    df: pd.DataFrame,
+    swings: List[SwingPoint],
+    current_structure: str,
+    symbol: str,
+    tf: str,
+    displacement_pips: float = 30.0,
+) -> Optional[StructureEvent]:
+    """Detects Market Structure Shift (MSS): CHoCH accompanied by strong momentum."""
+    choch = detect_choch(df, swings, current_structure, symbol, tf)
+    if not choch:
+        return None
+
+    last_candle = df.iloc[-1]
+    body_size = price_to_pips(abs(last_candle["close"] - last_candle["open"]), symbol)
+
+    if body_size >= displacement_pips:
+        choch.event_type = "MSS"
+        return choch
+
+    return None
+
+
+def detect_cisd(df: pd.DataFrame, ob: dict, symbol: str, tf: str) -> Optional[StructureEvent]:
+    """Detects Change in State of Delivery (CISD) via 50% re-encroachment."""
+    if len(df) < 2:
+        return None
+
+    last_candle = df.iloc[-1]
+    ob_50 = (ob["ob_high"] + ob["ob_low"]) / 2.0
+
+    # Verify if delivery shifted by rejecting off the OB's equilibrium
+    if ob["direction"] == "bullish" and last_candle["low"] <= ob_50 <= last_candle["high"]:
+        return StructureEvent(
+            event_type="CISD",
+            direction="bullish",
+            price_level=ob_50,
+            timestamp=last_candle["timestamp"],
+            symbol=symbol,
+            timeframe=tf,
+            confirmed=True,
+        )
+
+    elif ob["direction"] == "bearish" and last_candle["low"] <= ob_50 <= last_candle["high"]:
+        return StructureEvent(
+            event_type="CISD",
+            direction="bearish",
+            price_level=ob_50,
+            timestamp=last_candle["timestamp"],
+            symbol=symbol,
+            timeframe=tf,
+            confirmed=True,
+        )
 
     return None

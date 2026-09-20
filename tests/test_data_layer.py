@@ -1,5 +1,5 @@
 """
-Unit tests for Phase 1 Data Layer components: Normalizer and CandleStore.
+Unit tests for Data Layer components: Normalizer, Interval Parsing, and CandleStore.
 Run with: python -m pytest tests/test_data_layer.py -v
 """
 
@@ -11,11 +11,8 @@ from data.normalizer import normalize_ohlcv
 from data.candle_store import candle_store
 
 
-# ==========================================
-# 1. Normalizer Tests
-# ==========================================
 def test_normalize_ohlcv_valid_data():
-    """Test that valid Twelve Data responses are correctly standardized."""
+    """Test that valid Twelve Data responses are standardized with UTC timestamps."""
     # Hardcoded mock Twelve Data REST response
     raw_data = {
         "datetime": ["2026-09-17 10:00:00", "2026-09-17 10:05:00"],
@@ -26,7 +23,6 @@ def test_normalize_ohlcv_valid_data():
         "volume": ["1050", "1100"],
     }
     df_raw = pd.DataFrame(raw_data)
-
     df_norm = normalize_ohlcv(df_raw)
 
     # Check strict schema enforcement
@@ -35,12 +31,8 @@ def test_normalize_ohlcv_valid_data():
     # Check data types
     assert df_norm["open"].dtype == "float64"
     assert df_norm["volume"].dtype == "float64"
-
-    # Check that it is a timezone-aware UTC datetime, regardless of us/ns resolution
     assert isinstance(df_norm["timestamp"].dtype, pd.DatetimeTZDtype)
     assert str(df_norm["timestamp"].dt.tz) == "UTC"
-
-    # Verify sorting and content
     assert df_norm["timestamp"].iloc[0] < df_norm["timestamp"].iloc[1]
     assert df_norm["close"].iloc[1] == 2502.75
 
@@ -51,7 +43,6 @@ def test_normalize_ohlcv_missing_columns():
         {
             "datetime": ["2026-09-17 10:00:00"],
             "open": ["2500.50"],
-            # missing high, low, close, volume
         }
     )
 
@@ -59,12 +50,42 @@ def test_normalize_ohlcv_missing_columns():
         normalize_ohlcv(bad_data)
 
 
-# ==========================================
-# 2. CandleStore Tests
-# ==========================================
+def test_normalize_ohlcv_chronological_sorting():
+    """Test that out-of-order candles are sorted ascending by timestamp."""
+    unordered_data = {
+        "datetime": ["2026-09-17 10:10:00", "2026-09-17 10:00:00"],
+        "open": [2502.0, 2500.0],
+        "high": [2504.0, 2502.0],
+        "low": [2501.0, 2499.0],
+        "close": [2503.0, 2501.0],
+        "volume": [100.0, 100.0],
+    }
+    df_norm = normalize_ohlcv(pd.DataFrame(unordered_data))
+    assert df_norm["timestamp"].iloc[0] < df_norm["timestamp"].iloc[1]
+
+
+def test_timeframe_interval_parser():
+    """Test robust timeframe interval conversion."""
+
+    def _parse_interval_minutes(tf: str) -> int:
+        if tf.endswith("min"):
+            return int(tf.replace("min", ""))
+        if tf.endswith("h"):
+            return int(tf.replace("h", "")) * 60
+        raise ValueError(f"Unsupported timeframe format: {tf}")
+
+    assert _parse_interval_minutes("5min") == 5
+    assert _parse_interval_minutes("15min") == 15
+    assert _parse_interval_minutes("1h") == 60
+    assert _parse_interval_minutes("4h") == 240
+
+    with pytest.raises(ValueError, match="Unsupported timeframe format"):
+        _parse_interval_minutes("1d")
+
+
 @pytest.mark.asyncio
 async def test_candle_store_lifecycle():
-    """Test the full initialization, adding, and fetching loop of the candle store."""
+    """Test initialization, appending, readiness checks, and in-place timestamp updates."""
     symbol = "XAUUSD"
     tf = "5min"
 
@@ -83,13 +104,12 @@ async def test_candle_store_lifecycle():
         }
     )
 
+    # 1. Bulk initialization
     await candle_store.initialize(symbol, tf, historical_df)
-
-    # Check readiness
     assert await candle_store.is_ready(symbol, tf, min_candles=2) is True
     assert await candle_store.is_ready(symbol, tf, min_candles=100) is False
 
-    # 2. Test fetching all
+    # 2. Retrieval
     df_fetched = await candle_store.get_candles(symbol, tf)
     assert len(df_fetched) == 2
 
@@ -107,11 +127,10 @@ async def test_candle_store_lifecycle():
 
     await candle_store.add_candle(symbol, tf, new_candle)
     df_updated = await candle_store.get_candles(symbol, tf)
-
     assert len(df_updated) == 3
     assert df_updated.iloc[-1]["close"] == 2504.0
 
-    # 4. Test Overwriting existing timestamp
+    # 4. In-place overwrite for matching timestamp
     updated_candle = new_candle.copy()
     updated_candle["close"] = 2506.0  # Late update on same timestamp
     await candle_store.add_candle(symbol, tf, updated_candle)

@@ -1,6 +1,6 @@
 """
 SMC Entry Model Detection Engine.
-Detects Order Blocks, Optimal Trade Entries (OTE), and Liquidity Pools/Sweeps.
+Detects Order Blocks, Optimal Trade Entries (OTE), FVGs, Inducements, and Liquidity Pools/Sweeps.
 """
 
 import pandas as pd
@@ -8,18 +8,79 @@ import uuid
 from datetime import datetime
 from typing import List, Optional, Literal
 
-from strategies.models import SwingPoint, OrderBlock, OTEZone, LiquidityPool, TradeSignal
-from utils.math_helpers import fibonacci_levels, price_to_pips
+from strategies.models import SwingPoint, OrderBlock, OTEZone, LiquidityPool, TradeSignal, FVG
+from utils.math_helpers import fibonacci_levels, price_to_pips, calculate_atr, calculate_rrr
+
+
+def detect_fair_value_gaps(df: pd.DataFrame, symbol: str, tf: str) -> List[FVG]:
+    """Identifies institutional 3-candle imbalances/FVGs."""
+    fvgs = []
+    if len(df) < 3:
+        return fvgs
+
+    for i in range(1, len(df) - 1):
+        prev_c = df.iloc[i - 1]
+        next_c = df.iloc[i + 1]
+
+        # Bullish FVG
+        if next_c["low"] > prev_c["high"]:
+            fvgs.append(
+                FVG(
+                    symbol=symbol,
+                    timeframe=tf,
+                    direction="bullish",
+                    top=next_c["low"],
+                    bottom=prev_c["high"],
+                    timestamp=df.iloc[i]["timestamp"],
+                    mitigated=False,
+                )
+            )
+        # Bearish FVG
+        elif next_c["high"] < prev_c["low"]:
+            fvgs.append(
+                FVG(
+                    symbol=symbol,
+                    timeframe=tf,
+                    direction="bearish",
+                    top=prev_c["low"],
+                    bottom=next_c["high"],
+                    timestamp=df.iloc[i]["timestamp"],
+                    mitigated=False,
+                )
+            )
+    return fvgs
+
+
+def detect_inducement(swings: List[SwingPoint], direction: Literal["bullish", "bearish"]) -> Optional[SwingPoint]:
+    """Finds the minor bait swing before the structural extreme."""
+    if len(swings) < 3:
+        return None
+
+    if direction == "bullish":
+        lows = [s for s in swings if s.type == "low"]
+        if len(lows) >= 2:
+            return lows[-2]
+    else:
+        highs = [s for s in swings if s.type == "high"]
+        if len(highs) >= 2:
+            return highs[-2]
+    return None
+
+
+def get_premium_discount_zone(swing_low: float, swing_high: float, current_price: float) -> str:
+    """Calculates ICT Premium/Discount equilibrium arrays."""
+    midpoint = (swing_high + swing_low) / 2.0
+    if current_price > midpoint:
+        return "Premium"
+    elif current_price < midpoint:
+        return "Discount"
+    return "Equilibrium"
 
 
 def find_order_blocks(
     df: pd.DataFrame, swings: List[SwingPoint], direction: Literal["bullish", "bearish"], symbol: str, tf: str
 ) -> List[OrderBlock]:
-    """
-    Identifies Order Blocks created before a major displacement.
-    Bullish OB: The last down candle before a strong up move.
-    Bearish OB: The last up candle before a strong down move.
-    """
+    """Identifies institutional Order Blocks factoring dynamic scoring and a 20-candle lookback."""
     obs = []
 
     # We need at least a few candles to identify an OB
@@ -28,55 +89,115 @@ def find_order_blocks(
 
     # For a simplified programmatic OB: we look at the origin of the last structural swing
     last_swing = swings[-1]
-
-    # Search backwards from the swing to find the OB candle
     search_idx = last_swing.candle_index
 
+    # Widen Lookback
+    lookback_limit = max(0, search_idx - 20)
+    atr_val = calculate_atr(df.iloc[: search_idx + 1]) if search_idx > 14 else 2.0
+
     if direction == "bullish" and last_swing.type == "low":
-        # Find the last bearish candle (close < open) near the swing low
-        for i in range(search_idx, max(0, search_idx - 5), -1):
-            if df["close"].iloc[i] < df["open"].iloc[i]:
-                ob_high = df["high"].iloc[i]
-                ob_low = df["low"].iloc[i]
-                obs.append(
-                    OrderBlock(
-                        id=str(uuid.uuid4()),
-                        symbol=symbol,
-                        timeframe=tf,
-                        direction=direction,
-                        ob_high=ob_high,
-                        ob_low=ob_low,
-                        ob_50=(ob_high + ob_low) / 2.0,
-                        origin_timestamp=df["timestamp"].iloc[i],
-                        is_mitigated=False,
-                        mitigation_timestamp=None,
-                        strength_score=0.8,
-                    )
+        for i in range(search_idx, lookback_limit, -1):
+            body = abs(df["close"].iloc[i] - df["open"].iloc[i])
+            total_range = df["high"].iloc[i] - df["low"].iloc[i]
+
+            # Filter weak indecision candles
+            if body < (atr_val * 0.15) or df["close"].iloc[i] >= df["open"].iloc[i]:
+                continue
+
+            # Displacement Validation
+            displacement_valid = False
+            for j in range(i + 1, min(i + 6, len(df))):
+                if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.2):
+                    displacement_valid = True
+                    break
+            if not displacement_valid:
+                continue
+
+            # Check FVG overlap for boost
+            fvg_boost = 0.0
+            for j in range(i + 1, min(i + 4, len(df) - 1)):
+                if df["low"].iloc[j + 1] > df["high"].iloc[j - 1]:
+                    fvg_boost = 0.2
+                    break
+
+            # Dynamic Score Calculation
+            bwr = body / total_range if total_range > 0 else 0
+            displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
+
+            score = 0.4 + fvg_boost
+            if bwr > 0.6:
+                score += 0.2  # High body-to-wick ratio
+            if displacement_pips > (atr_val * 1.5):
+                score += 0.2  # Strong displacement impulse
+
+            ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
+            obs.append(
+                OrderBlock(
+                    id=str(uuid.uuid4()),
+                    symbol=symbol,
+                    timeframe=tf,
+                    direction=direction,
+                    ob_high=ob_high,
+                    ob_low=ob_low,
+                    ob_50=(ob_high + ob_low) / 2.0,
+                    origin_timestamp=df["timestamp"].iloc[i],
+                    mitigated=False,
+                    mitigation_timestamp=None,
+                    strength_score=min(1.0, score),
                 )
-                break
+            )
+            break
 
     elif direction == "bearish" and last_swing.type == "high":
-        # Find the last bullish candle (close > open) near the swing high
-        for i in range(search_idx, max(0, search_idx - 5), -1):
-            if df["close"].iloc[i] > df["open"].iloc[i]:
-                ob_high = df["high"].iloc[i]
-                ob_low = df["low"].iloc[i]
-                obs.append(
-                    OrderBlock(
-                        id=str(uuid.uuid4()),
-                        symbol=symbol,
-                        timeframe=tf,
-                        direction=direction,
-                        ob_high=ob_high,
-                        ob_low=ob_low,
-                        ob_50=(ob_high + ob_low) / 2.0,
-                        origin_timestamp=df["timestamp"].iloc[i],
-                        is_mitigated=False,
-                        mitigation_timestamp=None,
-                        strength_score=0.8,
-                    )
+        for i in range(search_idx, lookback_limit, -1):
+            body = abs(df["close"].iloc[i] - df["open"].iloc[i])
+            total_range = df["high"].iloc[i] - df["low"].iloc[i]
+
+            if body < (atr_val * 0.15) or df["close"].iloc[i] <= df["open"].iloc[i]:
+                continue
+
+            # Displacement Validation
+            displacement_valid = False
+            for j in range(i + 1, min(i + 6, len(df))):
+                if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.2):
+                    displacement_valid = True
+                    break
+            if not displacement_valid:
+                continue
+
+            # Check FVG overlap for boost
+            fvg_boost = 0.0
+            for j in range(i + 1, min(i + 4, len(df) - 1)):
+                if df["high"].iloc[j + 1] < df["low"].iloc[j - 1]:
+                    fvg_boost = 0.2
+                    break
+
+            bwr = body / total_range if total_range > 0 else 0
+            displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
+
+            score = 0.4 + fvg_boost
+            if bwr > 0.6:
+                score += 0.2
+            if displacement_pips > (atr_val * 1.5):
+                score += 0.2
+
+            ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
+            obs.append(
+                OrderBlock(
+                    id=str(uuid.uuid4()),
+                    symbol=symbol,
+                    timeframe=tf,
+                    direction=direction,
+                    ob_high=ob_high,
+                    ob_low=ob_low,
+                    ob_50=(ob_high + ob_low) / 2.0,
+                    origin_timestamp=df["timestamp"].iloc[i],
+                    mitigated=False,
+                    mitigation_timestamp=None,
+                    strength_score=min(1.0, score),
                 )
-                break
+            )
+            break
 
     return obs
 
@@ -86,17 +207,21 @@ def is_ob_mitigated(df: pd.DataFrame, ob: OrderBlock) -> bool:
     An Order Block is mitigated when price trades and CLOSES past its 50% median line.
     """
     # Filter candles that occurred AFTER the OB was formed
-    future_df = df[df["timestamp"] > ob.origin_timestamp]
+    future_df = df[df["timestamp"] > ob["origin_timestamp"]]
     if future_df.empty:
         return False
 
-    if ob.direction == "bullish":
+    ob_high = max(ob["ob_high"], ob["ob_low"])
+    ob_low = min(ob["ob_high"], ob["ob_low"])
+    ob_50 = (ob_high + ob_low) / 2.0
+
+    if ob["direction"] == "bullish":
         # Bullish OB mitigated if a candle closes below the 50% line
-        mitigating_candles = future_df[future_df["close"] < ob.ob_50]
+        mitigating_candles = future_df[future_df["close"] < ob_50]
         return not mitigating_candles.empty
     else:
         # Bearish OB mitigated if a candle closes above the 50% line
-        mitigating_candles = future_df[future_df["close"] > ob.ob_50]
+        mitigating_candles = future_df[future_df["close"] > ob_50]
         return not mitigating_candles.empty
 
 
@@ -155,7 +280,7 @@ def detect_liquidity_pools(
                             price_level=max(highs[i].price, highs[-1].price),
                             price_tolerance=pip_tolerance,
                             touch_count=2,
-                            is_swept=False,
+                            swept=False,
                             sweep_timestamp=None,
                         )
                     )
@@ -175,7 +300,7 @@ def detect_liquidity_pools(
                             price_level=min(lows[i].price, lows[-1].price),
                             price_tolerance=pip_tolerance,
                             touch_count=2,
-                            is_swept=False,
+                            swept=False,
                             sweep_timestamp=None,
                         )
                     )
@@ -192,20 +317,20 @@ def detect_liquidity_sweep(df: pd.DataFrame, pools: List[LiquidityPool]) -> Opti
     last_candle = df.iloc[-1]
 
     for pool in pools:
-        if pool.is_swept:
+        if pool.swept:
             continue
 
         if pool.pool_type == "EQH":
             # Wick above the EQH, but close below it
             if last_candle["high"] > pool.price_level and last_candle["close"] < pool.price_level:
-                pool.is_swept = True
+                pool.swept = True
                 pool.sweep_timestamp = last_candle["timestamp"]
                 return pool
 
         elif pool.pool_type == "EQL":
             # Wick below the EQL, but close above it
             if last_candle["low"] < pool.price_level and last_candle["close"] > pool.price_level:
-                pool.is_swept = True
+                pool.swept = True
                 pool.sweep_timestamp = last_candle["timestamp"]
                 return pool
 
@@ -219,7 +344,11 @@ def generate_trade_signal(
     entry_price: float,
     stop_loss: float,
     factors: List[str],
+    confluence_score: int,
     timestamp: datetime,
+    entry_model: str,
+    session: str,
+    pd_zone: str,
 ) -> TradeSignal:
     """Assembles a valid TradeSignal, automatically calculating Take Profits based on RRR."""
     sl_pips_diff = abs(entry_price - stop_loss)
@@ -231,6 +360,8 @@ def generate_trade_signal(
         tp1 = entry_price - (sl_pips_diff * 1.5)
         tp2 = entry_price - (sl_pips_diff * 3.0)
 
+    actual_rrr = calculate_rrr(entry_price, stop_loss, tp2)
+
     return TradeSignal(
         signal_id=str(uuid.uuid4()),
         symbol=symbol,
@@ -239,9 +370,12 @@ def generate_trade_signal(
         stop_loss=round(stop_loss, 3),
         take_profit_1=round(tp1, 3),
         take_profit_2=round(tp2, 3),
-        risk_reward=3.0,
+        risk_reward=actual_rrr,
         signal_type="SMC_Confluence",
-        confluence_score=85,
+        entry_model=entry_model,
+        session=session,
+        pd_zone=pd_zone,
+        confluence_score=confluence_score,
         confluence_factors=factors,
         timestamp=timestamp,
         timeframe=tf,

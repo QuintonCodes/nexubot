@@ -1,5 +1,5 @@
 # Base image: Lightweight Python 3.12 Linux environment
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Prevent Python from writing .pyc files and buffer stdout for real-time Railway logs
 ENV PYTHONUNBUFFERED=1

@@ -19,12 +19,12 @@ class SwingPoint:
 
 @dataclass
 class StructureEvent:
+    symbol: str
+    timeframe: str
     event_type: Literal["BOS", "CHoCH", "MSS", "CISD"]
     direction: Literal["bullish", "bearish"]
     price_level: float
     timestamp: datetime
-    symbol: str
-    timeframe: str
     confirmed: bool
 
 
@@ -37,10 +37,21 @@ class OrderBlock:
     ob_high: float
     ob_low: float
     ob_50: float  # Mitigation line
-    origin_timestamp: datetime
-    is_mitigated: bool
-    mitigation_timestamp: Optional[datetime]
     strength_score: float  # 0.0 to 1.0
+    mitigated: bool
+    origin_timestamp: datetime
+    mitigation_timestamp: Optional[datetime]
+
+
+@dataclass
+class FVG:
+    symbol: str
+    timeframe: str
+    direction: Literal["bullish", "bearish"]
+    top: float
+    bottom: float
+    timestamp: datetime
+    mitigated: bool
 
 
 @dataclass
@@ -49,9 +60,9 @@ class LiquidityPool:
     timeframe: str
     pool_type: Literal["EQH", "EQL"]
     price_level: float
+    swept: bool
     price_tolerance: float
     touch_count: int
-    is_swept: bool
     sweep_timestamp: Optional[datetime]
 
 
@@ -78,6 +89,9 @@ class TradeSignal:
     take_profit_2: float
     risk_reward: float
     signal_type: str
+    entry_model: str
+    session: str
+    pd_zone: str
     confluence_score: int
     confluence_factors: List[str]
     timestamp: datetime

@@ -9,10 +9,11 @@ import asyncio
 import json
 import pandas as pd
 from datetime import datetime, timezone
-from typing import Callable, Awaitable, List, Dict, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from config.settings import settings
 from utils.logger import logger
+from utils.rate_limiter import rate_limiter
 
 
 class TwelveDataClient:
@@ -21,33 +22,25 @@ class TwelveDataClient:
         self.rest_base_url = "https://api.twelvedata.com"
         self.ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={self.api_key}"
 
-        self.daily_calls = 0
-        self.last_reset_date = datetime.now(timezone.utc).date()
-        self.max_calls = settings.MAX_DAILY_API_CALLS
-
         self.ws_connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self.is_streaming = False
 
         # State for tick-to-candle aggregation
         self.active_candles: Dict[str, dict] = {}
-        self.interval_minutes = int(settings.ENTRY_TIMEFRAME.replace("min", ""))
+        self.interval_minutes = self._parse_interval_minutes(settings.ENTRY_TIMEFRAME)
 
-    def _check_rate_limit(self) -> None:
-        """Resets the counter at UTC midnight and validates the current limit."""
-        current_date = datetime.now(timezone.utc).date()
-        if current_date > self.last_reset_date:
-            self.daily_calls = 0
-            self.last_reset_date = current_date
-
-        if self.daily_calls >= self.max_calls:
-            logger.error("api_limit_reached", calls=self.daily_calls, max=self.max_calls)
-            raise ConnectionRefusedError("Twelve Data Daily API limit reached.")
+    def _parse_interval_minutes(self, tf: str) -> int:
+        """Parses string timeframes into integer minutes."""
+        if tf.endswith("min"):
+            return int(tf.replace("min", ""))
+        if tf.endswith("h"):
+            return int(tf.replace("h", "")) * 60
+        raise ValueError(f"Unsupported timeframe format: {tf}")
 
     async def get_historical_ohlcv(self, symbol: str, interval: str, outputsize: int = 500) -> pd.DataFrame:
-        """
-        Fetches historical OHLCV data via REST API.
-        """
-        self._check_rate_limit()
+        """Fetches historical OHLCV data via REST API safely mapped through rate limiter."""
+        # Enforce unified Rate Limiter verification before dispatching network request
+        await rate_limiter.acquire()
 
         params = {
             "symbol": symbol,
@@ -61,7 +54,6 @@ class TwelveDataClient:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as response:
-                self.daily_calls += 1
                 data = await response.json()
 
                 if "values" not in data:
@@ -168,3 +160,7 @@ class TwelveDataClient:
         if self.ws_connection and not self.ws_connection.closed:
             await self.ws_connection.close()
             logger.info("websocket_disconnected")
+
+
+# Singleton instance used by the rest of the application
+client = TwelveDataClient()

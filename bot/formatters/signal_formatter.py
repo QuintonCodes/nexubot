@@ -9,14 +9,8 @@ from strategies.models import TradeSignal
 
 def format_trade_signal(signal: TradeSignal) -> str:
     """Formats a TradeSignal into the official Nexubot Telegram HTML layout."""
-
-    # 1. Header & Emojis
     emoji = "🟢 BUY SIGNAL" if signal.direction == "buy" else "🔴 SELL SIGNAL"
-
-    # 2. Confluence Factors (bullet points)
     factors_text = "\n".join([f"  ✅ {f}" for f in signal.confluence_factors])
-
-    # 3. Time formatting
     time_str = signal.timestamp.strftime("%Y-%m-%d %H:%M UTC")
 
     # 4. Construct the HTML string
@@ -25,7 +19,8 @@ def format_trade_signal(signal: TradeSignal) -> str:
 ╚══════════════════════════════╝
 
 📐 <b>Setup:</b> {signal.signal_type}
-⏱ <b>Timeframe:</b> {signal.timeframe}
+📍 <b>Array Zone:</b> {signal.pd_zone} Array
+🕐 <b>Session:</b> {signal.session}
 ⭐ <b>Confluence Score:</b> {signal.confluence_score}/100
 
 ──────────────────────────────

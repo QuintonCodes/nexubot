@@ -15,9 +15,7 @@ from config.settings import settings
 
 class CandleStore:
     def __init__(self):
-        # Internal structure: self._data["XAUUSD"]["5min"] = deque(...)
         self._data: Dict[str, Dict[str, deque]] = {}
-        # Task safety locks: self._locks["XAUUSD"]["5min"] = asyncio.Lock()
         self._locks: Dict[str, Dict[str, asyncio.Lock]] = {}
 
         # Buffer limit pulled directly from validated settings
@@ -49,17 +47,7 @@ class CandleStore:
                 store.append(candle)
 
     async def get_candles(self, symbol: str, timeframe: str, count: Optional[int] = None) -> pd.DataFrame:
-        """
-        Retrieves a DataFrame of the requested candle history.
-
-        Args:
-            symbol (str): Target asset (e.g., 'XAUUSD').
-            timeframe (str): Target timeframe (e.g., '5min').
-            count (int, optional): Number of recent candles to retrieve. Returns all if None.
-
-        Returns:
-            pd.DataFrame: A standardized DataFrame ready for SMC computations.
-        """
+        """Retrieves a DataFrame of the requested candle history."""
         self._ensure_initialized(symbol, timeframe)
 
         async with self._locks[symbol][timeframe]:

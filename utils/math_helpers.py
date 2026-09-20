@@ -1,28 +1,18 @@
-"""
-Pure mathematical utility functions for calculating Pips, RRR, and Fibonacci levels.
-Optimized for XAU/USD (Gold).
-"""
-
+import pandas as pd
 from typing import Dict
 
 
-def get_pip_multiplier(symbol: str) -> float:
-    """Returns the multiplier to convert raw price differences to pips."""
-    if "XAU" in symbol or "GOLD" in symbol:
-        return 10.0  # $1.00 move = 10 pips
-    if "JPY" in symbol:
-        return 100.0
-    return 10000.0  # Standard forex (e.g., EUR/USD)
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Calculates the Average True Range (ATR) to measure dynamic market volatility."""
+    if len(df) < period + 1:
+        return 2.0  # Safe fallback for XAUUSD if insufficient history
 
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
 
-def price_to_pips(price_diff: float, symbol: str) -> float:
-    """Converts a raw price difference into a pip value."""
-    return abs(price_diff) * get_pip_multiplier(symbol)
-
-
-def pips_to_price(pips: float, symbol: str) -> float:
-    """Converts a pip value into a raw price difference."""
-    return pips / get_pip_multiplier(symbol)
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
 
 
 def calculate_rrr(entry: float, sl: float, tp: float) -> float:
@@ -35,16 +25,11 @@ def calculate_rrr(entry: float, sl: float, tp: float) -> float:
 
 
 def fibonacci_levels(swing_low: float, swing_high: float) -> Dict[str, float]:
-    """
-    Calculates standard SMC Fibonacci levels between two price points.
-    Returns absolute price levels for each key ratio.
-    """
+    """Standard ICT Optimal Trade Entry (OTE) retracement coordinates."""
+
     diff = swing_high - swing_low
     return {
         "0.0": swing_low,
-        "0.236": swing_low + (diff * 0.236),
-        "0.382": swing_low + (diff * 0.382),
-        "0.5": swing_low + (diff * 0.5),
         "0.618": swing_low + (diff * 0.618),
         "0.705": swing_low + (diff * 0.705),
         "0.786": swing_low + (diff * 0.786),
@@ -52,6 +37,24 @@ def fibonacci_levels(swing_low: float, swing_high: float) -> Dict[str, float]:
     }
 
 
-def is_within_range(price: float, zone_low: float, zone_high: float) -> bool:
-    """Checks if a price falls within a specific high/low zone (inclusive)."""
-    return min(zone_low, zone_high) <= price <= max(zone_low, zone_high)
+def is_within_range(price: float, bound_a: float, bound_b: float) -> bool:
+    """Checks if a given price falls within a specific high/low zone."""
+    return min(bound_a, bound_b) <= price <= max(bound_a, bound_b)
+
+
+def price_to_pips(price_diff: float, symbol: str) -> float:
+    """Normalizes raw price differentials into standard pips based on asset class."""
+    if symbol in ["XAUUSD", "XAU/USD"]:
+        return price_diff * 10  # XAUUSD 1 pip = 0.1
+    if "JPY" in symbol:
+        return price_diff * 100
+    return price_diff * 10000
+
+
+def pips_to_price(pips: float, symbol: str) -> float:
+    """Converts pip values back to raw price differentials."""
+    if symbol in ["XAUUSD", "XAU/USD"]:
+        return pips / 10.0
+    if "JPY" in symbol:
+        return pips / 100.0
+    return pips / 10000.0

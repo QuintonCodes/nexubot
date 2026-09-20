@@ -43,6 +43,21 @@ async def refresh_mtf_data(client: TwelveDataClient, symbol: str):
         logger.error("mtf_refresh_failed", error=str(e))
 
 
+async def refresh_mtf_15m_data(client: TwelveDataClient, symbol: str):
+    """Refreshes the 15M Data to confirm intermediate structure sweeps."""
+    logger.info("scheduler_running_15m_refresh")
+    try:
+        tf = "15min"
+        raw_df = await client.get_historical_ohlcv(symbol, tf, outputsize=200)
+        norm_df = normalize_ohlcv(raw_df)
+        await candle_store.initialize(symbol, tf, norm_df)
+
+        engine = ConfluenceEngine(symbol)
+        await engine.scan_mtf_confirmation()
+    except Exception as e:
+        logger.error("mtf_15m_refresh_failed", error=str(e))
+
+
 def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
     """Configures and returns the AsyncIOScheduler."""
     scheduler = AsyncIOScheduler()
@@ -63,6 +78,15 @@ def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
         trigger=CronTrigger(minute=1),  # 1 minute past the hour to allow TwelveData to finalize the candle
         args=[client, symbol],
         id="mtf_refresh",
+        replace_existing=True,
+    )
+
+    # 15M Refresh: Every 15 minutes at minutes 1, 16, 31, 46
+    scheduler.add_job(
+        refresh_mtf_15m_data,
+        trigger=CronTrigger(minute="1,16,31,46"),
+        args=[client, symbol],
+        id="mtf_15m_refresh",
         replace_existing=True,
     )
 

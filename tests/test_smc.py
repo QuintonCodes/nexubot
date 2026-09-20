@@ -1,37 +1,58 @@
 """
-Unit tests for the SMC Entry Models (Phase 3).
+Unit tests for SMC Entry Models, Math Helpers, and Session Tracking.
 Run with: python -m pytest tests/test_smc.py -v
 """
 
 import pandas as pd
+from datetime import datetime, timezone
 
-from strategies.structure import detect_swings
+from strategies.sessions import SessionManager
 from strategies.smc import (
-    find_order_blocks,
-    is_ob_mitigated,
     calculate_ote_zone,
+    detect_fair_value_gaps,
+    detect_inducement,
     detect_liquidity_pools,
     detect_liquidity_sweep,
+    find_order_blocks,
     generate_trade_signal,
+    get_premium_discount_zone,
+    is_ob_mitigated,
+)
+from strategies.structure import detect_swings
+from utils.math_helpers import (
+    calculate_atr,
+    calculate_rrr,
+    is_within_range,
+    pips_to_price,
+    price_to_pips,
 )
 
 
 def test_find_and_mitigate_order_block(bullish_bos_df):
-    """Test OB creation and 50% mitigation invalidation."""
+    """Test OB creation, displacement filtering, and 50% mitigation.."""
     swings = detect_swings(bullish_bos_df, lookback=3)
 
-    # 1. Find the OB
+    # 1. Detect Order Blocks
     obs = find_order_blocks(bullish_bos_df, swings, direction="bullish", symbol="XAU/USD", tf="5min")
     assert len(obs) > 0
     ob = obs[0]
 
     # Ensure it mapped to a bearish down-candle before the swing low
     assert ob.ob_high > ob.ob_low
-    assert ob.is_mitigated is False
+    assert ob.mitigated is False
+    assert 0.4 <= ob.strength_score <= 1.0
 
     # 2. Test Mitigation
-    # Initially not mitigated
-    assert is_ob_mitigated(bullish_bos_df, ob) is False
+    ob_dict = {
+        "id": 1,
+        "symbol": ob.symbol,
+        "timeframe": ob.timeframe,
+        "direction": ob.direction,
+        "ob_high": ob.ob_high,
+        "ob_low": ob.ob_low,
+        "origin_timestamp": ob.origin_timestamp,
+    }
+    assert is_ob_mitigated(bullish_bos_df, ob_dict) is False
 
     # Manually append a candle that crashes through the OB 50% line to test mitigation
     crash_row = bullish_bos_df.iloc[-1].copy()
@@ -39,8 +60,7 @@ def test_find_and_mitigate_order_block(bullish_bos_df):
     crash_row["close"] = ob.ob_50 - 5.0  # Close below 50% line
 
     mitigated_df = pd.concat([bullish_bos_df, crash_row.to_frame().T], ignore_index=True)
-
-    assert is_ob_mitigated(mitigated_df, ob) is True
+    assert is_ob_mitigated(mitigated_df, ob_dict) is True
 
 
 def test_calculate_ote_zone():
@@ -52,11 +72,23 @@ def test_calculate_ote_zone():
     assert zone.ote_top == 2078.6  # 78.6%
 
 
+def test_calculate_ote_zone_with_retracement_df(ote_retracement_df):
+    """Test OTE calculation against synthetic retracement DataFrame fixture."""
+    swing_low = ote_retracement_df["low"].min()
+    swing_high = ote_retracement_df["high"].max()
+
+    zone = calculate_ote_zone(swing_low, swing_high, direction="bullish", symbol="XAUUSD", tf="5min")
+    retracement_candle = ote_retracement_df.iloc[-1]
+
+    assert zone.direction == "bullish"
+    assert zone.fib_0 == swing_low
+    assert zone.fib_1 == swing_high
+    assert is_within_range(retracement_candle["close"], zone.ote_entry, zone.ote_top)
+
+
 def test_detect_liquidity_sweep(liquidity_sweep_df):
     """Test that EQH/EQL are identified, and wick-closures confirm sweeps."""
     swings = detect_swings(liquidity_sweep_df.iloc[:-1], lookback=3)
-
-    # 1. Detect the Equal Lows (EQL)
     pools = detect_liquidity_pools(swings, symbol="XAU/USD", tf="5min", pip_tolerance=40.0)
 
     # Isolate the EQL pool specifically to guarantee stable test assertions
@@ -64,14 +96,39 @@ def test_detect_liquidity_sweep(liquidity_sweep_df):
     assert len(eql_pools) > 0
 
     eql_pool = eql_pools[0]
-    assert eql_pool.is_swept is False
+    assert eql_pool.swept is False
 
     # 2. Process the final candle which contains the massive downside wick
     swept_pool = detect_liquidity_sweep(liquidity_sweep_df, eql_pools)
 
     assert swept_pool is not None
     assert swept_pool.pool_type == "EQL"
-    assert swept_pool.is_swept is True
+    assert swept_pool.swept is True
+
+
+def test_detect_fair_value_gaps(fvg_df):
+    """Test Fair Value Gap detection."""
+    fvgs = detect_fair_value_gaps(fvg_df, symbol="XAUUSD", tf="5min")
+    assert len(fvgs) > 0
+    bullish_fvgs = [f for f in fvgs if f.direction == "bullish"]
+    assert len(bullish_fvgs) > 0
+    assert bullish_fvgs[0].top > bullish_fvgs[0].bottom
+
+
+def test_detect_inducement(bullish_bos_df):
+    """Test minor swing Inducement identification."""
+    swings = detect_swings(bullish_bos_df, lookback=3)
+    idm = detect_inducement(swings, direction="bullish")
+    assert idm is not None
+    assert idm.type == "low"
+
+
+def test_get_premium_discount_zone():
+    """Test ICT Premium/Discount equilibrium calculation."""
+    # Range: 2000.0 to 2100.0 -> Midpoint = 2050.0
+    assert get_premium_discount_zone(2000.0, 2100.0, 2075.0) == "Premium"
+    assert get_premium_discount_zone(2000.0, 2100.0, 2025.0) == "Discount"
+    assert get_premium_discount_zone(2000.0, 2100.0, 2050.0) == "Equilibrium"
 
 
 def test_generate_trade_signal():
@@ -83,12 +140,61 @@ def test_generate_trade_signal():
         entry_price=2500.0,
         stop_loss=2490.0,
         factors=["Bullish CHoCH", "OTE Tap"],
-        timestamp=pd.Timestamp.now(tz="UTC"),
+        confluence_score=85,
+        timestamp=datetime.now(timezone.utc),
+        entry_model="MTF OB Entry",
+        session="London Open Killzone",
+        pd_zone="Discount",
     )
 
-    # Stop loss difference is $10.00
-    # TP1 should be 1:1.5 = +$15.00
-    # TP2 should be 1:3.0 = +$30.00
+    # 10.0 risk: TP1 (+1.5R) = 2515.0, TP2 (+3.0R) = 2530.0
     assert signal.take_profit_1 == 2515.0
     assert signal.take_profit_2 == 2530.0
     assert signal.risk_reward == 3.0
+    assert signal.entry_model == "MTF OB Entry"
+    assert signal.session == "London Open Killzone"
+    assert signal.pd_zone == "Discount"
+    assert signal.confluence_score == 85
+
+
+def test_math_helpers():
+    """Test pip/price conversions, ranges, RRR, and ATR."""
+    assert price_to_pips(1.0, "XAUUSD") == 10.0
+    assert pips_to_price(10.0, "XAUUSD") == 1.0
+
+    assert is_within_range(2500.0, 2490.0, 2510.0) is True
+    assert is_within_range(2520.0, 2490.0, 2510.0) is False
+
+    assert calculate_rrr(entry=2500.0, sl=2490.0, tp=2530.0) == 3.0
+
+    atr_df = pd.DataFrame(
+        {
+            "high": [2502.0 + i for i in range(20)],
+            "low": [2498.0 + i for i in range(20)],
+            "close": [2500.0 + i for i in range(20)],
+        }
+    )
+    atr = calculate_atr(atr_df, period=14)
+    assert atr > 0.0
+
+
+def test_session_manager():
+    """Test session killzones and daily/weekly open trackers."""
+    dt_london = datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
+    assert SessionManager.get_active_killzone(dt_london) == "London Open Killzone"
+
+    dt_off = datetime(2026, 9, 1, 22, 0, tzinfo=timezone.utc)
+    assert SessionManager.get_active_killzone(dt_off) == "Out of Session"
+
+    htf_df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-09-01", periods=10, freq="4h", tz="UTC"),
+            "open": [2500.0 + i for i in range(10)],
+            "high": [2505.0 + i for i in range(10)],
+            "low": [2495.0 + i for i in range(10)],
+            "close": [2502.0 + i for i in range(10)],
+            "volume": [500.0] * 10,
+        }
+    )
+    levels = SessionManager.get_daily_weekly_open(htf_df)
+    assert "NDO" in levels and "NWO" in levels
