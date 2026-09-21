@@ -1,7 +1,5 @@
 # 🚀 Nexubot — Cloud-Native SMC Trading Signal Engine
 
-![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)
-
 **Nexubot** is a cloud-native, asynchronous Telegram signal trading bot built specifically for **XAU/USD (Gold)** on the **M5 timeframe**. It implements algorithmic Smart Money Concepts (SMC)—including Market Structure Shifts (BOS, CHoCH, MSS, CISD), Order Blocks, Breaker Blocks, Fair Value Gaps (FVG), ICT Optimal Trade Entries (OTE), Premium/Discount arrays, Inducement (IDM), and Session Killzones—operating 24/7 in a headless Linux container environment.
 
 ## 1. Architectural Highlights
@@ -153,8 +151,8 @@ Edit `.env`:
 ```
 # Telegram
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
-TELEGRAM_CHANNEL_ID=-1001234567890
 TELEGRAM_ADMIN_ID=123456789
+SIGNAL_CHANNEL_ID=-1001234567890
 
 # Twelve Data
 TWELVE_DATA_API_KEY=your_twelve_data_api_key_here

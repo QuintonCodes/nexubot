@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
 from db.database import get_pool
-from strategies.models import OrderBlock
+from strategies.models import LiquidityPool, OrderBlock, StructureEvent, TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,8 @@ class OrderBlockRepository:
         """
         query = """
             INSERT INTO order_blocks
-            (symbol, timeframe, direction, ob_high, ob_low, origin_timestamp, strength_score, mitigated)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (symbol, timeframe, direction, ob_high, ob_low, ob_50, origin_timestamp, strength_score, mitigated)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (symbol, timeframe, direction, origin_timestamp) DO NOTHING;
         """
         pool = get_pool()
@@ -32,6 +32,7 @@ class OrderBlockRepository:
                     ob.direction,
                     ob.ob_high,
                     ob.ob_low,
+                    ob.ob_50,
                     ob.origin_timestamp,
                     ob.strength_score,
                     False,
@@ -79,7 +80,7 @@ class OrderBlockRepository:
 class StructureEventRepository:
     """Tracks Market Structure Shifts, BOS, and CHoCH events."""
 
-    async def save_event(self, event: Any) -> None:
+    async def save_event(self, event: StructureEvent) -> None:
         query = """
             INSERT INTO structure_events
             (symbol, timeframe, event_type, price_level, timestamp)
@@ -108,7 +109,7 @@ class StructureEventRepository:
 class SignalRepository:
     """Handles persistence and deduplication of trade signals."""
 
-    async def save_signal(self, signal: Any) -> None:
+    async def save_signal(self, signal: TradeSignal) -> None:
         query = """
             INSERT INTO signals
             (symbol, timeframe, direction, entry_price, stop_loss, take_profit, confluence_score, timestamp)
@@ -123,7 +124,7 @@ class SignalRepository:
                 signal.direction,
                 signal.entry_price,
                 signal.stop_loss,
-                signal.take_profit_1,
+                signal.take_profit_2,
                 signal.confluence_score,
                 signal.timestamp,
             )
@@ -158,7 +159,7 @@ class SignalRepository:
 class LiquidityPoolRepository:
     """Persists EQH/EQL state for sweep detection."""
 
-    async def save_pool(self, pool: Any) -> None:
+    async def save_pool(self, pool: LiquidityPool) -> None:
         query = """
             INSERT INTO liquidity_pools (symbol, timeframe, pool_type, price_level, origin_timestamp, swept)
             VALUES ($1, $2, $3, $4, $5, $6)

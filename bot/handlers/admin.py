@@ -40,10 +40,10 @@ async def cmd_zones(message: types.Message):
 
     text = f"🧱 <b>Active {mtf} Order Blocks ({symbol}):</b>\n\n"
     for ob in active_obs:
-        dir_emoji = "🟢" if ob.direction == "bullish" else "🔴"
-        text += f"{dir_emoji} <b>{ob.direction.upper()}</b>\n"
-        text += f"Range: {min(ob.ob_low, ob.ob_high):.2f} - {max(ob.ob_low, ob.ob_high):.2f}\n"
-        text += f"Mitigation (50%): {ob.ob_50:.2f}\n\n"
+        dir_emoji = "🟢" if ob["direction"] == "bullish" else "🔴"
+        text += f"{dir_emoji} <b>{ob["direction"].upper()}</b>\n"
+        text += f"Range: {min(ob["ob_low"], ob["ob_high"]):.2f} - {max(ob["ob_low"], ob["ob_high"]):.2f}\n"
+        text += f"Mitigation (50%): {ob["ob_50"]:.2f}\n\n"
 
     await message.reply(text)
 

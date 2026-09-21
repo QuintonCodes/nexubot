@@ -24,18 +24,17 @@ dp.include_router(commands_router)  # Register public commands second
 
 async def broadcast_signal(message_html: str) -> None:
     """
-    Sends a formatted signal to the configured Telegram channel.
-    Silently bypasses sending if SHADOW_MODE is enabled in settings.
+    Dispatches generated trade signals directly to the private VIP channel.
     """
     if settings.SHADOW_MODE:
         logger.info("shadow_mode_active_signal_suppressed")
         return
 
     try:
-        await bot.send_message(chat_id=settings.TELEGRAM_CHANNEL_ID, text=message_html)
-        logger.info("telegram_signal_sent", channel=settings.TELEGRAM_CHANNEL_ID)
+        await bot.send_message(chat_id=settings.SIGNAL_CHANNEL_ID, text=message_html, disable_web_page_preview=True)
+        logger.info("signal_broadcast_success", channel=settings.SIGNAL_CHANNEL_ID)
     except Exception as e:
-        logger.error("telegram_send_failed", error=str(e))
+        logger.error("signal_broadcast_failed", error=str(e), channel_id=settings.SIGNAL_CHANNEL_ID)
 
 
 async def start_bot():

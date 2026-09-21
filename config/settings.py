@@ -13,11 +13,11 @@ class Settings(BaseSettings):
     # Telegram Credentials & Routing
     # ==========================================
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token obtained from @BotFather.")
-    TELEGRAM_CHANNEL_ID: int = Field(
-        ..., description="Target Telegram channel ID (negative integer for supergroups/channels)."
-    )
     TELEGRAM_ADMIN_ID: int = Field(
         ..., description="Telegram user ID of the primary administrator for command authorization."
+    )
+    SIGNAL_CHANNEL_ID: int = Field(
+        ..., description="Target Telegram channel ID (negative integer for supergroups/channels)."
     )
 
     # ==========================================

@@ -45,7 +45,7 @@ class ConfluenceEngine:
         if current_bias is None:
             current_bias = await structure_events.get_latest_bias(self.symbol, tf)
         if current_bias is None:
-            current_bias = classify_structure(swings)  # Bootstrap fallback
+            current_bias = classify_structure(df, swings)  # Bootstrap fallback
 
         # 1. Check for Continuation (BOS)
         bos = detect_bos(df, swings, self.symbol, tf)

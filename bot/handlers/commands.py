@@ -3,14 +3,16 @@ Telegram Bot Command Handlers.
 Routes user commands to the correct database queries or engine tasks.
 """
 
-from datetime import datetime, timezone
 from aiogram import Router, types
 from aiogram.filters import Command
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
+from data.candle_store import candle_store
 from db.repositories import signals, structure_events
 from strategies.sessions import SessionManager
-from data.candle_store import candle_store
+from strategies.structure import classify_structure, detect_swings
 from utils.rate_limiter import rate_limiter
 
 router = Router()
@@ -50,6 +52,11 @@ async def cmd_bias(message: types.Message):
     htf = settings.HTF_TIMEFRAMES[0]
     bias = await structure_events.get_latest_bias(symbol, htf)
 
+    if not bias:
+        df = await candle_store.get_candles(symbol, htf)
+        swings = detect_swings(df)
+        bias = classify_structure(df, swings)
+
     bias_str = bias.upper() if bias else "UNKNOWN"
     emoji = "🐂" if bias == "bullish" else "🐻" if bias == "bearish" else "⚖️"
 
@@ -60,12 +67,15 @@ async def cmd_bias(message: types.Message):
 @router.message(Command("killzone"))
 async def cmd_session(message: types.Message):
     """Exposes Session Killzone tracking."""
-    now = datetime.now(timezone.utc)
-    active = SessionManager.get_active_killzone(now)
+    now_utc = datetime.now(timezone.utc)
+    active = SessionManager.get_active_killzone(now_utc)
+
+    # Localize strictly for the Telegram output
+    now_sast = now_utc.astimezone(ZoneInfo("Africa/Johannesburg"))
 
     msg = (
         f"🕒 <b>SMC Killzone Tracker (UTC)</b>\n\n"
-        f"<b>Current Time:</b> {now.strftime('%H:%M')}\n"
+        f"<b>Current Time (SAST):</b> {now_sast.strftime('%H:%M')}\n"
         f"<b>Active Zone:</b> {active if active != 'Out of Session' else 'None (Ranging expected)'}"
     )
     await message.reply(msg)

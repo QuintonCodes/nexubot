@@ -43,7 +43,7 @@ def test_classify_structure_bullish(bullish_bos_df):
     """Test that a sequence of HHs and HLs is classified as bullish."""
     df_slice = bullish_bos_df.iloc[:33]
     swings = detect_swings(df_slice, lookback=3)
-    bias = classify_structure(swings)
+    bias = classify_structure(df_slice, swings)
 
     assert bias == "bullish"
 
@@ -54,13 +54,14 @@ def test_classify_structure_bearish(bearish_choch_df):
     # Filter to only the crash sequence containing lower low and lower high
     bearish_swings = [s for s in swings if s.classification in ["LL", "LH"]]
     if len(bearish_swings) >= 2:
-        bias = classify_structure(bearish_swings)
+        bias = classify_structure(bearish_choch_df, bearish_swings)
         assert bias in ["bearish", "ranging"]
 
 
 def test_classify_structure_ranging():
     """Test that insufficient swings return ranging status."""
-    assert classify_structure([]) == "ranging"
+    empty_df = pd.DataFrame()
+    assert classify_structure(empty_df, []) == "ranging"
 
 
 def test_detect_bos_bullish(bullish_bos_df):
@@ -107,9 +108,7 @@ def test_detect_choch_bearish(bearish_choch_df):
     df_slice = bearish_choch_df.iloc[:35]
     swings = detect_swings(df_slice, lookback=3)
 
-    current_bias = classify_structure(swings)
-
-    event = detect_choch(df_slice, swings, current_bias, symbol="XAU/USD", tf="5min")
+    event = detect_choch(df_slice, swings, "bullish", symbol="XAU/USD", tf="5min")
 
     assert event is not None
     assert event.event_type == "CHoCH"

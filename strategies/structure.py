@@ -68,20 +68,29 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
     return swings
 
 
-def classify_structure(swings: List[SwingPoint]) -> Literal["bullish", "bearish", "ranging"]:
-    """Used strictly as a bootstrap heuristic on cold starts."""
-    if len(swings) < 4:
+def classify_structure(df: pd.DataFrame, swings: List[SwingPoint]) -> Literal["bullish", "bearish", "ranging"]:
+    """Replays historical price action to determine the true current bias."""
+
+    if len(swings) < 2 or len(df) < 20:
         return "ranging"
 
-    recent_swings = swings[-4:]
-    classes = [s.classification for s in recent_swings]
+    bias = "ranging"
 
-    if "HH" in classes and "HL" in classes and "LL" not in classes:
-        return "bullish"
-    elif "LL" in classes and "LH" in classes and "HH" not in classes:
-        return "bearish"
+    for i in range(swings[0].candle_index + 1, len(df)):
+        candle_close = df.iloc[i]["close"]
 
-    return "ranging"
+        past_highs = [s for s in swings if s.type == "high" and s.candle_index < i]
+        past_lows = [s for s in swings if s.type == "low" and s.candle_index < i]
+
+        if not past_highs or not past_lows:
+            continue
+
+        if candle_close > past_highs[-1].price:
+            bias = "bullish"
+        elif candle_close < past_lows[-1].price:
+            bias = "bearish"
+
+    return bias
 
 
 def detect_bos(df: pd.DataFrame, swings: List[SwingPoint], symbol: str, tf: str) -> Optional[StructureEvent]:
