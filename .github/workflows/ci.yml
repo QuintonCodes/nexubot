@@ -32,5 +32,10 @@ jobs:
         env:
           # Inject mock environment variables required by your tests
           ENVIRONMENT: testing
+          TELEGRAM_BOT_TOKEN: "mock_bot_token_for_testing"
+          TELEGRAM_ADMIN_ID: "123456789"
+          SIGNAL_CHANNEL_ID: "-100123456789"
+          TWELVE_DATA_API_KEY: "mock_twelve_data_key"
+          DATABASE_URL: "postgresql://postgres:mockpassword@localhost:5432/mockdb"
         run: |
           python -m pytest tests/ -v
