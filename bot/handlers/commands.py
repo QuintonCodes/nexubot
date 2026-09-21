@@ -5,6 +5,7 @@ Routes user commands to the correct database queries or engine tasks.
 
 from aiogram import Router, types
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -24,7 +25,39 @@ async def cmd_start(message: types.Message):
     await message.reply(
         "🤖 <b>Nexubot Cloud SMC Engine</b>\n\n"
         f"Monitoring {settings.SYMBOLS[0]} for Smart Money Concepts setups.\n"
-        "Use /status to see current engine state."
+        "<b>Available Commands:</b>\n"
+        "/status - View current engine state\n"
+        "/subscribe - Upgrade to the VIP Signals channel\n"
+        "/bias - View current higher timeframe trend\n"
+        "/session - View active market killzones\n"
+        "/levels - View daily and weekly reference levels\n"
+        "/signals - View the last 5 dispatched signals"
+    )
+
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: types.Message):
+    """Public: Routes users to the direct Whop checkout for VIP Signals."""
+
+    # URL pointing directly to your Whop Nexubot Systems storefront
+    checkout_url = "https://whop.com/checkout/plan_vUzndOAQpUt6Z"
+
+    # Construct the inline keyboard with the URL button
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="💳 Upgrade to VIP (ZAR 500/mo)", url=checkout_url)]]
+    )
+
+    # Instructional copy matching the Whop customer hub UI
+    await message.reply(
+        "🔐 <b>Unlock Nexubot VIP Signals</b>\n\n"
+        "Get direct access to our premium automated Smart Money Concepts (SMC) "
+        "trading signals for XAUUSD and Nasdaq.\n\n"
+        "<b>How it works:</b>\n"
+        "1. Tap the button below to pay securely via Whop (FICA compliant).\n"
+        "2. After checkout, you will be redirected to your Nexubot Systems hub.\n"
+        "3. Click the <b>Telegram</b> tab on the left sidebar to claim your invite link.\n\n"
+        "<i>Subscription is managed automatically by the Whop Bot.</i>",
+        reply_markup=keyboard,
     )
 
 
