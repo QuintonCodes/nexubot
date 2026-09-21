@@ -83,13 +83,20 @@ class StructureEventRepository:
     async def save_event(self, event: StructureEvent) -> None:
         query = """
             INSERT INTO structure_events
-            (symbol, timeframe, event_type, price_level, timestamp)
-            VALUES ($1, $2, $3, $4, $5);
+            (symbol, timeframe, event_type, direction, price_level, timestamp, confirmed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7);
         """
         pool = get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
-                query, event.symbol, event.timeframe, event.event_type, event.price_level, event.timestamp
+                query,
+                event.symbol,
+                event.timeframe,
+                event.event_type,
+                event.direction,
+                event.price_level,
+                event.timestamp,
+                event.confirmed,
             )
 
     async def get_latest_bias(self, symbol: str, timeframe: str) -> Optional[str]:
