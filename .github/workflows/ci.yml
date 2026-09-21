@@ -33,4 +33,4 @@ jobs:
           # Inject mock environment variables required by your tests
           ENVIRONMENT: testing
         run: |
-          pytest tests/ -v
+          python -m pytest tests/ -v
