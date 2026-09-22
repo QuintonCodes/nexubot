@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from config.settings import settings
-from strategies.pipeline import monitor_active_signals
 from utils.logger import logger
 from utils.rate_limiter import rate_limiter
 
@@ -74,7 +73,9 @@ class TwelveDataClient:
         price = float(tick.get("price"))
         tick_time = datetime.fromtimestamp(tick.get("timestamp"), tz=timezone.utc)
 
-        # Trigger background signal status monitoring on every incoming tick
+        # Lazy runtime import inside the execution scope to avoid circular initialization loops
+        from strategies.pipeline import monitor_active_signals
+
         asyncio.create_task(monitor_active_signals(symbol, price))
 
         candle_start = self._get_candle_boundary(tick_time)

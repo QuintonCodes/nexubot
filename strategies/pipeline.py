@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import pandas as pd
+from typing import TYPE_CHECKING
 
 from bot.dispatcher import bot, broadcast_signal
 from bot.formatters.signal_formatter import format_signal_for_channel
 from config.settings import settings
 from data.candle_store import candle_store
 from data.normalizer import normalize_ohlcv
-from data.twelve_data_client import TwelveDataClient
 from db.repositories import signals
 from strategies.confluence import ConfluenceEngine
 from utils.logger import logger
+
+# Evaluated during static type checking, bypassed during runtime module initialization
+if TYPE_CHECKING:
+    from data.twelve_data_client import TwelveDataClient
 
 
 def _calc_pips(sig: dict, tp_level: int) -> float:
