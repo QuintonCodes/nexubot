@@ -8,8 +8,9 @@
 - **Dedicated Single-Asset Engine:** Locked to Gold (`XAU/USD`) with M5 execution, minimizing external API calls and maximizing signal resolution.
 - **Streaming & Aggregated Data Layer:** Uses Twelve Data REST API for initial historical bootstrapping and real-time WebSockets (`wss://ws.twelvedata.com`) for live tick ingestion and M5 candle-close detection. Protected natively by an async API Rate Limiter.
 - **Async Persistence Layer:** Direct PostgreSQL integration via `asyncpg` with a pooled connection to Neon PostgreSQL, utilizing `ON CONFLICT DO NOTHING` constraints to efficiently persist Order Block zones, Liquidity Pools, structure events, and signal history across container restarts.
-- **Dynamic Risk Management:** Calculates Stop Losses dynamically using Average True Range (ATR) buffers, abandoning static pip measurements to adapt to real-time market volatility.
-- **Fully Asynchronous Bot Interface:** Built on `aiogram v3` with HTML formatting, channel broadcast dispatching, and role-based command routing (Public vs. Admin).
+- **Dynamic Risk Management & 3-Tier TP:** Calculates Stop Losses dynamically using Average True Range (ATR) buffers. Risk-Reward dynamically scales based on confluence scores, distributing targets across a TP1 (30%), TP2 (60%), and TP3 (100%) system.
+- **Live Trade Lifecycle Monitoring:** Continuously tracks active signals against real-time WebSocket ticks, automatically updating the original Telegram broadcast message when Take Profits or Stop Losses are hit.
+- **Fully Asynchronous Bot Interface:** Built on `aiogram v3` with HTML formatting, dual-channel dispatching (clean public format vs. verbose admin format), and role-based command routing.
 - **Background Scheduling:** Non-blocking multi-timeframe scans driven by `APScheduler` (4H Macro Bias refresh every 4 hours, 1H Order Block scan hourly, 15M Confirmation sweeps).
 
 ## 2. Technology Stack
@@ -95,14 +96,14 @@ Nexubot operates on an advanced 4-step multi-timeframe confluence waterfall:
 
 ```
 [Step 1: 4H Macro Bias]
-└── detect_swings() -> detect_mss() -> detect_choch() -> detect_bos()
-└── Establishes overarching directional bias (BULLISH / BEARISH).
+└── detect_swings() -> classify_structure()
+└── Establishes overarching directional bias (BULLISH / BEARISH) via full historical replay.
 └── Tracks New Day Open (NDO) and New Week Open (NWO) levels.
 
 [Step 2: 1H Zone Identification]
-└── Runs find_order_blocks() with dynamic displacement filters & FVG boosts.
+└── Runs find_order_blocks() with dynamic displacement filters (0.8 ATR) & FVG boosts.
 └── Persists active zones to Neon PostgreSQL (ON CONFLICT IGNORE).
-└── Continuously tracks Breaker Blocks (reclaimed mitigated OBs).
+└── Converts mitigated OBs to Breaker Blocks upon opposing structural shifts.
 
 [Step 3: 15M Confirmation Layer]
 └── Periodically aligns mid-timeframe structure shifts with 4H intent.
@@ -110,11 +111,15 @@ Nexubot operates on an advanced 4-step multi-timeframe confluence waterfall:
 [Step 3: 5M Execution Trigger]
 └── WebSocket tick-to-candle boundary detection triggers exact M5 rollover analysis.
 └── Premium/Discount filter gates sub-optimal entries.
-└── Confirms exact intersection (is_within_range) inside 1H OB, Breaker, or OTE Zone.
+└── Confirms exact intersection inside 1H OB, Breaker, or OTE Zone.
 └── Checks for Institutional Sweeps (EQH / EQL) or Inducement (IDM) exhaustion.
-└── Evaluates minimum confluence score (e.g., >= 70).
-└── Calculates Dynamic ATR Stop Loss and strictly computes RRR.
-└── Dispatches fully annotated HTML alert to Telegram.
+└── Evaluates minimum confluence score (e.g., 70 in-session, 85 out-of-session).
+└── Calculates Dynamic ATR Stop Loss and strictly computes a 3-Tier Take Profit (TP1/TP2/TP3).
+└── Dispatches clean HTML alert to the VIP Telegram channel.
+
+[Step 5: Live Trade Management]
+└── Background monitor cross-references incoming WebSocket ticks against active DB signals.
+└── Automatically updates the original Telegram message when TP1, TP2, TP3, or SL is hit.
 ```
 
 ## 5. Local Setup & Installation
@@ -171,6 +176,7 @@ CANDLE_BUFFER_SIZE=500
 # Risk & Strategy Calibration
 RISK_PERCENT=1.0
 MIN_CONFLUENCE_SCORE=70
+MIN_CONFLUENCE_SCORE_OOS=85
 SIGNAL_COOLDOWN_HOURS=4
 XAUUSD_PIP_TOLERANCE=40.0
 SHADOW_MODE=false
@@ -193,6 +199,7 @@ CREATE TABLE IF NOT EXISTS order_blocks (
     ob_50 DECIMAL(18, 5) NOT NULL,
     strength_score DECIMAL(3, 2) NOT NULL DEFAULT 0.0,
     mitigated BOOLEAN NOT NULL DEFAULT FALSE,
+    is_breaker BOOLEAN NOT NULL DEFAULT FALSE,
     origin_timestamp TIMESTAMPTZ NOT NULL,
     mitigation_timestamp TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -211,7 +218,8 @@ CREATE TABLE IF NOT EXISTS structure_events (
     price_level DECIMAL(18, 5) NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL,
     confirmed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_structure_event UNIQUE (symbol, timeframe, event_type, timestamp)
 );
 
 CREATE INDEX IF NOT EXISTS idx_se_recent ON structure_events(symbol, timeframe, timestamp DESC);
@@ -229,8 +237,9 @@ CREATE TABLE IF NOT EXISTS liquidity_pools (
 );
 
 CREATE TABLE IF NOT EXISTS signals (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
     direction TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
     entry_model TEXT,
     session TEXT,
@@ -239,14 +248,18 @@ CREATE TABLE IF NOT EXISTS signals (
     stop_loss DECIMAL(18, 5) NOT NULL,
     take_profit_1 DECIMAL(18, 5) NOT NULL,
     take_profit_2 DECIMAL(18, 5) NOT NULL,
+    take_profit_3 DECIMAL(18, 5),
     risk_reward DECIMAL(5, 2) NOT NULL,
     confluence_score INTEGER,
     confluence_factors TEXT[],
+    status TEXT NOT NULL DEFAULT 'active',
+    telegram_message_id BIGINT,
     timestamp TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_recent ON signals(symbol, direction, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_dedup ON signals(symbol, timeframe, direction, timestamp DESC);
 ```
 
 ## 6. Running Tests
@@ -266,7 +279,7 @@ python -m pytest tests/test_data_layer.py -v
 # Test Market Structure (Swings, BOS, CHoCH, MSS, CISD)
 python -m pytest tests/test_structure.py -v
 
-# Test SMC Entry Models (FVGs, PD Arrays, Sessions, Sweeps, OTE)
+# Test SMC Entry Models (FVGs, Breakers, Sweeps, OTE, Session, TP3 Math)
 python -m pytest tests/test_smc.py -v
 
 # Test Confluence Engine (Integration & Mocked Repositories)

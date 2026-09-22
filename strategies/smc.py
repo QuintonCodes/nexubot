@@ -6,10 +6,10 @@ Detects Order Blocks, Optimal Trade Entries (OTE), FVGs, Inducements, and Liquid
 import pandas as pd
 import uuid
 from datetime import datetime
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Literal, Optional
 
-from strategies.models import SwingPoint, OrderBlock, OTEZone, LiquidityPool, TradeSignal, FVG
-from utils.math_helpers import fibonacci_levels, price_to_pips, calculate_atr, calculate_rrr
+from strategies.models import FVG, LiquidityPool, OrderBlock, OTEZone, SwingPoint, TradeSignal
+from utils.math_helpers import calculate_atr, calculate_rrr, fibonacci_levels, price_to_pips
 
 
 def detect_fair_value_gaps(df: pd.DataFrame, symbol: str, tf: str) -> List[FVG]:
@@ -83,126 +83,128 @@ def find_order_blocks(
     """Identifies institutional Order Blocks factoring dynamic scoring and a 20-candle lookback."""
     obs = []
 
-    # We need at least a few candles to identify an OB
     if len(df) < 5 or len(swings) < 2:
         return obs
 
-    # For a simplified programmatic OB: we look at the origin of the last structural swing
-    last_swing = swings[-1]
-    search_idx = last_swing.candle_index
+    # Scan the last 3 relevant swing extremes instead of just the absolute last one
+    relevant_swings = [s for s in reversed(swings) if s.type == ("low" if direction == "bullish" else "high")][:3]
 
-    # Widen Lookback
-    lookback_limit = max(0, search_idx - 20)
-    atr_val = calculate_atr(df.iloc[: search_idx + 1]) if search_idx > 14 else 2.0
+    for last_swing in relevant_swings:
+        search_idx = last_swing.candle_index
+        lookback_limit = max(0, search_idx - 20)
+        atr_val = calculate_atr(df.iloc[: search_idx + 1]) if search_idx > 14 else 2.0
 
-    if direction == "bullish" and last_swing.type == "low":
-        for i in range(search_idx, lookback_limit, -1):
-            body = abs(df["close"].iloc[i] - df["open"].iloc[i])
-            total_range = df["high"].iloc[i] - df["low"].iloc[i]
+        if direction == "bullish":
+            for i in range(search_idx, lookback_limit, -1):
+                body = abs(df["close"].iloc[i] - df["open"].iloc[i])
+                total_range = df["high"].iloc[i] - df["low"].iloc[i]
 
-            # Filter weak indecision candles
-            if body < (atr_val * 0.15) or df["close"].iloc[i] >= df["open"].iloc[i]:
-                continue
+                # Filter weak indecision candles
+                if body < (atr_val * 0.15) or df["close"].iloc[i] >= df["open"].iloc[i]:
+                    continue
 
-            # Displacement Validation
-            displacement_valid = False
-            for j in range(i + 1, min(i + 6, len(df))):
-                if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.2):
-                    displacement_valid = True
-                    break
-            if not displacement_valid:
-                continue
+                # Displacement Validation (Adjusted from 1.2 to 0.8 ATR)
+                displacement_valid = False
+                for j in range(i + 1, min(i + 6, len(df))):
+                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
+                        displacement_valid = True
+                        break
+                if not displacement_valid:
+                    continue
 
-            # Check FVG overlap for boost
-            fvg_boost = 0.0
-            for j in range(i + 1, min(i + 4, len(df) - 1)):
-                if df["low"].iloc[j + 1] > df["high"].iloc[j - 1]:
-                    fvg_boost = 0.2
-                    break
+                # Check FVG overlap for boost
+                fvg_boost = 0.0
+                for j in range(i + 1, min(i + 4, len(df) - 1)):
+                    if df["low"].iloc[j + 1] > df["high"].iloc[j - 1]:
+                        fvg_boost = 0.2
+                        break
 
-            # Dynamic Score Calculation
-            bwr = body / total_range if total_range > 0 else 0
-            displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
+                # Dynamic Score Calculation
+                bwr = body / total_range if total_range > 0 else 0
+                displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
 
-            score = 0.4 + fvg_boost
-            if bwr > 0.6:
-                score += 0.2  # High body-to-wick ratio
-            if displacement_pips > (atr_val * 1.5):
-                score += 0.2  # Strong displacement impulse
+                score = 0.4 + fvg_boost
+                if bwr > 0.6:
+                    score += 0.2  # High body-to-wick ratio
+                if displacement_pips > (atr_val * 1.5):
+                    score += 0.2  # Strong displacement impulse
 
-            ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
-            obs.append(
-                OrderBlock(
-                    id=str(uuid.uuid4()),
-                    symbol=symbol,
-                    timeframe=tf,
-                    direction=direction,
-                    ob_high=ob_high,
-                    ob_low=ob_low,
-                    ob_50=(ob_high + ob_low) / 2.0,
-                    origin_timestamp=df["timestamp"].iloc[i],
-                    mitigated=False,
-                    mitigation_timestamp=None,
-                    strength_score=min(1.0, score),
+                ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
+                obs.append(
+                    OrderBlock(
+                        id=str(uuid.uuid4()),
+                        symbol=symbol,
+                        timeframe=tf,
+                        direction=direction,
+                        ob_high=ob_high,
+                        ob_low=ob_low,
+                        ob_50=(ob_high + ob_low) / 2.0,
+                        origin_timestamp=df["timestamp"].iloc[i],
+                        mitigated=False,
+                        mitigation_timestamp=None,
+                        strength_score=min(1.0, score),
+                    )
                 )
-            )
-            break
+                break
 
-    elif direction == "bearish" and last_swing.type == "high":
-        for i in range(search_idx, lookback_limit, -1):
-            body = abs(df["close"].iloc[i] - df["open"].iloc[i])
-            total_range = df["high"].iloc[i] - df["low"].iloc[i]
+        elif direction == "bearish":
+            for i in range(search_idx, lookback_limit, -1):
+                body = abs(df["close"].iloc[i] - df["open"].iloc[i])
+                total_range = df["high"].iloc[i] - df["low"].iloc[i]
 
-            if body < (atr_val * 0.15) or df["close"].iloc[i] <= df["open"].iloc[i]:
-                continue
+                if body < (atr_val * 0.15) or df["close"].iloc[i] <= df["open"].iloc[i]:
+                    continue
 
-            # Displacement Validation
-            displacement_valid = False
-            for j in range(i + 1, min(i + 6, len(df))):
-                if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.2):
-                    displacement_valid = True
-                    break
-            if not displacement_valid:
-                continue
+                # Displacement Validation (Adjusted from 1.2 to 0.8 ATR)
+                displacement_valid = False
+                for j in range(i + 1, min(i + 6, len(df))):
+                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
+                        displacement_valid = True
+                        break
+                if not displacement_valid:
+                    continue
 
-            # Check FVG overlap for boost
-            fvg_boost = 0.0
-            for j in range(i + 1, min(i + 4, len(df) - 1)):
-                if df["high"].iloc[j + 1] < df["low"].iloc[j - 1]:
-                    fvg_boost = 0.2
-                    break
+                # Check FVG overlap for boost
+                fvg_boost = 0.0
+                for j in range(i + 1, min(i + 4, len(df) - 1)):
+                    if df["high"].iloc[j + 1] < df["low"].iloc[j - 1]:
+                        fvg_boost = 0.2
+                        break
 
-            bwr = body / total_range if total_range > 0 else 0
-            displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
+                bwr = body / total_range if total_range > 0 else 0
+                displacement_pips = abs(df["close"].iloc[search_idx] - df["close"].iloc[i])
 
-            score = 0.4 + fvg_boost
-            if bwr > 0.6:
-                score += 0.2
-            if displacement_pips > (atr_val * 1.5):
-                score += 0.2
+                score = 0.4 + fvg_boost
+                if bwr > 0.6:
+                    score += 0.2
+                if displacement_pips > (atr_val * 1.5):
+                    score += 0.2
 
-            ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
-            obs.append(
-                OrderBlock(
-                    id=str(uuid.uuid4()),
-                    symbol=symbol,
-                    timeframe=tf,
-                    direction=direction,
-                    ob_high=ob_high,
-                    ob_low=ob_low,
-                    ob_50=(ob_high + ob_low) / 2.0,
-                    origin_timestamp=df["timestamp"].iloc[i],
-                    mitigated=False,
-                    mitigation_timestamp=None,
-                    strength_score=min(1.0, score),
+                ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
+                obs.append(
+                    OrderBlock(
+                        id=str(uuid.uuid4()),
+                        symbol=symbol,
+                        timeframe=tf,
+                        direction=direction,
+                        ob_high=ob_high,
+                        ob_low=ob_low,
+                        ob_50=(ob_high + ob_low) / 2.0,
+                        origin_timestamp=df["timestamp"].iloc[i],
+                        mitigated=False,
+                        mitigation_timestamp=None,
+                        strength_score=min(1.0, score),
+                    )
                 )
-            )
+                break
+
+        if obs:  # Stop scanning older swings if we found a valid structural OB
             break
 
     return obs
 
 
-def is_ob_mitigated(df: pd.DataFrame, ob: OrderBlock) -> bool:
+def is_ob_mitigated(df: pd.DataFrame, ob: Dict[str, Any]) -> bool:
     """
     An Order Block is mitigated when price trades and CLOSES past its 50% median line.
     """
@@ -216,11 +218,9 @@ def is_ob_mitigated(df: pd.DataFrame, ob: OrderBlock) -> bool:
     ob_50 = (ob_high + ob_low) / 2.0
 
     if ob["direction"] == "bullish":
-        # Bullish OB mitigated if a candle closes below the 50% line
         mitigating_candles = future_df[future_df["close"] < ob_50]
         return not mitigating_candles.empty
     else:
-        # Bearish OB mitigated if a candle closes above the 50% line
         mitigating_candles = future_df[future_df["close"] > ob_50]
         return not mitigating_candles.empty
 
@@ -243,8 +243,7 @@ def calculate_ote_zone(
             ote_top=fibs["0.786"],
         )
     else:
-        # For bearish, retracement pulls up from the bottom
-        # Fib 0 is high, Fib 1 is low in standard charting, but using absolute math:
+        # Bearish OTE measures upward from the swing low into the premium portion of the leg
         diff = swing_high - swing_low
         return OTEZone(
             symbol=symbol,
@@ -252,9 +251,9 @@ def calculate_ote_zone(
             direction=direction,
             fib_0=swing_high,
             fib_1=swing_low,
-            ote_entry=swing_high - (diff * 0.618),
-            ote_mid=swing_high - (diff * 0.705),
-            ote_top=swing_high - (diff * 0.786),
+            ote_entry=swing_low + (diff * 0.618),
+            ote_mid=swing_low + (diff * 0.705),
+            ote_top=swing_low + (diff * 0.786),
         )
 
 
@@ -350,26 +349,36 @@ def generate_trade_signal(
     session: str,
     pd_zone: str,
 ) -> TradeSignal:
-    """Assembles a valid TradeSignal, automatically calculating Take Profits based on RRR."""
+    """Assembles a valid TradeSignal, smartly calculating dynamic RR Take Profits."""
     sl_pips_diff = abs(entry_price - stop_loss)
 
-    if direction == "buy":
-        tp1 = entry_price + (sl_pips_diff * 1.5)
-        tp2 = entry_price + (sl_pips_diff * 3.0)
-    else:
-        tp1 = entry_price - (sl_pips_diff * 1.5)
-        tp2 = entry_price - (sl_pips_diff * 3.0)
+    # Dynamic RR scales linearly with setup strength (Score 70 = 3.5R, Score 100 = 5.0R)
+    dynamic_rr = max(3.0, confluence_score / 20.0)
 
-    actual_rrr = calculate_rrr(entry_price, stop_loss, tp2)
+    tp3_distance = sl_pips_diff * dynamic_rr
+    tp1_distance = tp3_distance * 0.30  # TP1 captures 30% of the total target move
+    tp2_distance = tp3_distance * 0.60  # TP2 captures 60% of the total target move
+
+    if direction == "buy":
+        tp3 = entry_price + tp3_distance
+        tp2 = entry_price + tp2_distance
+        tp1 = entry_price + tp1_distance
+    else:
+        tp3 = entry_price - tp3_distance
+        tp2 = entry_price - tp2_distance
+        tp1 = entry_price - tp1_distance
+
+    actual_rrr = calculate_rrr(entry_price, stop_loss, tp3)
 
     return TradeSignal(
         signal_id=str(uuid.uuid4()),
         symbol=symbol,
         direction=direction,
-        entry_price=round(entry_price, 3),
-        stop_loss=round(stop_loss, 3),
-        take_profit_1=round(tp1, 3),
-        take_profit_2=round(tp2, 3),
+        entry_price=round(entry_price, 5),
+        stop_loss=round(stop_loss, 5),
+        take_profit_1=round(tp1, 5),
+        take_profit_2=round(tp2, 5),
+        take_profit_3=round(tp3, 5),
         risk_reward=actual_rrr,
         signal_type="SMC_Confluence",
         entry_model=entry_model,

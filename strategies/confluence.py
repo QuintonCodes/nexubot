@@ -10,7 +10,7 @@ from typing import Optional
 from config.settings import settings
 from data.candle_store import candle_store
 from db.repositories import liquidity_pools, order_blocks, signals, structure_events
-from strategies.models import TradeSignal
+from strategies.models import StructureEvent, TradeSignal
 from strategies.sessions import SessionManager
 from strategies.smc import (
     calculate_ote_zone,
@@ -23,7 +23,7 @@ from strategies.smc import (
     get_premium_discount_zone,
     is_ob_mitigated,
 )
-from strategies.structure import classify_structure, detect_bos, detect_choch, detect_mss, detect_swings
+from strategies.structure import classify_structure, detect_bos, detect_choch, detect_cisd, detect_mss, detect_swings
 from utils.math_helpers import calculate_atr, is_within_range
 from utils.logger import logger
 
@@ -44,29 +44,52 @@ class ConfluenceEngine:
 
         if current_bias is None:
             current_bias = await structure_events.get_latest_bias(self.symbol, tf)
-        if current_bias is None:
-            current_bias = classify_structure(df, swings)  # Bootstrap fallback
 
-        # 1. Check for Continuation (BOS)
+        # 1. HTF/MTF Path: Extract bias cleanly through full continuous replay to catch structural bias on cold start
+        if tf != self.ltf:
+            new_bias = classify_structure(df, swings)
+            if new_bias != current_bias and new_bias != "ranging":
+                synthetic_event = StructureEvent(
+                    symbol=self.symbol,
+                    timeframe=tf,
+                    event_type="BOS",
+                    direction=new_bias,
+                    price_level=swings[-1].price if swings else 0.0,
+                    timestamp=df.iloc[-1]["timestamp"],
+                    confirmed=True,
+                )
+                await structure_events.save_event(synthetic_event)
+            return new_bias
+
+        # 2. LTF Path: Relies on localized candle breaks for precision event tracking
+        if current_bias is None:
+            current_bias = classify_structure(df, swings)
+
         bos = detect_bos(df, swings, self.symbol, tf)
         if bos:
             await structure_events.save_event(bos)
             logger.info("structure_break", event_type="BOS", direction=bos.direction, tf=tf)
             return bos.direction
 
-        # 2. Check for Market Structure Shift
         mss = detect_mss(df, swings, current_bias or "ranging", self.symbol, tf)
         if mss:
             await structure_events.save_event(mss)
             logger.info("structure_break", event_type="MSS", direction=mss.direction, tf=tf)
             return mss.direction
 
-        # 3. Check for standard Reversal
         choch = detect_choch(df, swings, current_bias or "ranging", self.symbol, tf)
         if choch:
             await structure_events.save_event(choch)
             logger.info("structure_break", event_type="CHoCH", direction=choch.direction, tf=tf)
             return choch.direction
+
+        # Optional: Secondary validation to trace structural reversals natively against existing OB zones
+        active_obs = await order_blocks.get_active_order_blocks(self.symbol, tf)
+        for ob in active_obs:
+            cisd = detect_cisd(df, ob, self.symbol, tf)
+            if cisd:
+                await structure_events.save_event(cisd)
+                logger.info("structure_break", event_type="CISD", direction=cisd.direction, tf=tf)
 
         return current_bias
 
@@ -81,13 +104,18 @@ class ConfluenceEngine:
         logger.info("htf_scan_complete", bias=bias)
 
     async def scan_mtf(self) -> None:
-        """Run every 1 hour. Finds new Order Blocks."""
+        """Run every 1 hour. Finds new Order Blocks and converts validated structures to Breakers."""
         df = await candle_store.get_candles(self.symbol, self.mtf)
         if len(df) < 20:
             return
 
         swings = detect_swings(df)
-        bias = await self._update_structure_state(df, self.mtf)
+        current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
+        bias = await self._update_structure_state(df, self.mtf, current_bias)
+
+        if current_bias and bias and bias != current_bias and bias in ["bullish", "bearish"]:
+            opposing = "bullish" if bias == "bearish" else "bearish"
+            await order_blocks.mark_as_breaker(self.symbol, self.mtf, opposing)
 
         if bias in ["bullish", "bearish"]:
             obs = find_order_blocks(df, swings, bias, self.symbol, self.mtf)
@@ -110,7 +138,6 @@ class ConfluenceEngine:
         if len(df) < 20:
             return None
 
-        # 1. Check Baseline HTF Alignment
         htf_bias = await structure_events.get_latest_bias(self.symbol, self.htf)
         if not htf_bias:
             return None
@@ -121,26 +148,37 @@ class ConfluenceEngine:
         factors = [f"HTF Bias: {htf_bias.upper()}"]
         confluence_score = 20
 
-        # Premium / Discount Validation
-        highs, lows = [s for s in swings_ltf if s.type == "high"], [s for s in swings_ltf if s.type == "low"]
+        # MTF Context Gate Checks
+        mtf_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
+        if mtf_bias == htf_bias:
+            factors.append(f"MTF Alignment ({self.mtf})")
+            confluence_score += 15
+
+        mtf_15m_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
+        if mtf_15m_bias == htf_bias:
+            factors.append("15M Structure Aligned")
+            confluence_score += 10
+
+        htf_df = await candle_store.get_candles(self.symbol, self.htf)
+        htf_swings = detect_swings(htf_df)
+        htf_highs = [s for s in htf_swings if s.type == "high"]
+        htf_lows = [s for s in htf_swings if s.type == "low"]
+
         pd_zone = (
-            get_premium_discount_zone(lows[-1].price, highs[-1].price, current_price)
-            if highs and lows
+            get_premium_discount_zone(htf_lows[-1].price, htf_highs[-1].price, current_price)
+            if htf_highs and htf_lows
             else "Equilibrium"
         )
 
-        # Gate Signal Logic: Reject sub-optimal positional setups
         if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
             logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
             return None
 
-        # Session Killzone Integration
         active_session = SessionManager.get_active_killzone(datetime.now(timezone.utc))
         if active_session != "Out of Session":
             factors.append(f"Killzone Active ({active_session})")
             confluence_score += 5
 
-        # Check Active OBs and Breaker Blocks
         valid_ob = None
         entry_model = "Unknown Setup"
 
@@ -153,7 +191,6 @@ class ConfluenceEngine:
                 await order_blocks.mark_mitigated(ob["id"])
                 continue
 
-            # Price action inside the unmitigated OB zone
             if is_within_range(current_price, ob["ob_low"], ob["ob_high"]):
                 valid_ob = ob
                 entry_model = "MTF OB Entry"
@@ -161,11 +198,9 @@ class ConfluenceEngine:
                 confluence_score += 25
                 break
 
-        # Fallback to Breaker Block if no standard OB is tapped
         if not valid_ob:
             breakers = await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf)
             for brk in breakers:
-                # A bullish setup requires tapping a bearish order block that was broken upwards
                 if brk["direction"] != htf_bias:
                     if is_within_range(current_price, brk["ob_low"], brk["ob_high"]):
                         valid_ob = brk
@@ -177,19 +212,22 @@ class ConfluenceEngine:
         if not valid_ob:
             return None
 
-        # Check FVG Combo
+        cisd_event = detect_cisd(df, valid_ob, self.symbol, self.ltf)
+        if cisd_event:
+            factors.append("CISD Confirmed (50% Rejection)")
+            confluence_score += 15
+            await structure_events.save_event(cisd_event)
+
         fvgs = detect_fair_value_gaps(df.tail(10), self.symbol, self.ltf)
         if any(f.direction == htf_bias and is_within_range(current_price, f.bottom, f.top) for f in fvgs):
             entry_model = "OB + FVG Combo"
             factors.append("FVG Tap Confirmed")
             confluence_score += 10
 
-        # Liquidity Sweeps
         pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, settings.XAUUSD_PIP_TOLERANCE)
         swept_pool = detect_liquidity_sweep(df, pools)
 
         if swept_pool:
-            # Confirm sweep aligns with institutional intent (e.g. sweep EQL to go long)
             if (htf_bias == "bullish" and swept_pool.pool_type == "EQL") or (
                 htf_bias == "bearish" and swept_pool.pool_type == "EQH"
             ):
@@ -197,7 +235,6 @@ class ConfluenceEngine:
                 confluence_score += 20
                 await liquidity_pools.save_pool(swept_pool)
 
-        # Inducement Tracking
         idm = detect_inducement(swings_ltf, htf_bias)
         if idm and (
             (htf_bias == "bullish" and current_price < idm.price)
@@ -206,7 +243,8 @@ class ConfluenceEngine:
             factors.append("Inducement (IDM) Swept")
             confluence_score += 15
 
-        # OTE Mapping
+        highs = [s for s in swings_ltf if s.type == "high"]
+        lows = [s for s in swings_ltf if s.type == "low"]
         if highs and lows:
             ote_zone = calculate_ote_zone(lows[-1].price, highs[-1].price, valid_ob["direction"], self.symbol, self.ltf)
 
@@ -215,12 +253,17 @@ class ConfluenceEngine:
                 factors.append(f"OTE Tap ({ote_zone.ote_entry:.2f}–{ote_zone.ote_top:.2f})")
                 confluence_score += 20
 
-        ltf_choch = detect_choch(df, swings_ltf, "ranging", self.symbol, self.ltf)
+        ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf) or htf_bias or "ranging"
+        ltf_choch = detect_choch(df, swings_ltf, ltf_bias, self.symbol, self.ltf)
         if ltf_choch and ltf_choch.direction == htf_bias:
             factors.append("LTF CHoCH Confirmed")
             confluence_score += 10
 
-        min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 70)
+        if active_session == "Out of Session":
+            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 85)
+        else:
+            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 70)
+
         if confluence_score < min_required_score:
             logger.info("signal_rejected_low_confluence", score=confluence_score, min_req=min_required_score)
             return None
@@ -232,9 +275,7 @@ class ConfluenceEngine:
         stop_loss = valid_ob["ob_low"] - sl_buffer if trade_dir == "buy" else valid_ob["ob_high"] + sl_buffer
 
         # Check Deduplication
-        is_dup = await signals.is_duplicate(
-            self.symbol, trade_dir, current_price, settings.XAUUSD_PIP_TOLERANCE, settings.SIGNAL_COOLDOWN_HOURS
-        )
+        is_dup = await signals.is_duplicate(self.symbol, self.ltf, trade_dir, settings.SIGNAL_COOLDOWN_HOURS)
         if is_dup:
             logger.info("signal_suppressed_duplicate", symbol=self.symbol)
             return None

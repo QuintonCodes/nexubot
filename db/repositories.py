@@ -56,7 +56,7 @@ class OrderBlockRepository:
         """Fetches previously mitigated blocks that are now eligible as Breaker Blocks."""
         query = """
             SELECT * FROM order_blocks
-            WHERE symbol = $1 AND timeframe = $2 AND mitigated = TRUE
+            WHERE symbol = $1 AND timeframe = $2 AND mitigated = TRUE AND is_breaker = TRUE
             ORDER BY origin_timestamp DESC
             LIMIT 10;
         """
@@ -76,6 +76,17 @@ class OrderBlockRepository:
         async with pool.acquire() as conn:
             await conn.execute(query, ob_id, datetime.now(timezone.utc))
 
+    async def mark_as_breaker(self, symbol: str, timeframe: str, direction: str) -> None:
+        """Promotes mitigated order blocks to breaker blocks after an opposing structural shift."""
+        query = """
+            UPDATE order_blocks
+            SET is_breaker = TRUE
+            WHERE symbol = $1 AND timeframe = $2 AND direction = $3 AND mitigated = TRUE;
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(query, symbol, timeframe, direction)
+
 
 class StructureEventRepository:
     """Tracks Market Structure Shifts, BOS, and CHoCH events."""
@@ -84,7 +95,8 @@ class StructureEventRepository:
         query = """
             INSERT INTO structure_events
             (symbol, timeframe, event_type, direction, price_level, timestamp, confirmed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7);
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (symbol, timeframe, event_type, timestamp) DO NOTHING;
         """
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -118,21 +130,33 @@ class SignalRepository:
 
     async def save_signal(self, signal: TradeSignal) -> None:
         query = """
-            INSERT INTO signals
-            (symbol, timeframe, direction, entry_price, stop_loss, take_profit, confluence_score, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+            INSERT INTO signals (
+                id, symbol, timeframe, direction, entry_model, session, pd_zone,
+                entry_price, stop_loss, take_profit_1, take_profit_2, take_profit_3,
+                risk_reward, confluence_score, confluence_factors, timestamp
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (id) DO NOTHING;
         """
         pool = get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
                 query,
+                signal.signal_id,
                 signal.symbol,
                 signal.timeframe,
                 signal.direction,
+                signal.entry_model,
+                signal.session,
+                signal.pd_zone,
                 signal.entry_price,
                 signal.stop_loss,
+                signal.take_profit_1,
                 signal.take_profit_2,
+                signal.take_profit_3,
+                signal.risk_reward,
                 signal.confluence_score,
+                signal.confluence_factors,
                 signal.timestamp,
             )
 
@@ -161,6 +185,29 @@ class SignalRepository:
         async with pool.acquire() as conn:
             rows = await conn.fetch(query, symbol, limit)
             return [dict(row) for row in rows]
+
+    async def get_active_signals(self, symbol: str) -> List[Dict[str, Any]]:
+        query = """
+            SELECT * FROM signals
+            WHERE symbol = $1 AND status = 'active'
+            AND timestamp >= NOW() - INTERVAL '48 hours';
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol)
+            return [dict(row) for row in rows]
+
+    async def update_signal_status(self, signal_id: str, status: str) -> None:
+        query = "UPDATE signals SET status = $2 WHERE id = $1;"
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(query, signal_id, status)
+
+    async def update_telegram_message_id(self, signal_id: str, message_id: int) -> None:
+        query = "UPDATE signals SET telegram_message_id = $2 WHERE id = $1;"
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(query, signal_id, message_id)
 
 
 class LiquidityPoolRepository:

@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     MIN_CONFLUENCE_SCORE: int = Field(
         default=70, ge=0, le=100, description="Minimum confluence score (0-100) required to publish a Telegram signal."
     )
+    MIN_CONFLUENCE_SCORE_OOS: int = Field(
+        default=85, ge=0, le=100, description="Minimum confluence score required during Out-of-Session hours."
+    )
     SIGNAL_COOLDOWN_HOURS: int = Field(
         default=4, ge=1, description="Suppression window to prevent duplicate alerts within the same zone."
     )

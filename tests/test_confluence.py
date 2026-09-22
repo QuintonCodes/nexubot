@@ -102,24 +102,40 @@ async def test_scan_ltf_entry_rejected_premium_discount(mock_get_bias, mock_get_
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.SessionManager.get_active_killzone")
 async def test_scan_ltf_entry_low_confluence(
-    mock_killzone, mock_get_active_obs, mock_get_bias, mock_get_candles, dummy_ob_dict, bullish_bos_df
+    mock_killzone,
+    mock_is_duplicate,
+    mock_get_active_obs,
+    mock_get_bias,
+    mock_get_candles,
+    dummy_ob_dict,
+    bullish_bos_df,
 ):
     """Test signal rejection when confluence score is below threshold."""
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
     mock_get_candles.return_value = test_df
-    mock_get_bias.return_value = "bullish"
+
+    # Enforce isolated HTF bias, ensuring MTF/15M don't falsely bump the confluence score
+    def _mock_bias(symbol, tf):
+        if tf == settings.HTF_TIMEFRAMES[0]:
+            return "bullish"
+        return "ranging"
+
+    mock_get_bias.side_effect = _mock_bias
+
     mock_get_active_obs.return_value = [dummy_ob_dict]
     mock_killzone.return_value = "Out of Session"
 
-    # Only HTF bias (+20) and OB tap (+25) -> Score 45 < 70
+    # Only HTF bias (+20) and OB tap (+25) -> Score 45 < 85 (OOS Threshold)
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
     assert signal is None
+    mock_is_duplicate.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -194,16 +210,21 @@ async def test_scan_ltf_entry_breaker_block_fallback(
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.save_order_block", new_callable=AsyncMock)
-async def test_scan_htf_and_mtf_scans(mock_save_ob, mock_save_event, mock_get_bias, mock_get_candles, bullish_bos_df):
+@patch("strategies.confluence.order_blocks.mark_as_breaker", new_callable=AsyncMock)
+async def test_scan_htf_and_mtf_scans(
+    mock_mark_breaker, mock_save_ob, mock_save_event, mock_get_bias, mock_get_candles, bullish_bos_df
+):
     """Test HTF bias updates and MTF confirmation sweeps."""
     # Slice the DF to index 35 so the final closed candle evaluates as the exact breakout origin
     mock_get_candles.return_value = bullish_bos_df.iloc[:35].copy()
-    mock_get_bias.return_value = "bullish"
+
+    # Override return value to "ranging" to guarantee classify_structure() initiates a state shift
+    mock_get_bias.return_value = "ranging"
 
     engine = ConfluenceEngine(settings.SYMBOLS[0])
 
     await engine.scan_htf()
     await engine.scan_mtf_confirmation()
 
-    # BOS from bullish_bos_df should trigger structure_events persistence
+    # The newly evaluated "bullish" state != "ranging", so save_event is triggered.
     assert mock_save_event.call_count >= 1

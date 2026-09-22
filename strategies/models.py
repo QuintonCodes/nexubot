@@ -74,7 +74,7 @@ class OTEZone:
     fib_0: float
     fib_1: float
     ote_entry: float  # 61.8%
-    ote_top: float  # 76.6%
+    ote_top: float  # 78.6% (standard ICT OTE upper bound)
     ote_mid: float  # 70.5%
 
 
@@ -87,6 +87,7 @@ class TradeSignal:
     stop_loss: float
     take_profit_1: float
     take_profit_2: float
+    take_profit_3: float
     risk_reward: float
     signal_type: str
     entry_model: str

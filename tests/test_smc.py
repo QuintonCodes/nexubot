@@ -147,10 +147,15 @@ def test_generate_trade_signal():
         pd_zone="Discount",
     )
 
-    # 10.0 risk: TP1 (+1.5R) = 2515.0, TP2 (+3.0R) = 2530.0
-    assert signal.take_profit_1 == 2515.0
-    assert signal.take_profit_2 == 2530.0
-    assert signal.risk_reward == 3.0
+    # 10.0 SL Risk. Dynamic RRR for score 85 = 85/20.0 = 4.25R
+    # TP3 Distance = 10.0 * 4.25 = 42.5  --> TP3 = 2542.5
+    # TP1 Distance = 42.5 * 30% = 12.75  --> TP1 = 2512.75
+    # TP2 Distance = 42.5 * 60% = 25.50  --> TP2 = 2525.5
+
+    assert signal.take_profit_1 == 2512.75
+    assert signal.take_profit_2 == 2525.5
+    assert signal.take_profit_3 == 2542.5
+    assert signal.risk_reward == 4.25
     assert signal.entry_model == "MTF OB Entry"
     assert signal.session == "London Open Killzone"
     assert signal.pd_zone == "Discount"

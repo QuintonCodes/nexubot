@@ -7,7 +7,7 @@ Strictly relies on close prices for structural breaks to filter liquidity sweeps
 import pandas as pd
 from typing import List, Literal, Optional
 
-from strategies.models import SwingPoint, StructureEvent
+from strategies.models import StructureEvent, SwingPoint
 from utils.math_helpers import price_to_pips
 
 
@@ -20,8 +20,6 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
     last_high_price = None
     last_low_price = None
 
-    # We stop evaluating at `len(df) - lookback` to prevent repainting.
-    # The right side of the formation must be fully closed.
     for i in range(lookback, len(df) - lookback):
         left_highs = df["high"].iloc[i - lookback : i]
         right_highs = df["high"].iloc[i + 1 : i + lookback + 1]
@@ -31,7 +29,6 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
         right_lows = df["low"].iloc[i + 1 : i + lookback + 1]
         current_low = df["low"].iloc[i]
 
-        # Swing High: Strictly higher than left window, >= right window
         if current_high > left_highs.max() and current_high >= right_highs.max():
             classification = "UNCONFIRMED"
             if last_high_price is not None:
@@ -48,7 +45,6 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
             )
             last_high_price = current_high
 
-        # Swing Low: Strictly lower than left window, <= right window
         elif current_low < left_lows.min() and current_low <= right_lows.min():
             classification = "UNCONFIRMED"
             if last_low_price is not None:
@@ -70,25 +66,29 @@ def detect_swings(df: pd.DataFrame, lookback: int = 5) -> List[SwingPoint]:
 
 def classify_structure(df: pd.DataFrame, swings: List[SwingPoint]) -> Literal["bullish", "bearish", "ranging"]:
     """Replays historical price action to determine the true current bias."""
-
     if len(swings) < 2 or len(df) < 20:
         return "ranging"
 
     bias = "ranging"
+    current_high = None
+    current_low = None
+    swing_idx = 0
 
     for i in range(swings[0].candle_index + 1, len(df)):
+        # Incrementally update active structures anchoring the bias
+        while swing_idx < len(swings) and swings[swing_idx].candle_index < i:
+            if swings[swing_idx].type == "high":
+                current_high = swings[swing_idx].price
+            else:
+                current_low = swings[swing_idx].price
+            swing_idx += 1
+
         candle_close = df.iloc[i]["close"]
-
-        past_highs = [s for s in swings if s.type == "high" and s.candle_index < i]
-        past_lows = [s for s in swings if s.type == "low" and s.candle_index < i]
-
-        if not past_highs or not past_lows:
-            continue
-
-        if candle_close > past_highs[-1].price:
-            bias = "bullish"
-        elif candle_close < past_lows[-1].price:
-            bias = "bearish"
+        if current_high is not None and current_low is not None:
+            if candle_close > current_high:
+                bias = "bullish"
+            elif candle_close < current_low:
+                bias = "bearish"
 
     return bias
 
@@ -146,11 +146,9 @@ def detect_choch(
     This is an opposing structure break (e.g., a bearish BOS while the structure was bullish).
     """
     bos_event = detect_bos(df, swings, symbol, tf)
-
     if not bos_event:
         return None
 
-    # CHoCH is just a BOS that goes against the established bias
     if current_structure == "bullish" and bos_event.direction == "bearish":
         bos_event.event_type = "CHoCH"
         return bos_event
