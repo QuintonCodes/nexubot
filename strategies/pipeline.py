@@ -62,7 +62,7 @@ async def monitor_active_signals(symbol: str, current_price: float) -> None:
 
 async def bootstrap_historical_data(client: TwelveDataClient, symbol: str):
     """Fetches initial data for all timeframes on startup."""
-    timeframes = settings.HTF_TIMEFRAMES + [settings.LTF_TIMEFRAMES]
+    timeframes = settings.HTF_TIMEFRAMES + settings.LTF_TIMEFRAMES
 
     for tf in timeframes:
         logger.info("bootstrapping_data", symbol=symbol, timeframe=tf)
