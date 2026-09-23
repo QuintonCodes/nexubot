@@ -203,8 +203,8 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     signal = await engine.scan_ltf_entry()
 
     assert signal is not None
-    assert signal.entry_model == "Breaker Block Retest"
-    assert "MTF Breaker Block Tap" in signal.confluence_factors
+    assert signal.entry_model == "1h Breaker Block Retest"
+    assert "1h Breaker Block Tap" in signal.confluence_factors
 
     mock_save_pool.assert_called_once()
     mock_save_signal.assert_called_once()
