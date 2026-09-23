@@ -100,10 +100,10 @@ def find_order_blocks(
                 total_range = df["high"].iloc[i] - df["low"].iloc[i]
 
                 # Filter weak indecision candles
-                if body < (atr_val * 0.15) or df["close"].iloc[i] >= df["open"].iloc[i]:
+                if body < (atr_val * 0.10) or df["close"].iloc[i] >= df["open"].iloc[i]:
                     continue
 
-                # Displacement Validation (Adjusted from 1.2 to 0.8 ATR)
+                # Displacement Validation
                 displacement_valid = False
                 for j in range(i + 1, min(i + 6, len(df))):
                     if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
@@ -126,7 +126,7 @@ def find_order_blocks(
                 score = 0.4 + fvg_boost
                 if bwr > 0.6:
                     score += 0.2  # High body-to-wick ratio
-                if displacement_pips > (atr_val * 1.5):
+                if displacement_pips > (atr_val * 1.2):
                     score += 0.2  # Strong displacement impulse
 
                 ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
@@ -152,10 +152,10 @@ def find_order_blocks(
                 body = abs(df["close"].iloc[i] - df["open"].iloc[i])
                 total_range = df["high"].iloc[i] - df["low"].iloc[i]
 
-                if body < (atr_val * 0.15) or df["close"].iloc[i] <= df["open"].iloc[i]:
+                if body < (atr_val * 0.10) or df["close"].iloc[i] <= df["open"].iloc[i]:
                     continue
 
-                # Displacement Validation (Adjusted from 1.2 to 0.8 ATR)
+                # Displacement Validation
                 displacement_valid = False
                 for j in range(i + 1, min(i + 6, len(df))):
                     if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
@@ -177,7 +177,7 @@ def find_order_blocks(
                 score = 0.4 + fvg_boost
                 if bwr > 0.6:
                     score += 0.2
-                if displacement_pips > (atr_val * 1.5):
+                if displacement_pips > (atr_val * 1.2):
                     score += 0.2
 
                 ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
@@ -265,73 +265,74 @@ def detect_liquidity_pools(
     highs = [s for s in swings if s.type == "high"]
     lows = [s for s in swings if s.type == "low"]
 
-    # Detect EQH
+    # Detect EQH across the last 4 major highs
     if len(highs) >= 2:
-        for i in range(len(highs) - 1):
-            # Ensure swings are distinct structural points (separated by at least 3 candles)
-            if highs[-1].candle_index - highs[i].candle_index > 3:
-                if price_to_pips(abs(highs[i].price - highs[-1].price), symbol) <= pip_tolerance:
-                    pools.append(
-                        LiquidityPool(
-                            symbol=symbol,
-                            timeframe=tf,
-                            pool_type="EQH",
-                            price_level=max(highs[i].price, highs[-1].price),
-                            price_tolerance=pip_tolerance,
-                            touch_count=2,
-                            swept=False,
-                            sweep_timestamp=None,
+        recent_highs = highs[-4:] if len(highs) > 4 else highs
+        for rh in reversed(recent_highs):
+            for ph in reversed(highs):
+                if rh.candle_index > ph.candle_index and (rh.candle_index - ph.candle_index > 3):
+                    if price_to_pips(abs(rh.price - ph.price), symbol) <= pip_tolerance:
+                        pools.append(
+                            LiquidityPool(
+                                symbol=symbol,
+                                timeframe=tf,
+                                pool_type="EQH",
+                                price_level=max(rh.price, ph.price),
+                                price_tolerance=pip_tolerance,
+                                touch_count=2,
+                                swept=False,
+                                sweep_timestamp=None,
+                            )
                         )
-                    )
-                    break
+                        break
 
     # Detect EQL
     if len(lows) >= 2:
-        for i in range(len(lows) - 1):
-            # Ensure swings are distinct structural points (separated by at least 3 candles)
-            if lows[-1].candle_index - lows[i].candle_index > 3:
-                if price_to_pips(abs(lows[i].price - lows[-1].price), symbol) <= pip_tolerance:
-                    pools.append(
-                        LiquidityPool(
-                            symbol=symbol,
-                            timeframe=tf,
-                            pool_type="EQL",
-                            price_level=min(lows[i].price, lows[-1].price),
-                            price_tolerance=pip_tolerance,
-                            touch_count=2,
-                            swept=False,
-                            sweep_timestamp=None,
+        recent_lows = lows[-4:] if len(lows) > 4 else lows
+        for rl in reversed(recent_lows):
+            for pl in reversed(lows):
+                if rl.candle_index > pl.candle_index and (rl.candle_index - pl.candle_index > 3):
+                    if price_to_pips(abs(rl.price - pl.price), symbol) <= pip_tolerance:
+                        pools.append(
+                            LiquidityPool(
+                                symbol=symbol,
+                                timeframe=tf,
+                                pool_type="EQL",
+                                price_level=min(rl.price, pl.price),
+                                price_tolerance=pip_tolerance,
+                                touch_count=2,
+                                swept=False,
+                                sweep_timestamp=None,
+                            )
                         )
-                    )
-                    break
+                        break
 
     return pools
 
 
 def detect_liquidity_sweep(df: pd.DataFrame, pools: List[LiquidityPool]) -> Optional[LiquidityPool]:
-    """Checks if the most recent candle swept a liquidity pool and rejected."""
-    if df.empty or not pools:
+    """Checks if any of the recent 3 candles swept a liquidity pool and rejected."""
+    if len(df) < 3 or not pools:
         return None
 
-    last_candle = df.iloc[-1]
+    recent_candles = df.tail(3)
 
     for pool in pools:
         if pool.swept:
             continue
 
-        if pool.pool_type == "EQH":
-            # Wick above the EQH, but close below it
-            if last_candle["high"] > pool.price_level and last_candle["close"] < pool.price_level:
-                pool.swept = True
-                pool.sweep_timestamp = last_candle["timestamp"]
-                return pool
+        for _, candle in recent_candles.iterrows():
+            if pool.pool_type == "EQH":
+                if candle["high"] > pool.price_level and candle["close"] < pool.price_level:
+                    pool.swept = True
+                    pool.sweep_timestamp = candle["timestamp"]
+                    return pool
 
-        elif pool.pool_type == "EQL":
-            # Wick below the EQL, but close above it
-            if last_candle["low"] < pool.price_level and last_candle["close"] > pool.price_level:
-                pool.swept = True
-                pool.sweep_timestamp = last_candle["timestamp"]
-                return pool
+            elif pool.pool_type == "EQL":
+                if candle["low"] < pool.price_level and candle["close"] > pool.price_level:
+                    pool.swept = True
+                    pool.sweep_timestamp = candle["timestamp"]
+                    return pool
 
     return None
 

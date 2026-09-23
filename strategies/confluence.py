@@ -124,12 +124,21 @@ class ConfluenceEngine:
                 logger.info("order_block_detected", tf=self.mtf, direction=bias, price=ob.ob_50)
 
     async def scan_mtf_confirmation(self) -> None:
-        """Run every 15 minutes to evaluate MTF confirmation layer."""
+        """Run every 15 minutes to evaluate MTF confirmation layer and detect local Order Blocks."""
         df = await candle_store.get_candles(self.symbol, self.mtf_conf)
         if len(df) < 20:
             return
 
-        bias = await self._update_structure_state(df, self.mtf_conf)
+        swings = detect_swings(df)
+        current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
+        bias = await self._update_structure_state(df, self.mtf_conf, current_bias)
+
+        # Save 15m order blocks to give 5m entry trigger more localized targets
+        if bias in ["bullish", "bearish"]:
+            obs = find_order_blocks(df, swings, bias, self.symbol, self.mtf_conf)
+            for ob in obs:
+                await order_blocks.save_order_block(ob)
+
         logger.info("mtf_15m_scan_complete", bias=bias)
 
     async def scan_ltf_entry(self) -> Optional[TradeSignal]:
@@ -159,20 +168,25 @@ class ConfluenceEngine:
             factors.append("15M Structure Aligned")
             confluence_score += 10
 
-        htf_df = await candle_store.get_candles(self.symbol, self.htf)
-        htf_swings = detect_swings(htf_df)
-        htf_highs = [s for s in htf_swings if s.type == "high"]
-        htf_lows = [s for s in htf_swings if s.type == "low"]
+        # Localized PD Zone (Use 15m structure instead of 4H to prevent intraday lockouts)
+        mtf_df = await candle_store.get_candles(self.symbol, self.mtf_conf)
+        mtf_swings = detect_swings(mtf_df)
+        mtf_highs = [s for s in mtf_swings if s.type == "high"]
+        mtf_lows = [s for s in mtf_swings if s.type == "low"]
 
         pd_zone = (
-            get_premium_discount_zone(htf_lows[-1].price, htf_highs[-1].price, current_price)
-            if htf_highs and htf_lows
+            get_premium_discount_zone(mtf_lows[-1].price, mtf_highs[-1].price, current_price)
+            if mtf_highs and mtf_lows
             else "Equilibrium"
         )
 
+        # Strict SMC Rule: Never buy in Premium, never sell in Discount
         if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
             logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
             return None
+
+        factors.append(f"Optimal PD Zone ({pd_zone})")
+        confluence_score += 10
 
         active_session = SessionManager.get_active_killzone(datetime.now(timezone.utc))
         if active_session != "Out of Session":
@@ -182,7 +196,10 @@ class ConfluenceEngine:
         valid_ob = None
         entry_model = "Unknown Setup"
 
+        # Check BOTH 1H and 15M active order blocks
         active_obs = await order_blocks.get_active_order_blocks(self.symbol, self.mtf)
+        active_obs.extend(await order_blocks.get_active_order_blocks(self.symbol, self.mtf_conf))
+
         for ob in active_obs:
             if ob["direction"] != htf_bias:
                 continue
@@ -193,19 +210,21 @@ class ConfluenceEngine:
 
             if is_within_range(current_price, ob["ob_low"], ob["ob_high"]):
                 valid_ob = ob
-                entry_model = "MTF OB Entry"
-                factors.append(f"MTF {ob['direction'].capitalize()} OB Tap")
+                entry_model = f"{ob['timeframe']} OB Entry"
+                factors.append(f"{ob['timeframe']} {ob['direction'].capitalize()} OB Tap")
                 confluence_score += 25
                 break
 
         if not valid_ob:
+            # Check BOTH 1H and 15M active breaker blocks
             breakers = await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf)
+            breakers.extend(await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf_conf))
             for brk in breakers:
                 if brk["direction"] != htf_bias:
                     if is_within_range(current_price, brk["ob_low"], brk["ob_high"]):
                         valid_ob = brk
-                        entry_model = "Breaker Block Retest"
-                        factors.append("MTF Breaker Block Tap")
+                        entry_model = f"{brk['timeframe']} Breaker Block Retest"
+                        factors.append(f"{brk['timeframe']} Breaker Block Tap")
                         confluence_score += 25
                         break
 
@@ -259,10 +278,11 @@ class ConfluenceEngine:
             factors.append("LTF CHoCH Confirmed")
             confluence_score += 10
 
+        # Adjust score thresholds slightly to account for the PD array logic shift
         if active_session == "Out of Session":
-            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 85)
+            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 75)
         else:
-            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 70)
+            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 65)
 
         if confluence_score < min_required_score:
             logger.info("signal_rejected_low_confluence", score=confluence_score, min_req=min_required_score)
@@ -275,7 +295,7 @@ class ConfluenceEngine:
         stop_loss = valid_ob["ob_low"] - sl_buffer if trade_dir == "buy" else valid_ob["ob_high"] + sl_buffer
 
         # Check Deduplication
-        is_dup = await signals.is_duplicate(self.symbol, self.ltf, trade_dir, settings.SIGNAL_COOLDOWN_HOURS)
+        is_dup = await signals.is_duplicate(self.symbol, self.ltf, trade_dir, settings.SIGNAL_COOLDOWN_MINUTES)
         if is_dup:
             logger.info("signal_suppressed_duplicate", symbol=self.symbol)
             return None

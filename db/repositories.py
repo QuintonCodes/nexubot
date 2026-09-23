@@ -41,10 +41,13 @@ class OrderBlockRepository:
                 logger.error("Failed to save order block", exc_info=e)
 
     async def get_active_order_blocks(self, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
-        """Fetches all unmitigated order blocks for a specific symbol and timeframe."""
+        """Fetches all unmitigated order blocks for a specific symbol and timeframe within the last 14 days."""
         query = """
             SELECT * FROM order_blocks
-            WHERE symbol = $1 AND timeframe = $2 AND mitigated = FALSE
+            WHERE symbol = $1
+              AND timeframe = $2
+              AND mitigated = FALSE
+              AND origin_timestamp >= NOW() - INTERVAL '14 days'
             ORDER BY origin_timestamp DESC;
         """
         pool = get_pool()
@@ -56,7 +59,11 @@ class OrderBlockRepository:
         """Fetches previously mitigated blocks that are now eligible as Breaker Blocks."""
         query = """
             SELECT * FROM order_blocks
-            WHERE symbol = $1 AND timeframe = $2 AND mitigated = TRUE AND is_breaker = TRUE
+            WHERE symbol = $1
+              AND timeframe = $2
+              AND mitigated = TRUE
+              AND is_breaker = TRUE
+              AND origin_timestamp >= NOW() - INTERVAL '14 days'
             ORDER BY origin_timestamp DESC
             LIMIT 10;
         """
@@ -160,7 +167,7 @@ class SignalRepository:
                 signal.timestamp,
             )
 
-    async def is_duplicate(self, symbol: str, timeframe: str, direction: str, window_minutes: int = 15) -> bool:
+    async def is_duplicate(self, symbol: str, timeframe: str, direction: str, window_minutes: int = 30) -> bool:
         """Checks if an identical signal was fired recently to avoid execution spam."""
         query = """
             SELECT COUNT(*) FROM signals

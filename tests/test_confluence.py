@@ -83,7 +83,11 @@ async def test_scan_ltf_entry_success(
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
-async def test_scan_ltf_entry_rejected_premium_discount(mock_get_bias, mock_get_candles, bullish_bos_df):
+@patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.order_blocks.get_active_breaker_blocks", new_callable=AsyncMock)
+async def test_scan_ltf_entry_rejected_premium_discount(
+    mock_get_breakers, mock_get_active_obs, mock_get_bias, mock_get_candles, bullish_bos_df
+):
     """Test signal rejection when price is in Premium for a bullish setup."""
     test_df = bullish_bos_df.copy()
     # Place price at the top extreme of the range (Premium)
@@ -91,6 +95,8 @@ async def test_scan_ltf_entry_rejected_premium_discount(mock_get_bias, mock_get_
 
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"
+    mock_get_active_obs.return_value = []
+    mock_get_breakers.return_value = []
 
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
@@ -126,7 +132,6 @@ async def test_scan_ltf_entry_low_confluence(
         return "ranging"
 
     mock_get_bias.side_effect = _mock_bias
-
     mock_get_active_obs.return_value = [dummy_ob_dict]
     mock_killzone.return_value = "Out of Session"
 

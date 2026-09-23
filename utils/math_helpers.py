@@ -45,16 +45,17 @@ def is_within_range(price: float, bound_a: float, bound_b: float) -> bool:
 def price_to_pips(price_diff: float, symbol: str) -> float:
     """Normalizes raw price differentials into standard pips based on asset class."""
     if symbol in ["XAUUSD", "XAU/USD"]:
-        return price_diff * 10  # XAUUSD 1 pip = 0.1
+        # Standard MT5/Prop Firm quote formatting where 0.01 = 1 pip
+        return abs(price_diff) * 100
     if "JPY" in symbol:
-        return price_diff * 100
-    return price_diff * 10000
+        return abs(price_diff) * 100
+    return abs(price_diff) * 10000
 
 
 def pips_to_price(pips: float, symbol: str) -> float:
     """Converts pip values back to raw price differentials."""
     if symbol in ["XAUUSD", "XAU/USD"]:
-        return pips / 10.0
+        return pips / 100.0
     if "JPY" in symbol:
         return pips / 100.0
     return pips / 10000.0

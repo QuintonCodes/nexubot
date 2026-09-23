@@ -166,7 +166,7 @@ def detect_mss(
     current_structure: str,
     symbol: str,
     tf: str,
-    displacement_pips: float = 30.0,
+    displacement_pips: float = 20.0,
 ) -> Optional[StructureEvent]:
     """Detects Market Structure Shift (MSS): CHoCH accompanied by strong momentum."""
     choch = detect_choch(df, swings, current_structure, symbol, tf)

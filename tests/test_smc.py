@@ -164,8 +164,8 @@ def test_generate_trade_signal():
 
 def test_math_helpers():
     """Test pip/price conversions, ranges, RRR, and ATR."""
-    assert price_to_pips(1.0, "XAUUSD") == 10.0
-    assert pips_to_price(10.0, "XAUUSD") == 1.0
+    assert price_to_pips(1.0, "XAUUSD") == 100.0
+    assert pips_to_price(100.0, "XAUUSD") == 1.0
 
     assert is_within_range(2500.0, 2490.0, 2510.0) is True
     assert is_within_range(2520.0, 2490.0, 2510.0) is False

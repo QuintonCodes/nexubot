@@ -131,7 +131,7 @@ def test_detect_mss_unconfirmed_weak_candle(bearish_choch_df):
     df_slice = bearish_choch_df.iloc[:35].copy()
     # Dampen the candle body so displacement is below threshold
     df_slice.loc[df_slice.index[-1], "open"] = 2550.0
-    df_slice.loc[df_slice.index[-1], "close"] = 2549.0  # 10 pips diff
+    df_slice.loc[df_slice.index[-1], "close"] = 2549.9
 
     swings = detect_swings(df_slice, lookback=3)
     event = detect_mss(df_slice, swings, "bullish", symbol="XAUUSD", tf="5min", displacement_pips=30.0)
