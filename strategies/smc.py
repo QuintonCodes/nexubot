@@ -138,7 +138,7 @@ def find_order_blocks(
                         direction=direction,
                         ob_high=ob_high,
                         ob_low=ob_low,
-                        ob_50=(ob_high + ob_low) / 2.0,
+                        ob_50=float(ob_high + ob_low) / 2.0,
                         origin_timestamp=df["timestamp"].iloc[i],
                         mitigated=False,
                         mitigation_timestamp=None,
@@ -189,7 +189,7 @@ def find_order_blocks(
                         direction=direction,
                         ob_high=ob_high,
                         ob_low=ob_low,
-                        ob_50=(ob_high + ob_low) / 2.0,
+                        ob_50=float(ob_high + ob_low) / 2.0,
                         origin_timestamp=df["timestamp"].iloc[i],
                         mitigated=False,
                         mitigation_timestamp=None,
@@ -213,8 +213,9 @@ def is_ob_mitigated(df: pd.DataFrame, ob: Dict[str, Any]) -> bool:
     if future_df.empty:
         return False
 
-    ob_high = max(ob["ob_high"], ob["ob_low"])
-    ob_low = min(ob["ob_high"], ob["ob_low"])
+    # Cast to float to handle DB Decimal precision returns
+    ob_high = float(max(ob["ob_high"], ob["ob_low"]))
+    ob_low = float(min(ob["ob_high"], ob["ob_low"]))
     ob_50 = (ob_high + ob_low) / 2.0
 
     if ob["direction"] == "bullish":

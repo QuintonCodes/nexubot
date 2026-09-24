@@ -85,8 +85,9 @@ async def test_scan_ltf_entry_success(
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_breaker_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_liquidity_sweep")
 async def test_scan_ltf_entry_rejected_premium_discount(
-    mock_get_breakers, mock_get_active_obs, mock_get_bias, mock_get_candles, bullish_bos_df
+    mock_detect_sweep, mock_get_breakers, mock_get_active_obs, mock_get_bias, mock_get_candles, bullish_bos_df
 ):
     """Test signal rejection when price is in Premium for a bullish setup."""
     test_df = bullish_bos_df.copy()
@@ -98,10 +99,71 @@ async def test_scan_ltf_entry_rejected_premium_discount(
     mock_get_active_obs.return_value = []
     mock_get_breakers.return_value = []
 
+    # Ensure no sweep override is active to trigger the strict rejection logic
+    mock_detect_sweep.return_value = None
+
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
     assert signal is None
+
+
+@pytest.mark.asyncio
+@patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
+@patch("strategies.confluence.signals.save_signal", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.save_pool", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_liquidity_sweep")
+@patch("strategies.confluence.detect_choch")
+@patch("strategies.confluence.SessionManager.get_active_killzone")
+async def test_scan_ltf_entry_accepted_premium_with_sweep(
+    mock_killzone,
+    mock_detect_choch,
+    mock_detect_sweep,
+    mock_save_pool,
+    mock_save_signal,
+    mock_is_duplicate,
+    mock_get_active_obs,
+    mock_get_bias,
+    mock_get_candles,
+    dummy_ob_dict,
+    bullish_bos_df,
+):
+    """Test signal acceptance when price is in Premium for a bullish setup BUT there is a valid EQL sweep override."""
+    test_df = bullish_bos_df.copy()
+    test_df.loc[test_df.index[-1], "close"] = 2650.0  # Premium range
+
+    # Modify dummy_ob_dict to span the high price so it evaluates as a valid tap
+    dummy_ob_dict["ob_low"] = 2640.0
+    dummy_ob_dict["ob_high"] = 2660.0
+
+    mock_get_candles.return_value = test_df
+    mock_get_bias.return_value = "bullish"
+    mock_get_active_obs.return_value = [dummy_ob_dict]
+    mock_is_duplicate.return_value = False
+    mock_killzone.return_value = "London Open Killzone"
+
+    mock_detect_sweep.return_value = LiquidityPool(
+        symbol="XAUUSD",
+        timeframe="5min",
+        pool_type="EQL",
+        price_level=2645.0,
+        price_tolerance=40.0,
+        touch_count=2,
+        swept=True,
+        sweep_timestamp=datetime.now(timezone.utc),
+    )
+
+    mock_detect_choch.return_value = None
+
+    engine = ConfluenceEngine(settings.SYMBOLS[0])
+    signal = await engine.scan_ltf_entry()
+
+    assert signal is not None
+    assert "PD Array Override (Liquidity Sweep)" in signal.confluence_factors
+    mock_save_signal.assert_called_once()
 
 
 @pytest.mark.asyncio

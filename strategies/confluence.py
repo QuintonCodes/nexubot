@@ -168,8 +168,8 @@ class ConfluenceEngine:
             factors.append("15M Structure Aligned")
             confluence_score += 10
 
-        # Localized PD Zone (Use 15m structure instead of 4H to prevent intraday lockouts)
-        mtf_df = await candle_store.get_candles(self.symbol, self.mtf_conf)
+        # Localized PD Zone (Use 5m structure)
+        mtf_df = await candle_store.get_candles(self.symbol, self.ltf)
         mtf_swings = detect_swings(mtf_df)
         mtf_highs = [s for s in mtf_swings if s.type == "high"]
         mtf_lows = [s for s in mtf_swings if s.type == "low"]
@@ -180,13 +180,26 @@ class ConfluenceEngine:
             else "Equilibrium"
         )
 
-        # Strict SMC Rule: Never buy in Premium, never sell in Discount
-        if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
-            logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
-            return None
+        # Early Sweep Detection to validate potential PD Array overrides
+        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
+        pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, pip_tol)
+        swept_pool = detect_liquidity_sweep(df, pools)
 
-        factors.append(f"Optimal PD Zone ({pd_zone})")
-        confluence_score += 10
+        valid_sweep = swept_pool and (
+            (htf_bias == "bullish" and swept_pool.pool_type == "EQL")
+            or (htf_bias == "bearish" and swept_pool.pool_type == "EQH")
+        )
+
+        # Strict SMC Rule: Never buy in Premium, never sell in Discount (unless swept liquidity validates early entry)
+        if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
+            if not valid_sweep:
+                logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
+                return None
+            else:
+                factors.append("PD Array Override (Liquidity Sweep)")
+        else:
+            factors.append(f"Optimal PD Zone ({pd_zone})")
+            confluence_score += 10
 
         active_session = SessionManager.get_active_killzone(datetime.now(timezone.utc))
         if active_session != "Out of Session":
@@ -208,7 +221,7 @@ class ConfluenceEngine:
                 await order_blocks.mark_mitigated(ob["id"])
                 continue
 
-            if is_within_range(current_price, ob["ob_low"], ob["ob_high"]):
+            if is_within_range(current_price, float(ob["ob_low"]), float(ob["ob_high"])):
                 valid_ob = ob
                 entry_model = f"{ob['timeframe']} OB Entry"
                 factors.append(f"{ob['timeframe']} {ob['direction'].capitalize()} OB Tap")
@@ -221,7 +234,7 @@ class ConfluenceEngine:
             breakers.extend(await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf_conf))
             for brk in breakers:
                 if brk["direction"] != htf_bias:
-                    if is_within_range(current_price, brk["ob_low"], brk["ob_high"]):
+                    if is_within_range(current_price, float(brk["ob_low"]), float(brk["ob_high"])):
                         valid_ob = brk
                         entry_model = f"{brk['timeframe']} Breaker Block Retest"
                         factors.append(f"{brk['timeframe']} Breaker Block Tap")
@@ -243,16 +256,10 @@ class ConfluenceEngine:
             factors.append("FVG Tap Confirmed")
             confluence_score += 10
 
-        pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, settings.XAUUSD_PIP_TOLERANCE)
-        swept_pool = detect_liquidity_sweep(df, pools)
-
-        if swept_pool:
-            if (htf_bias == "bullish" and swept_pool.pool_type == "EQL") or (
-                htf_bias == "bearish" and swept_pool.pool_type == "EQH"
-            ):
-                factors.append(f"Liquidity Sweep ({swept_pool.pool_type})")
-                confluence_score += 20
-                await liquidity_pools.save_pool(swept_pool)
+        if valid_sweep:
+            factors.append(f"Liquidity Sweep ({swept_pool.pool_type})")
+            confluence_score += 20
+            await liquidity_pools.save_pool(swept_pool)
 
         idm = detect_inducement(swings_ltf, htf_bias)
         if idm and (
@@ -292,7 +299,9 @@ class ConfluenceEngine:
         atr_val = calculate_atr(df)
         sl_buffer = atr_val * 0.5
         trade_dir = "buy" if valid_ob["direction"] == "bullish" else "sell"
-        stop_loss = valid_ob["ob_low"] - sl_buffer if trade_dir == "buy" else valid_ob["ob_high"] + sl_buffer
+        stop_loss = (
+            float(valid_ob["ob_low"]) - sl_buffer if trade_dir == "buy" else float(valid_ob["ob_high"]) + sl_buffer
+        )
 
         # Check Deduplication
         is_dup = await signals.is_duplicate(self.symbol, self.ltf, trade_dir, settings.SIGNAL_COOLDOWN_MINUTES)
