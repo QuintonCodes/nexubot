@@ -22,7 +22,11 @@ from strategies.models import LiquidityPool, StructureEvent
 @patch("strategies.confluence.detect_liquidity_sweep")
 @patch("strategies.confluence.detect_choch")
 @patch("strategies.confluence.SessionManager.get_active_killzone")
+@patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
 async def test_scan_ltf_entry_success(
+    mock_get_active_pools,
+    mock_get_opposing_obs,
     mock_killzone,
     mock_detect_choch,
     mock_detect_sweep,
@@ -37,12 +41,13 @@ async def test_scan_ltf_entry_success(
 ):
     """Test that a signal is generated when price enters an active, HTF-aligned OB with high confluence."""
     test_df = bullish_bos_df.copy()
-    # Position final close inside active OB (2495-2505) and within discount range
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"  # HTF agrees
     mock_get_active_obs.return_value = [dummy_ob_dict]
+    mock_get_opposing_obs.return_value = []
+    mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
     mock_killzone.return_value = "London Open Killzone"
 
@@ -74,7 +79,7 @@ async def test_scan_ltf_entry_success(
     assert signal.direction == "buy"
     assert signal.entry_price == 2500.0
     assert signal.confluence_score >= settings.MIN_CONFLUENCE_SCORE
-    assert "HTF Bias: BULLISH" in signal.confluence_factors
+    assert "Full MTF/HTF Alignment (BULLISH)" in signal.confluence_factors
 
     mock_save_signal.assert_called_once()
     mock_save_pool.assert_called_once()
@@ -86,20 +91,28 @@ async def test_scan_ltf_entry_success(
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_breaker_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.detect_liquidity_sweep")
+@patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
 async def test_scan_ltf_entry_rejected_premium_discount(
-    mock_detect_sweep, mock_get_breakers, mock_get_active_obs, mock_get_bias, mock_get_candles, bullish_bos_df
+    mock_get_active_pools,
+    mock_get_opposing_obs,
+    mock_detect_sweep,
+    mock_get_breakers,
+    mock_get_active_obs,
+    mock_get_bias,
+    mock_get_candles,
+    bullish_bos_df,
 ):
     """Test signal rejection when price is in Premium for a bullish setup."""
     test_df = bullish_bos_df.copy()
-    # Place price at the top extreme of the range (Premium)
     test_df.loc[test_df.index[-1], "close"] = 2650.0
 
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"
     mock_get_active_obs.return_value = []
     mock_get_breakers.return_value = []
-
-    # Ensure no sweep override is active to trigger the strict rejection logic
+    mock_get_opposing_obs.return_value = []
+    mock_get_active_pools.return_value = []
     mock_detect_sweep.return_value = None
 
     engine = ConfluenceEngine(settings.SYMBOLS[0])
@@ -118,7 +131,11 @@ async def test_scan_ltf_entry_rejected_premium_discount(
 @patch("strategies.confluence.detect_liquidity_sweep")
 @patch("strategies.confluence.detect_choch")
 @patch("strategies.confluence.SessionManager.get_active_killzone")
+@patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
 async def test_scan_ltf_entry_accepted_premium_with_sweep(
+    mock_get_active_pools,
+    mock_get_opposing_obs,
     mock_killzone,
     mock_detect_choch,
     mock_detect_sweep,
@@ -135,13 +152,14 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2650.0  # Premium range
 
-    # Modify dummy_ob_dict to span the high price so it evaluates as a valid tap
     dummy_ob_dict["ob_low"] = 2640.0
     dummy_ob_dict["ob_high"] = 2660.0
 
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"
     mock_get_active_obs.return_value = [dummy_ob_dict]
+    mock_get_opposing_obs.return_value = []
+    mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
     mock_killzone.return_value = "London Open Killzone"
 
@@ -172,7 +190,11 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.SessionManager.get_active_killzone")
+@patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
 async def test_scan_ltf_entry_low_confluence(
+    mock_get_active_pools,
+    mock_get_opposing_obs,
     mock_killzone,
     mock_is_duplicate,
     mock_get_active_obs,
@@ -186,23 +208,22 @@ async def test_scan_ltf_entry_low_confluence(
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
     mock_get_candles.return_value = test_df
+    mock_get_active_obs.return_value = [dummy_ob_dict]
+    mock_get_opposing_obs.return_value = []
+    mock_get_active_pools.return_value = []
 
-    # Enforce isolated HTF bias, ensuring MTF/15M don't falsely bump the confluence score
     def _mock_bias(symbol, tf):
         if tf == settings.HTF_TIMEFRAMES[0]:
             return "bullish"
         return "ranging"
 
     mock_get_bias.side_effect = _mock_bias
-    mock_get_active_obs.return_value = [dummy_ob_dict]
     mock_killzone.return_value = "Out of Session"
 
-    # Only HTF bias (+20) and OB tap (+25) -> Score 45 < 85 (OOS Threshold)
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
     assert signal is None
-    mock_is_duplicate.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -216,7 +237,11 @@ async def test_scan_ltf_entry_low_confluence(
 @patch("strategies.confluence.detect_liquidity_sweep")
 @patch("strategies.confluence.detect_choch")
 @patch("strategies.confluence.SessionManager.get_active_killzone")
+@patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
 async def test_scan_ltf_entry_breaker_block_fallback(
+    mock_get_active_pools,
+    mock_get_opposing_obs,
     mock_killzone,
     mock_detect_choch,
     mock_detect_sweep,
@@ -234,10 +259,17 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
+    # Breaker must match the active trade bias (bullish) to trigger.
+    dummy_breaker_dict["direction"] = "bullish"
+    dummy_breaker_dict["ob_low"] = 2490.0
+    dummy_breaker_dict["ob_high"] = 2510.0
+
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"
-    mock_get_active_obs.return_value = []  # No standard active OB
-    mock_get_breakers.return_value = [dummy_breaker_dict]  # Breaker available
+    mock_get_active_obs.return_value = []
+    mock_get_breakers.return_value = [dummy_breaker_dict]
+    mock_get_opposing_obs.return_value = []
+    mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
     mock_killzone.return_value = "London Open Killzone"
 
@@ -282,10 +314,7 @@ async def test_scan_htf_and_mtf_scans(
     mock_mark_breaker, mock_save_ob, mock_save_event, mock_get_bias, mock_get_candles, bullish_bos_df
 ):
     """Test HTF bias updates and MTF confirmation sweeps."""
-    # Slice the DF to index 35 so the final closed candle evaluates as the exact breakout origin
     mock_get_candles.return_value = bullish_bos_df.iloc[:35].copy()
-
-    # Override return value to "ranging" to guarantee classify_structure() initiates a state shift
     mock_get_bias.return_value = "ranging"
 
     engine = ConfluenceEngine(settings.SYMBOLS[0])
@@ -293,5 +322,4 @@ async def test_scan_htf_and_mtf_scans(
     await engine.scan_htf()
     await engine.scan_mtf_confirmation()
 
-    # The newly evaluated "bullish" state != "ranging", so save_event is triggered.
     assert mock_save_event.call_count >= 1

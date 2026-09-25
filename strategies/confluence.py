@@ -152,13 +152,9 @@ class ConfluenceEngine:
         logger.info("mtf_15m_scan_complete", bias=bias)
 
     async def scan_ltf_entry(self) -> Optional[TradeSignal]:
-        """Run on every 5min candle close. Evaluates deep SMC confluence for execution."""
+        """Evaluates SMC confluence with decoupled 1H directional anchoring."""
         df = await candle_store.get_candles(self.symbol, self.ltf)
         if len(df) < 20:
-            return None
-
-        htf_bias = await structure_events.get_latest_bias(self.symbol, self.htf)
-        if not htf_bias:
             return None
 
         current_price = df.iloc[-1]["close"]
@@ -166,21 +162,98 @@ class ConfluenceEngine:
         ltf_highs = [s for s in swings_ltf if s.type == "high"]
         ltf_lows = [s for s in swings_ltf if s.type == "low"]
 
-        factors = [f"HTF Bias: {htf_bias.upper()}"]
+        # 1. Establish Directional Anchor via 1H and 15M
+        mtf_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
+        mtf_15m_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
+
+        if not mtf_bias or not mtf_15m_bias:
+            return None
+
+        if mtf_bias != mtf_15m_bias or mtf_bias not in ["bullish", "bearish"]:
+            logger.info("signal_skipped_mtf_misalignment", mtf_1h=mtf_bias, mtf_15m=mtf_15m_bias)
+            return None
+
+        trade_bias = mtf_bias  # "bullish" or "bearish"
+        htf_bias = await structure_events.get_latest_bias(self.symbol, self.htf) or "ranging"
+
+        # 2. Setup Classification (Pro-HTF Trend vs. Intraday Retracement)
+        is_pro_htf = trade_bias == htf_bias
+        signal_type = "PRO_HTF_TREND" if is_pro_htf else "INTRADAY_RETRACEMENT"
+
+        target_cap = None
+        runaway_dist = None
+        HTF_RUNWAY_MIN_POINTS = 10.0  # $10.00 buffer on XAU/USD (1,000 pips)
+
+        # Fetch HTF Boundaries: Order Blocks (Barriers) and Liquidity Pools (Magnets)
+        opposing_dir = "bearish" if trade_bias == "bullish" else "bullish"
+        target_pool_type = "EQH" if trade_bias == "bullish" else "EQL"
+
+        opposing_htf_obs = await order_blocks.get_opposing_htf_obs(self.symbol, [self.htf, self.mtf], opposing_dir)
+        htf_pools = await liquidity_pools.get_active_pools(self.symbol, [self.htf, self.mtf], target_pool_type)
+
+        nearest_barrier = None
+        nearest_pool = None
+
+        if not is_pro_htf:
+            # Check if current price is already trapped inside an opposing 4H or 1H Order Block
+            for ob in opposing_htf_obs:
+                if is_within_range(current_price, float(ob["ob_low"]), float(ob["ob_high"])):
+                    logger.info("signal_rejected_inside_opposing_htf_ob", tf=ob["timeframe"], direction=ob["direction"])
+                    return None
+
+        # Calculate runway to nearest opposing 4H/1H barrier
+        if trade_bias == "bullish":
+            overhead_barriers = [float(ob["ob_low"]) for ob in opposing_htf_obs if float(ob["ob_low"]) > current_price]
+            overhead_pools = [float(p["price_level"]) for p in htf_pools if float(p["price_level"]) > current_price]
+
+            if overhead_barriers:
+                nearest_barrier = min(overhead_barriers)
+            if overhead_pools:
+                nearest_pool = min(overhead_pools)
+
+            targets = [t for t in [nearest_barrier, nearest_pool] if t is not None]
+            if targets:
+                target_cap = min(targets)
+                runaway_dist = target_cap - current_price
+        else:
+            underlying_barriers = [
+                float(ob["ob_high"]) for ob in opposing_htf_obs if float(ob["ob_high"]) < current_price
+            ]
+            underlying_pools = [float(p["price_level"]) for p in htf_pools if float(p["price_level"]) < current_price]
+
+            if underlying_barriers:
+                nearest_barrier = max(underlying_barriers)
+            if underlying_pools:
+                nearest_pool = max(underlying_pools)
+
+            targets = [t for t in [nearest_barrier, nearest_pool] if t is not None]
+            if targets:
+                target_cap = max(targets)
+                runaway_dist = current_price - target_cap
+
+        # Reject Counter-Trend trades if they lack sufficient runway to the nearest obstacle/target
+        if not is_pro_htf and runaway_dist is not None and runaway_dist < HTF_RUNWAY_MIN_POINTS:
+            logger.info("signal_rejected_insufficient_runway", runway=runaway_dist, min_req=HTF_RUNWAY_MIN_POINTS)
+            return None
+
+        # 3. Factor & Confluence Setup
+        factors = []
         confluence_score = 20
 
-        # MTF Context Gate Checks
-        mtf_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
-        if mtf_bias == htf_bias:
-            factors.append(f"MTF Alignment ({self.mtf})")
+        if is_pro_htf:
+            factors.append(f"Full MTF/HTF Alignment ({htf_bias.upper()})")
+            confluence_score += 25
+        else:
+            factors.append("Intraday Retracement (1H/15M Aligned)")
             confluence_score += 15
+            if runaway_dist is not None:
+                factors.append(f"Runway Clear ({runaway_dist:.1f} pts to HTF POI)")
 
-        mtf_15m_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
-        if mtf_15m_bias == htf_bias:
-            factors.append("15M Structure Aligned")
-            confluence_score += 10
+        if nearest_pool is not None:
+            factors.append(f"HTF Draw on Liquidity ({target_pool_type} @ {nearest_pool:.2f})")
+            confluence_score += 10  # Bonus points for a clear HTF magnet
 
-        # Localized PD Zone (Anchored to 1H MTF Dealing Range)
+        # 4. Premium / Discount Evaluation (1H MTF Dealing Range)
         mtf_df = await candle_store.get_candles(self.symbol, self.mtf)
         mtf_swings = detect_swings(mtf_df)
         mtf_highs = [s for s in mtf_swings if s.type == "high"]
@@ -191,29 +264,26 @@ class ConfluenceEngine:
         else:
             pd_zone = "Equilibrium"
 
-        # Early Sweep Detection to validate potential PD Array overrides
         pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
         pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, pip_tol)
         swept_pool = detect_liquidity_sweep(df, pools)
 
         valid_sweep = swept_pool and (
-            (htf_bias == "bullish" and swept_pool.pool_type == "EQL")
-            or (htf_bias == "bearish" and swept_pool.pool_type == "EQH")
+            (trade_bias == "bullish" and swept_pool.pool_type == "EQL")
+            or (trade_bias == "bearish" and swept_pool.pool_type == "EQH")
         )
 
         valid_ote = False
         ote_entry_model_text = ""
         if ltf_highs and ltf_lows:
-            ote_zone = calculate_ote_zone(ltf_lows[-1].price, ltf_highs[-1].price, htf_bias, self.symbol, self.ltf)
+            ote_zone = calculate_ote_zone(ltf_lows[-1].price, ltf_highs[-1].price, trade_bias, self.symbol, self.ltf)
             if is_within_range(current_price, ote_zone.ote_entry, ote_zone.ote_top):
                 valid_ote = True
                 ote_entry_model_text = f"OTE Tap ({ote_zone.ote_entry:.2f}–{ote_zone.ote_top:.2f})"
 
-        # Strict SMC Rule: Never buy in Premium, never sell in Discount
-        # (unless swept liquidity OR an OTE retracement setup overrides)
-        if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
+        if (trade_bias == "bullish" and pd_zone == "Premium") or (trade_bias == "bearish" and pd_zone == "Discount"):
             if not valid_sweep and not valid_ote:
-                logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
+                logger.info("signal_rejected_pd_array", direction=trade_bias, pd_zone=pd_zone)
                 return None
             else:
                 factors.append("PD Array Override (Liquidity Sweep / OTE)")
@@ -226,15 +296,15 @@ class ConfluenceEngine:
             factors.append(f"Killzone Active ({active_session})")
             confluence_score += 5
 
+        # 5. Order Block & Breaker Identification (Aligned with trade_bias)
         valid_ob = None
         entry_model = "Unknown Setup"
 
-        # Check BOTH 1H and 15M active order blocks
         active_obs = await order_blocks.get_active_order_blocks(self.symbol, self.mtf)
         active_obs.extend(await order_blocks.get_active_order_blocks(self.symbol, self.mtf_conf))
 
         for ob in active_obs:
-            if ob["direction"] != htf_bias:
+            if ob["direction"] != trade_bias:
                 continue
 
             if is_ob_mitigated(df, ob):
@@ -249,21 +319,23 @@ class ConfluenceEngine:
                 break
 
         if not valid_ob:
-            # Check BOTH 1H and 15M active breaker blocks
             breakers = await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf)
             breakers.extend(await order_blocks.get_active_breaker_blocks(self.symbol, self.mtf_conf))
+
             for brk in breakers:
-                if brk["direction"] != htf_bias:
-                    if is_within_range(current_price, float(brk["ob_low"]), float(brk["ob_high"])):
-                        valid_ob = brk
-                        entry_model = f"{brk['timeframe']} Breaker Block Retest"
-                        factors.append(f"{brk['timeframe']} Breaker Block Tap")
-                        confluence_score += 25
-                        break
+                if brk["direction"] != trade_bias:
+                    continue
+                if is_within_range(current_price, float(brk["ob_low"]), float(brk["ob_high"])):
+                    valid_ob = brk
+                    entry_model = f"{brk['timeframe']} Breaker Block Retest"
+                    factors.append(f"{brk['timeframe']} Breaker Block Tap")
+                    confluence_score += 25
+                    break
 
         if not valid_ob:
             return None
 
+        # 6. Secondary Confluences (CISD, FVG, Sweeps, IDM, OTE, CHoCH)
         cisd_event = detect_cisd(df, valid_ob, self.symbol, self.ltf)
         if cisd_event:
             factors.append("CISD Confirmed")
@@ -271,7 +343,7 @@ class ConfluenceEngine:
             await structure_events.save_event(cisd_event)
 
         fvgs = detect_fair_value_gaps(df.tail(10), self.symbol, self.ltf)
-        if any(f.direction == htf_bias and is_within_range(current_price, f.bottom, f.top) for f in fvgs):
+        if any(f.direction == trade_bias and is_within_range(current_price, f.bottom, f.top) for f in fvgs):
             entry_model = "OB + FVG Combo"
             factors.append("FVG Tap Confirmed")
             confluence_score += 10
@@ -281,10 +353,10 @@ class ConfluenceEngine:
             confluence_score += 20
             await liquidity_pools.save_pool(swept_pool)
 
-        idm = detect_inducement(swings_ltf, htf_bias)
+        idm = detect_inducement(swings_ltf, trade_bias)
         if idm and (
-            (htf_bias == "bullish" and current_price < idm.price)
-            or (htf_bias == "bearish" and current_price > idm.price)
+            (trade_bias == "bullish" and current_price < idm.price)
+            or (trade_bias == "bearish" and current_price > idm.price)
         ):
             factors.append("Inducement (IDM) Swept")
             confluence_score += 15
@@ -294,9 +366,9 @@ class ConfluenceEngine:
             factors.append(ote_entry_model_text)
             confluence_score += 20
 
-        ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf) or htf_bias or "ranging"
+        ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf) or trade_bias
         ltf_choch = detect_choch(df, swings_ltf, ltf_bias, self.symbol, self.ltf)
-        if ltf_choch and ltf_choch.direction == htf_bias:
+        if ltf_choch and ltf_choch.direction == trade_bias:
             factors.append("LTF CHoCH Confirmed")
             confluence_score += 10
 
@@ -310,7 +382,7 @@ class ConfluenceEngine:
             logger.info("signal_rejected_low_confluence", score=confluence_score, min_req=min_required_score)
             return None
 
-        # Generate Validated Signal
+        # 7. Assemble Trade Signal
         atr_val = calculate_atr(df)
         sl_buffer = atr_val * 0.5
         trade_dir = "buy" if valid_ob["direction"] == "bullish" else "sell"
@@ -336,9 +408,12 @@ class ConfluenceEngine:
             entry_model=entry_model,
             session=active_session,
             pd_zone=pd_zone,
+            signal_type=signal_type,
+            target_cap=target_cap,
+            runaway_distance=runaway_dist,
         )
 
         await signals.save_signal(signal)
-        logger.info("trade_signal_generated", signal_id=signal.signal_id, score=confluence_score)
+        logger.info("trade_signal_generated", signal_id=signal.signal_id, score=confluence_score, type=signal_type)
 
         return signal

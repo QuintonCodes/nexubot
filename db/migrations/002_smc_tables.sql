@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS signals (
     risk_reward DECIMAL(5, 2) NOT NULL,
     confluence_score INTEGER,
     confluence_factors TEXT[],
+    signal_type TEXT NOT NULL DEFAULT 'SMC_Confluence',
+    runaway_distance DECIMAL(18, 5),
     status TEXT NOT NULL DEFAULT 'active',
     telegram_message_id BIGINT,
     timestamp TIMESTAMPTZ NOT NULL,

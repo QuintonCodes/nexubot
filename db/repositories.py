@@ -55,6 +55,24 @@ class OrderBlockRepository:
             rows = await conn.fetch(query, symbol, timeframe)
             return [dict(row) for row in rows]
 
+    async def get_opposing_htf_obs(
+        self, symbol: str, timeframes: List[str], opposing_direction: str
+    ) -> List[Dict[str, Any]]:
+        """Queries active, unmitigated opposing Order Blocks across specified HTF timeframes (e.g., 4H and 1H)."""
+        query = """
+            SELECT * FROM order_blocks
+            WHERE symbol = $1
+              AND timeframe = ANY($2::text[])
+              AND direction = $3
+              AND mitigated = FALSE
+              AND origin_timestamp >= NOW() - INTERVAL '14 days'
+            ORDER BY origin_timestamp DESC;
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol, timeframes, opposing_direction)
+            return [dict(row) for row in rows]
+
     async def get_active_zones(self, symbol: str) -> List[Dict[str, Any]]:
         """Fetches all active unmitigated Order Blocks across multiple timeframes."""
         query = """
@@ -160,9 +178,10 @@ class SignalRepository:
             INSERT INTO signals (
                 id, symbol, timeframe, direction, entry_model, session, pd_zone,
                 entry_price, stop_loss, take_profit_1, take_profit_2, take_profit_3,
-                risk_reward, confluence_score, confluence_factors, timestamp
+                risk_reward, confluence_score, confluence_factors, signal_type,
+                runaway_distance, timestamp
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (id) DO NOTHING;
         """
         pool = get_pool()
@@ -184,6 +203,8 @@ class SignalRepository:
                 signal.risk_reward,
                 signal.confluence_score,
                 signal.confluence_factors,
+                signal.signal_type,
+                signal.runaway_distance,
                 signal.timestamp,
             )
 
@@ -250,6 +271,21 @@ class LiquidityPoolRepository:
         async with db_pool.acquire() as conn:
             origin = pool.sweep_timestamp or datetime.now(timezone.utc)
             await conn.execute(query, pool.symbol, pool.timeframe, pool.pool_type, pool.price_level, origin, False)
+
+    async def get_active_pools(self, symbol: str, timeframes: List[str], pool_type: str) -> List[Dict[str, Any]]:
+        """Queries active, unswept liquidity pools across specified HTF timeframes."""
+        query = """
+            SELECT * FROM liquidity_pools
+            WHERE symbol = $1
+              AND timeframe = ANY($2::text[])
+              AND pool_type = $3
+              AND swept = FALSE
+            ORDER BY origin_timestamp DESC;
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol, timeframes, pool_type)
+            return [dict(row) for row in rows]
 
 
 order_blocks = OrderBlockRepository()

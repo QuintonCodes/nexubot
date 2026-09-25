@@ -336,6 +336,9 @@ def generate_trade_signal(
     entry_model: str,
     session: str,
     pd_zone: str,
+    signal_type: str = "SMC_Confluence",
+    target_cap: Optional[float] = None,
+    runaway_distance: Optional[float] = None,
 ) -> TradeSignal:
     """Assembles a valid TradeSignal, smartly calculating dynamic RR Take Profits."""
     sl_pips_diff = abs(entry_price - stop_loss)
@@ -351,10 +354,21 @@ def generate_trade_signal(
         tp3 = entry_price + tp3_distance
         tp2 = entry_price + tp2_distance
         tp1 = entry_price + tp1_distance
+
+        # Cap targets if an opposing macro boundary exists
+        if target_cap is not None and target_cap > entry_price:
+            tp3 = min(tp3, target_cap)
+            tp2 = min(tp2, target_cap)
+            tp1 = min(tp1, target_cap)
     else:
         tp3 = entry_price - tp3_distance
         tp2 = entry_price - tp2_distance
         tp1 = entry_price - tp1_distance
+
+        if target_cap is not None and target_cap < entry_price:
+            tp3 = max(tp3, target_cap)
+            tp2 = max(tp2, target_cap)
+            tp1 = max(tp1, target_cap)
 
     actual_rrr = calculate_rrr(entry_price, stop_loss, tp3)
 
@@ -368,7 +382,7 @@ def generate_trade_signal(
         take_profit_2=round(tp2, 5),
         take_profit_3=round(tp3, 5),
         risk_reward=actual_rrr,
-        signal_type="SMC_Confluence",
+        signal_type=signal_type,
         entry_model=entry_model,
         session=session,
         pd_zone=pd_zone,
@@ -376,4 +390,5 @@ def generate_trade_signal(
         confluence_factors=factors,
         timestamp=timestamp,
         timeframe=tf,
+        runaway_distance=round(runaway_distance, 2) if runaway_distance is not None else None,
     )

@@ -89,7 +89,7 @@ class TradeSignal:
     take_profit_2: float
     take_profit_3: float
     risk_reward: float
-    signal_type: str
+    signal_type: str  # Set to "PRO_HTF_TREND" or "INTRADAY_RETRACEMENT"
     entry_model: str
     session: str
     pd_zone: str
@@ -97,3 +97,4 @@ class TradeSignal:
     confluence_factors: List[str]
     timestamp: datetime
     timeframe: str
+    runaway_distance: Optional[float] = None
