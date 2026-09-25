@@ -24,17 +24,28 @@ def calculate_rrr(entry: float, sl: float, tp: float) -> float:
     return round(reward / risk, 2)
 
 
-def fibonacci_levels(swing_low: float, swing_high: float) -> Dict[str, float]:
+def fibonacci_levels(swing_low: float, swing_high: float, direction: str = "bullish") -> Dict[str, float]:
     """Standard ICT Optimal Trade Entry (OTE) retracement coordinates."""
-
     diff = swing_high - swing_low
-    return {
-        "0.0": swing_low,
-        "0.618": swing_low + (diff * 0.618),
-        "0.705": swing_low + (diff * 0.705),
-        "0.786": swing_low + (diff * 0.786),
-        "1.0": swing_high,
-    }
+
+    if direction == "bullish":
+        # Bullish retracements pull back DOWN from the swing high
+        return {
+            "0.0": swing_high,
+            "0.618": swing_high - (diff * 0.618),
+            "0.705": swing_high - (diff * 0.705),
+            "0.786": swing_high - (diff * 0.786),
+            "1.0": swing_low,
+        }
+    else:
+        # Bearish retracements pull back UP from the swing low
+        return {
+            "0.0": swing_low,
+            "0.618": swing_low + (diff * 0.618),
+            "0.705": swing_low + (diff * 0.705),
+            "0.786": swing_low + (diff * 0.786),
+            "1.0": swing_high,
+        }
 
 
 def is_within_range(price: float, bound_a: float, bound_b: float) -> bool:

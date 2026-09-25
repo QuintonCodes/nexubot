@@ -162,7 +162,7 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
     signal = await engine.scan_ltf_entry()
 
     assert signal is not None
-    assert "PD Array Override (Liquidity Sweep)" in signal.confluence_factors
+    assert "PD Array Override (Liquidity Sweep / OTE)" in signal.confluence_factors
     mock_save_signal.assert_called_once()
 
 

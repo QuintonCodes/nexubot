@@ -65,7 +65,7 @@ class ConfluenceEngine:
         if current_bias is None:
             current_bias = classify_structure(df, swings)
 
-        bos = detect_bos(df, swings, self.symbol, tf)
+        bos = detect_bos(df, swings, current_bias or "ranging", self.symbol, tf)
         if bos:
             await structure_events.save_event(bos)
             logger.info("structure_break", event_type="BOS", direction=bos.direction, tf=tf)
@@ -113,6 +113,11 @@ class ConfluenceEngine:
         current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
         bias = await self._update_structure_state(df, self.mtf, current_bias)
 
+        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
+        pools = detect_liquidity_pools(swings, self.symbol, self.mtf, pip_tol)
+        for pool in pools:
+            await liquidity_pools.save_pool(pool)
+
         if current_bias and bias and bias != current_bias and bias in ["bullish", "bearish"]:
             opposing = "bullish" if bias == "bearish" else "bearish"
             await order_blocks.mark_as_breaker(self.symbol, self.mtf, opposing)
@@ -132,6 +137,11 @@ class ConfluenceEngine:
         swings = detect_swings(df)
         current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
         bias = await self._update_structure_state(df, self.mtf_conf, current_bias)
+
+        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
+        pools = detect_liquidity_pools(swings, self.symbol, self.mtf_conf, pip_tol)
+        for pool in pools:
+            await liquidity_pools.save_pool(pool)
 
         # Save 15m order blocks to give 5m entry trigger more localized targets
         if bias in ["bullish", "bearish"]:
@@ -153,6 +163,8 @@ class ConfluenceEngine:
 
         current_price = df.iloc[-1]["close"]
         swings_ltf = detect_swings(df)
+        ltf_highs = [s for s in swings_ltf if s.type == "high"]
+        ltf_lows = [s for s in swings_ltf if s.type == "low"]
 
         factors = [f"HTF Bias: {htf_bias.upper()}"]
         confluence_score = 20
@@ -168,17 +180,16 @@ class ConfluenceEngine:
             factors.append("15M Structure Aligned")
             confluence_score += 10
 
-        # Localized PD Zone (Use 5m structure)
-        mtf_df = await candle_store.get_candles(self.symbol, self.ltf)
+        # Localized PD Zone (Anchored to 1H MTF Dealing Range)
+        mtf_df = await candle_store.get_candles(self.symbol, self.mtf)
         mtf_swings = detect_swings(mtf_df)
         mtf_highs = [s for s in mtf_swings if s.type == "high"]
         mtf_lows = [s for s in mtf_swings if s.type == "low"]
 
-        pd_zone = (
-            get_premium_discount_zone(mtf_lows[-1].price, mtf_highs[-1].price, current_price)
-            if mtf_highs and mtf_lows
-            else "Equilibrium"
-        )
+        if mtf_highs and mtf_lows:
+            pd_zone = get_premium_discount_zone(mtf_lows[-1].price, mtf_highs[-1].price, current_price)
+        else:
+            pd_zone = "Equilibrium"
 
         # Early Sweep Detection to validate potential PD Array overrides
         pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
@@ -190,13 +201,22 @@ class ConfluenceEngine:
             or (htf_bias == "bearish" and swept_pool.pool_type == "EQH")
         )
 
-        # Strict SMC Rule: Never buy in Premium, never sell in Discount (unless swept liquidity validates early entry)
+        valid_ote = False
+        ote_entry_model_text = ""
+        if ltf_highs and ltf_lows:
+            ote_zone = calculate_ote_zone(ltf_lows[-1].price, ltf_highs[-1].price, htf_bias, self.symbol, self.ltf)
+            if is_within_range(current_price, ote_zone.ote_entry, ote_zone.ote_top):
+                valid_ote = True
+                ote_entry_model_text = f"OTE Tap ({ote_zone.ote_entry:.2f}–{ote_zone.ote_top:.2f})"
+
+        # Strict SMC Rule: Never buy in Premium, never sell in Discount
+        # (unless swept liquidity OR an OTE retracement setup overrides)
         if (htf_bias == "bullish" and pd_zone == "Premium") or (htf_bias == "bearish" and pd_zone == "Discount"):
-            if not valid_sweep:
+            if not valid_sweep and not valid_ote:
                 logger.info("signal_rejected_pd_array", direction=htf_bias, pd_zone=pd_zone)
                 return None
             else:
-                factors.append("PD Array Override (Liquidity Sweep)")
+                factors.append("PD Array Override (Liquidity Sweep / OTE)")
         else:
             factors.append(f"Optimal PD Zone ({pd_zone})")
             confluence_score += 10
@@ -246,7 +266,7 @@ class ConfluenceEngine:
 
         cisd_event = detect_cisd(df, valid_ob, self.symbol, self.ltf)
         if cisd_event:
-            factors.append("CISD Confirmed (50% Rejection)")
+            factors.append("CISD Confirmed")
             confluence_score += 15
             await structure_events.save_event(cisd_event)
 
@@ -269,15 +289,10 @@ class ConfluenceEngine:
             factors.append("Inducement (IDM) Swept")
             confluence_score += 15
 
-        highs = [s for s in swings_ltf if s.type == "high"]
-        lows = [s for s in swings_ltf if s.type == "low"]
-        if highs and lows:
-            ote_zone = calculate_ote_zone(lows[-1].price, highs[-1].price, valid_ob["direction"], self.symbol, self.ltf)
-
-            if is_within_range(current_price, ote_zone.ote_entry, ote_zone.ote_top):
-                entry_model = "OTE Retracement Tap"
-                factors.append(f"OTE Tap ({ote_zone.ote_entry:.2f}–{ote_zone.ote_top:.2f})")
-                confluence_score += 20
+        if valid_ote:
+            entry_model = "OTE Retracement Tap"
+            factors.append(ote_entry_model_text)
+            confluence_score += 20
 
         ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf) or htf_bias or "ranging"
         ltf_choch = detect_choch(df, swings_ltf, ltf_bias, self.symbol, self.ltf)

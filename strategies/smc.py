@@ -230,32 +230,18 @@ def calculate_ote_zone(
     swing_low: float, swing_high: float, direction: Literal["bullish", "bearish"], symbol: str, tf: str
 ) -> OTEZone:
     """Calculates the ICT Optimal Trade Entry (61.8% to 78.6%) for a given displacement leg."""
-    fibs = fibonacci_levels(swing_low, swing_high)
+    fibs = fibonacci_levels(swing_low, swing_high, direction)
 
-    if direction == "bullish":
-        return OTEZone(
-            symbol=symbol,
-            timeframe=tf,
-            direction=direction,
-            fib_0=swing_low,
-            fib_1=swing_high,
-            ote_entry=fibs["0.618"],
-            ote_mid=fibs["0.705"],
-            ote_top=fibs["0.786"],
-        )
-    else:
-        # Bearish OTE measures upward from the swing low into the premium portion of the leg
-        diff = swing_high - swing_low
-        return OTEZone(
-            symbol=symbol,
-            timeframe=tf,
-            direction=direction,
-            fib_0=swing_high,
-            fib_1=swing_low,
-            ote_entry=swing_low + (diff * 0.618),
-            ote_mid=swing_low + (diff * 0.705),
-            ote_top=swing_low + (diff * 0.786),
-        )
+    return OTEZone(
+        symbol=symbol,
+        timeframe=tf,
+        direction=direction,
+        fib_0=fibs["0.0"],
+        fib_1=fibs["1.0"],
+        ote_entry=fibs["0.618"],
+        ote_mid=fibs["0.705"],
+        ote_top=fibs["0.786"],
+    )
 
 
 def detect_liquidity_pools(

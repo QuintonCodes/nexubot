@@ -28,21 +28,18 @@ async def cmd_start(message: types.Message):
         "<b>Available Commands:</b>\n"
         "/status - View current engine state\n"
         "/subscribe - Upgrade to the VIP Signals channel\n"
-        "/bias - View current higher timeframe trend\n"
+        "/bias - View multi-timeframe trend matrix\n"
         "/session - View active market killzones\n"
         "/levels - View daily and weekly reference levels\n"
         "/signals - View the last 5 dispatched signals"
+        "/zones - View active unmitigated Supply/Demand zones"
     )
 
 
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: types.Message):
     """Public: Routes users to the direct Whop checkout for VIP Signals."""
-
-    # URL pointing directly to your Whop Nexubot Systems storefront
     checkout_url = "https://whop.com/checkout/plan_vUzndOAQpUt6Z"
-
-    # Construct the inline keyboard with the URL button
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="💳 Upgrade to VIP (ZAR 500/mo)", url=checkout_url)]]
     )
@@ -51,7 +48,7 @@ async def cmd_subscribe(message: types.Message):
     await message.reply(
         "🔐 <b>Unlock Nexubot VIP Signals</b>\n\n"
         "Get direct access to our premium automated Smart Money Concepts (SMC) "
-        "trading signals for XAUUSD and Nasdaq.\n\n"
+        "trading signals for XAUUSD.\n\n"
         "<b>How it works:</b>\n"
         "1. Tap the button below to pay securely via Whop (FICA compliant).\n"
         "2. After checkout, you will be redirected to your Nexubot Systems hub.\n"
@@ -63,37 +60,57 @@ async def cmd_subscribe(message: types.Message):
 
 @router.message(Command("status"))
 async def cmd_status(message: types.Message):
-    """Public: System health and config status."""
-    # Retrieve real-time usage metrics from the limiter singleton
+    """System health and config status (API Budgets restricted to Admins)."""
+    is_admin = message.from_user.id in settings.ADMIN_IDS
     usage = await rate_limiter.get_usage()
-    await message.reply(
+
+    text = (
         f"🟢 <b>Nexubot Status: ONLINE</b>\n\n"
         f"<b>Asset:</b> {settings.SYMBOLS[0]}\n"
         f"<b>Entry TF:</b> {settings.ENTRY_TIMEFRAME}\n"
         f"<b>HTF Bias TF:</b> {settings.HTF_TIMEFRAMES[0]}\n"
         f"<b>Shadow Mode:</b> {'Enabled 🔕' if settings.SHADOW_MODE else 'Disabled 🔔'}\n"
-        f"📊 <b>API Budget (Twelve Data):</b>\n"
-        f"<b>Calls Used:</b> {usage['current_calls']} / {usage['max_daily_calls']}\n"
-        f"<b>Remaining:</b> {usage['remaining_calls']} calls"
     )
+
+    if is_admin:
+        text += (
+            f"\n📊 <b>API Budget (Twelve Data):</b>\n"
+            f"<b>Calls Used:</b> {usage['current_calls']} / {usage['max_daily_calls']}\n"
+            f"<b>Remaining:</b> {usage['remaining_calls']} calls"
+        )
+
+    await message.reply(text)
 
 
 @router.message(Command("bias"))
 async def cmd_bias(message: types.Message):
     """Public: Current higher timeframe trend direction."""
     symbol = settings.SYMBOLS[0]
-    htf = settings.HTF_TIMEFRAMES[0]
-    bias = await structure_events.get_latest_bias(symbol, htf)
+    timeframes = [
+        settings.HTF_TIMEFRAMES[0],
+        settings.HTF_TIMEFRAMES[1],
+        settings.LTF_TIMEFRAMES[0],
+        settings.ENTRY_TIMEFRAME,
+    ]
 
-    if not bias:
-        df = await candle_store.get_candles(symbol, htf)
-        swings = detect_swings(df)
-        bias = classify_structure(df, swings)
+    text = f"🧭 <b>Multi-Timeframe Bias Matrix</b>\n\n<b>Asset:</b> {symbol}\n\n"
 
-    bias_str = bias.upper() if bias else "UNKNOWN"
-    emoji = "🐂" if bias == "bullish" else "🐻" if bias == "bearish" else "⚖️"
+    for tf in timeframes:
+        bias = await structure_events.get_latest_bias(symbol, tf)
 
-    await message.reply(f"🧭 <b>Current HTF Bias ({htf})</b>\n\n{symbol}: {emoji} <b>{bias_str}</b>")
+        if not bias:
+            df = await candle_store.get_candles(symbol, tf)
+            if not df.empty:
+                swings = detect_swings(df)
+                bias = classify_structure(df, swings)
+            else:
+                bias = "ranging"
+
+        bias_str = bias.upper() if bias else "RANGING"
+        emoji = "🐂" if bias == "bullish" else "🐻" if bias == "bearish" else "⚖️"
+        text += f"<b>{tf.upper():<5}</b> : {emoji} {bias_str}\n"
+
+    await message.reply(text)
 
 
 @router.message(Command("session"))
@@ -140,10 +157,13 @@ async def cmd_signals(message: types.Message):
         await message.reply("No recent signals found in the database.")
         return
 
-    text = f"📊 <b>Last 5 Signals ({symbol}):</b>\n\n"
+    text = f"📊 <b>Recent Signals ({symbol}):</b>\n\n"
     for sig in recent:
         dir_emoji = "🟢 BUY" if sig["direction"] == "buy" else "🔴 SELL"
-        text += f"<b>{dir_emoji}</b> @ {sig['entry_price']:,.2f} (Score: {sig['confluence_score']})\n"
+        status = sig.get("status", "active").upper()
+
+        text += f"<b>{dir_emoji}</b> @ {sig['entry_price']:,.2f} | <b>{status}</b>\n"
+        text += f"Model: {sig['entry_model']} (Score: {sig['confluence_score']})\n"
         text += f"⏰ {sig['timestamp'].strftime('%Y-%m-%d %H:%M UTC')}\n\n"
 
     await message.reply(text)

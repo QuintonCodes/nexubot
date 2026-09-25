@@ -4,7 +4,6 @@ Converts TradeSignal dataclasses into strictly formatted HTML messages.
 Handles separate formats for public subscribers and internal admin analytics.
 """
 
-from config.settings import settings
 from strategies.models import TradeSignal
 
 

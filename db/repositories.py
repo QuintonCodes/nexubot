@@ -55,6 +55,26 @@ class OrderBlockRepository:
             rows = await conn.fetch(query, symbol, timeframe)
             return [dict(row) for row in rows]
 
+    async def get_active_zones(self, symbol: str) -> List[Dict[str, Any]]:
+        """Fetches all active unmitigated Order Blocks across multiple timeframes."""
+        query = """
+            SELECT * FROM order_blocks
+            WHERE symbol = $1 AND mitigated = FALSE
+              AND origin_timestamp >= NOW() - INTERVAL '14 days'
+            ORDER BY
+              CASE timeframe
+                WHEN '4h' THEN 1
+                WHEN '1h' THEN 2
+                WHEN '15min' THEN 3
+                ELSE 4
+              END,
+              origin_timestamp DESC;
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol)
+            return [dict(row) for row in rows]
+
     async def get_active_breaker_blocks(self, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
         """Fetches previously mitigated blocks that are now eligible as Breaker Blocks."""
         query = """

@@ -29,22 +29,19 @@ router.message.filter(IsAdmin())
 
 @router.message(Command("zones"))
 async def cmd_zones(message: types.Message):
-    """Admin: Show all currently active, unmitigated Order Blocks."""
+    """Admin: View active unmitigated Order Blocks across MTF/HTF."""
     symbol = settings.SYMBOLS[0]
-    mtf = settings.HTF_TIMEFRAMES[1]
-    active_obs = await order_blocks.get_active_order_blocks(symbol, mtf)
+    zones = await order_blocks.get_active_zones(symbol)
 
-    if not active_obs:
-        await message.reply(f"No active unmitigated Order Blocks for {symbol} ({mtf}).")
+    if not zones:
+        await message.reply(f"No active unmitigated Order Blocks for {symbol}.")
         return
 
-    text = f"🧱 <b>Active {mtf} Order Blocks ({symbol}):</b>\n\n"
-    for ob in active_obs:
-        dir_emoji = "🟢" if ob["direction"] == "bullish" else "🔴"
-        # Using safely escaped quotes to prevent syntax errors on earlier Python versions
-        text += f"{dir_emoji} <b>{ob['direction'].upper()}</b>\n"
-        text += f"Range: {min(ob['ob_low'], ob['ob_high']):.2f} - {max(ob['ob_low'], ob['ob_high']):.2f}\n"
-        text += f"Mitigation (50%): {ob['ob_50']:.2f}\n\n"
+    text = f"🛡️ <b>Active Order Blocks ({symbol})</b>\n\n"
+    for z in zones[:15]:
+        emoji = "🟢 Demand (Buy)" if z["direction"] == "bullish" else "🔴 Supply (Sell)"
+        text += f"{emoji} | <b>{z['timeframe']}</b>\n"
+        text += f"Range: {z['ob_low']:.2f} - {z['ob_high']:.2f}\n\n"
 
     await message.reply(text)
 

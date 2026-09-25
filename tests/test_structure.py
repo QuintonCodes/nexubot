@@ -69,7 +69,7 @@ def test_detect_bos_bullish(bullish_bos_df):
     df_slice = bullish_bos_df.iloc[:35]
     swings = detect_swings(df_slice, lookback=3)
 
-    event = detect_bos(df_slice, swings, symbol="XAU/USD", tf="5min")
+    event = detect_bos(df_slice, swings, "bullish", symbol="XAU/USD", tf="5min")
 
     assert event is not None
     assert event.event_type == "BOS"
@@ -82,7 +82,7 @@ def test_detect_bos_bearish(bearish_choch_df):
     df_slice = bearish_choch_df.iloc[:35]
     swings = detect_swings(df_slice, lookback=3)
 
-    event = detect_bos(df_slice, swings, symbol="XAUUSD", tf="5min")
+    event = detect_bos(df_slice, swings, "bearish", symbol="XAUUSD", tf="5min")
 
     assert event is not None
     assert event.event_type == "BOS"
@@ -140,19 +140,24 @@ def test_detect_mss_unconfirmed_weak_candle(bearish_choch_df):
 
 
 def test_detect_cisd_bullish(dummy_ob_dict):
-    """Test that price touching the 50% line of an OB triggers a CISD event."""
-    # ob_50 = (2505 + 2495) / 2 = 2500.0
+    """Test that price closing above a bearish OB origin open triggers a bullish CISD."""
+    origin_time = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+    dummy_ob_dict["origin_timestamp"] = origin_time
+    dummy_ob_dict["direction"] = "bearish"  # Downward delivery state
+
     candles = pd.DataFrame(
         {
             "timestamp": [
-                datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+                origin_time,
                 datetime(2026, 9, 1, 10, 5, tzinfo=timezone.utc),
+                datetime(2026, 9, 1, 10, 10, tzinfo=timezone.utc),
             ],
-            "open": [2510.0, 2502.0],
-            "high": [2512.0, 2504.0],
-            "low": [2508.0, 2498.0],  # 2498 <= 2500 <= 2504
-            "close": [2509.0, 2501.0],
-            "volume": [100.0, 200.0],
+            "open": [2500.0, 2490.0, 2495.0],
+            "high": [2505.0, 2495.0, 2510.0],
+            "low": [2490.0, 2480.0, 2490.0],
+            # Close starts below the origin open (2500.0) then closes powerfully above it
+            "close": [2490.0, 2495.0, 2505.0],
+            "volume": [100.0, 200.0, 300.0],
         }
     )
 
@@ -161,22 +166,29 @@ def test_detect_cisd_bullish(dummy_ob_dict):
     assert event is not None
     assert event.event_type == "CISD"
     assert event.direction == "bullish"
-    assert event.price_level == 2500.0
+    assert event.price_level == 2500.0  # Matches origin open
 
 
 def test_detect_cisd_bearish(dummy_breaker_dict):
-    """Test CISD trigger for a bearish order block."""
+    """Test that price closing below a bullish OB origin open triggers a bearish CISD."""
+
+    origin_time = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+    dummy_breaker_dict["origin_timestamp"] = origin_time
+    dummy_breaker_dict["direction"] = "bullish"  # Upward delivery state
+
     candles = pd.DataFrame(
         {
             "timestamp": [
-                datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+                origin_time,
                 datetime(2026, 9, 1, 10, 5, tzinfo=timezone.utc),
+                datetime(2026, 9, 1, 10, 10, tzinfo=timezone.utc),
             ],
-            "open": [2490.0, 2498.0],
-            "high": [2492.0, 2503.0],  # 2498 <= 2500 <= 2503
-            "low": [2488.0, 2497.0],
-            "close": [2491.0, 2501.0],
-            "volume": [100.0, 200.0],
+            "open": [2500.0, 2510.0, 2505.0],
+            "high": [2510.0, 2520.0, 2510.0],
+            "low": [2495.0, 2505.0, 2490.0],
+            # Close starts above the origin open (2500.0) then closes powerfully below it
+            "close": [2510.0, 2505.0, 2495.0],
+            "volume": [100.0, 200.0, 300.0],
         }
     )
 
@@ -185,4 +197,4 @@ def test_detect_cisd_bearish(dummy_breaker_dict):
     assert event is not None
     assert event.event_type == "CISD"
     assert event.direction == "bearish"
-    assert event.price_level == 2500.0
+    assert event.price_level == 2500.0  # Matches origin open

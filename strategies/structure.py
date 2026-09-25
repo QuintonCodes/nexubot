@@ -93,83 +93,108 @@ def classify_structure(df: pd.DataFrame, swings: List[SwingPoint]) -> Literal["b
     return bias
 
 
-def detect_bos(df: pd.DataFrame, swings: List[SwingPoint], symbol: str, tf: str) -> Optional[StructureEvent]:
+def detect_bos(
+    df: pd.DataFrame, swings: List[SwingPoint], current_bias: str, symbol: str, tf: str
+) -> Optional[StructureEvent]:
     """
     Detects a Break of Structure (BOS) occurring on the most recently closed candle.
     A BOS is confirmed ONLY if the candle closes beyond the last major swing point.
     """
-    if not swings or len(df) < 2:
+    if not swings or len(df) < 2 or current_bias == "ranging":
         return None
 
     last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+
     highs = [s for s in swings if s.type == "high"]
     lows = [s for s in swings if s.type == "low"]
 
     if not highs or not lows:
         return None
 
-    last_high = highs[-1]
-    last_low = lows[-1]
-
     # Bullish BOS: Close above last swing high
-    if last_candle["close"] > last_high.price and df.iloc[-2]["close"] <= last_high.price:
-        return StructureEvent(
-            event_type="BOS",
-            direction="bullish",
-            price_level=last_high.price,
-            timestamp=last_candle["timestamp"],
-            symbol=symbol,
-            timeframe=tf,
-            confirmed=True,
-        )
+    if current_bias == "bullish":
+        last_high = highs[-1]
+        if last_candle["close"] > last_high.price and prev_candle["close"] <= last_high.price:
+            return StructureEvent(
+                event_type="BOS",
+                direction="bullish",
+                price_level=last_high.price,
+                timestamp=last_candle["timestamp"],
+                symbol=symbol,
+                timeframe=tf,
+                confirmed=True,
+            )
 
     # Bearish BOS: Close below last swing low
-    if last_candle["close"] < last_low.price and df.iloc[-2]["close"] >= last_low.price:
-        return StructureEvent(
-            event_type="BOS",
-            direction="bearish",
-            price_level=last_low.price,
-            timestamp=last_candle["timestamp"],
-            symbol=symbol,
-            timeframe=tf,
-            confirmed=True,
-        )
+    elif current_bias == "bearish":
+        last_low = lows[-1]
+        if last_candle["close"] < last_low.price and prev_candle["close"] >= last_low.price:
+            return StructureEvent(
+                event_type="BOS",
+                direction="bearish",
+                price_level=last_low.price,
+                timestamp=last_candle["timestamp"],
+                symbol=symbol,
+                timeframe=tf,
+                confirmed=True,
+            )
 
     return None
 
 
 def detect_choch(
-    df: pd.DataFrame, swings: List[SwingPoint], current_structure: str, symbol: str, tf: str
+    df: pd.DataFrame, swings: List[SwingPoint], current_bias: str, symbol: str, tf: str
 ) -> Optional[StructureEvent]:
     """
-    Detects a Change of Character (CHoCH).
-    This is an opposing structure break (e.g., a bearish BOS while the structure was bullish).
+    Detects a Change of Character (CHoCH) by monitoring for a break of the opposing pivot point.
     """
-    bos_event = detect_bos(df, swings, symbol, tf)
-    if not bos_event:
+    if not swings or len(df) < 2 or current_bias == "ranging":
         return None
 
-    if current_structure == "bullish" and bos_event.direction == "bearish":
-        bos_event.event_type = "CHoCH"
-        return bos_event
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
 
-    if current_structure == "bearish" and bos_event.direction == "bullish":
-        bos_event.event_type = "CHoCH"
-        return bos_event
+    highs = [s for s in swings if s.type == "high"]
+    lows = [s for s in swings if s.type == "low"]
+
+    if not highs or not lows:
+        return None
+
+    if current_bias == "bullish":
+        last_low = lows[-1]  # The last Higher Low (HL)
+        if last_candle["close"] < last_low.price and prev_candle["close"] >= last_low.price:
+            return StructureEvent(
+                event_type="CHoCH",
+                direction="bearish",
+                price_level=last_low.price,
+                timestamp=last_candle["timestamp"],
+                symbol=symbol,
+                timeframe=tf,
+                confirmed=True,
+            )
+
+    elif current_bias == "bearish":
+        last_high = highs[-1]  # The last Lower High (LH)
+        if last_candle["close"] > last_high.price and prev_candle["close"] <= last_high.price:
+            return StructureEvent(
+                event_type="CHoCH",
+                direction="bullish",
+                price_level=last_high.price,
+                timestamp=last_candle["timestamp"],
+                symbol=symbol,
+                timeframe=tf,
+                confirmed=True,
+            )
 
     return None
 
 
 def detect_mss(
-    df: pd.DataFrame,
-    swings: List[SwingPoint],
-    current_structure: str,
-    symbol: str,
-    tf: str,
-    displacement_pips: float = 20.0,
+    df: pd.DataFrame, swings: List[SwingPoint], current_bias: str, symbol: str, tf: str, displacement_pips: float = 20.0
 ) -> Optional[StructureEvent]:
     """Detects Market Structure Shift (MSS): CHoCH accompanied by strong momentum."""
-    choch = detect_choch(df, swings, current_structure, symbol, tf)
+    choch = detect_choch(df, swings, current_bias, symbol, tf)
     if not choch:
         return None
 
@@ -184,30 +209,41 @@ def detect_mss(
 
 
 def detect_cisd(df: pd.DataFrame, ob: dict, symbol: str, tf: str) -> Optional[StructureEvent]:
-    """Detects Change in State of Delivery (CISD) via 50% re-encroachment."""
+    """
+    Detects Change in State of Delivery (CISD) via displacement candle close.
+    Validates if delivery shifts by closing through the opening price of the origin candle.
+    """
     if len(df) < 2:
         return None
 
     last_candle = df.iloc[-1]
-    ob_50 = (ob["ob_high"] + ob["ob_low"]) / 2.0
+    prev_candle = df.iloc[-2]
 
-    # Verify if delivery shifted by rejecting off the OB's equilibrium
-    if ob["direction"] == "bullish" and last_candle["low"] <= ob_50 <= last_candle["high"]:
+    # Find the origin candle that formed the OB
+    origin_matches = df[df["timestamp"] == ob["origin_timestamp"]]
+    if origin_matches.empty:
+        return None
+
+    ob_open = origin_matches.iloc[0]["open"]
+
+    # If bullish OB (down candle), delivery shifts bearish if price closes BELOW the open of that down candle
+    if ob["direction"] == "bullish" and last_candle["close"] < ob_open and prev_candle["close"] >= ob_open:
         return StructureEvent(
             event_type="CISD",
-            direction="bullish",
-            price_level=ob_50,
+            direction="bearish",
+            price_level=ob_open,
             timestamp=last_candle["timestamp"],
             symbol=symbol,
             timeframe=tf,
             confirmed=True,
         )
 
-    elif ob["direction"] == "bearish" and last_candle["low"] <= ob_50 <= last_candle["high"]:
+    # If bearish OB (up candle), delivery shifts bullish if price closes ABOVE the open of that up candle
+    elif ob["direction"] == "bearish" and last_candle["close"] > ob_open and prev_candle["close"] <= ob_open:
         return StructureEvent(
             event_type="CISD",
-            direction="bearish",
-            price_level=ob_50,
+            direction="bullish",
+            price_level=ob_open,
             timestamp=last_candle["timestamp"],
             symbol=symbol,
             timeframe=tf,

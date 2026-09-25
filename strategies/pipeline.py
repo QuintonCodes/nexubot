@@ -11,6 +11,7 @@ from data.normalizer import normalize_ohlcv
 from db.repositories import signals
 from strategies.confluence import ConfluenceEngine
 from utils.logger import logger
+from utils.math_helpers import price_to_pips
 
 # Evaluated during static type checking, bypassed during runtime module initialization
 if TYPE_CHECKING:
@@ -18,9 +19,8 @@ if TYPE_CHECKING:
 
 
 def _calc_pips(sig: dict, tp_level: int) -> float:
-    # Safely convert price differential to estimated PIP values
-    multiplier = 10 if "XAU" in sig["symbol"] else (100 if "JPY" in sig["symbol"] else 10000)
-    return abs(sig["entry_price"] - sig[f"take_profit_{tp_level}"]) * multiplier
+    # Routes calculations through the verified math_helpers engine to prevent multiplier mismatches
+    return price_to_pips(abs(sig["entry_price"] - sig[f"take_profit_{tp_level}"]), sig["symbol"])
 
 
 async def monitor_active_signals(symbol: str, current_price: float) -> None:

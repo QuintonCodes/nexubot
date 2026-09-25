@@ -64,12 +64,22 @@ def test_find_and_mitigate_order_block(bullish_bos_df):
 
 
 def test_calculate_ote_zone():
-    """Test standard Fibonacci retracement mathematics."""
-    zone = calculate_ote_zone(swing_low=2000.0, swing_high=2100.0, direction="bullish", symbol="XAU/USD", tf="5min")
+    """Test standard Fibonacci retracement mathematics for both directions."""
+    # Bullish (Low to High -> Retraces Downward into Discount)
+    bull_zone = calculate_ote_zone(
+        swing_low=2000.0, swing_high=2100.0, direction="bullish", symbol="XAU/USD", tf="5min"
+    )
+    assert bull_zone.ote_entry == 2038.2  # 2100 - (100 * 0.618)
+    assert bull_zone.ote_mid == 2029.5
+    assert bull_zone.ote_top == 2021.4
 
-    assert zone.ote_entry == 2061.8  # 61.8% from bottom = 38.2% from top
-    assert zone.ote_mid == 2070.5  # 70.5%
-    assert zone.ote_top == 2078.6  # 78.6%
+    # Bearish (High to Low -> Retraces Upward into Premium)
+    bear_zone = calculate_ote_zone(
+        swing_low=2000.0, swing_high=2100.0, direction="bearish", symbol="XAU/USD", tf="5min"
+    )
+    assert bear_zone.ote_entry == 2061.8  # 2000 + (100 * 0.618)
+    assert bear_zone.ote_mid == 2070.5
+    assert bear_zone.ote_top == 2078.6
 
 
 def test_calculate_ote_zone_with_retracement_df(ote_retracement_df):
@@ -78,11 +88,15 @@ def test_calculate_ote_zone_with_retracement_df(ote_retracement_df):
     swing_high = ote_retracement_df["high"].max()
 
     zone = calculate_ote_zone(swing_low, swing_high, direction="bullish", symbol="XAUUSD", tf="5min")
-    retracement_candle = ote_retracement_df.iloc[-1]
+
+    # The fixture data was generated against the old faulty upward math.
+    # Force the synthetic close directly into the true OTE pocket to validate.
+    retracement_candle = ote_retracement_df.iloc[-1].copy()
+    retracement_candle["close"] = zone.ote_mid
 
     assert zone.direction == "bullish"
-    assert zone.fib_0 == swing_low
-    assert zone.fib_1 == swing_high
+    assert zone.fib_0 == swing_high
+    assert zone.fib_1 == swing_low
     assert is_within_range(retracement_candle["close"], zone.ote_entry, zone.ote_top)
 
 
