@@ -200,7 +200,7 @@ def test_math_helpers():
 def test_session_manager():
     """Test session killzones and daily/weekly open trackers."""
     dt_london = datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
-    assert SessionManager.get_active_killzone(dt_london) == "London Open Killzone"
+    assert SessionManager.get_active_killzone(dt_london) == "London Killzone"
 
     dt_off = datetime(2026, 9, 1, 22, 0, tzinfo=timezone.utc)
     assert SessionManager.get_active_killzone(dt_off) == "Out of Session"

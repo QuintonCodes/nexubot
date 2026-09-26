@@ -65,7 +65,7 @@ async def cmd_subscribe(message: types.Message):
 @router.message(Command("status"))
 async def cmd_status(message: types.Message):
     """System health and config status (API Budgets restricted to Admins)."""
-    is_admin = message.from_user.id in settings.ADMIN_IDS
+    is_admin = message.from_user.id == settings.TELEGRAM_ADMIN_ID
     usage = await rate_limiter.get_usage()
 
     text = (

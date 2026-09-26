@@ -11,20 +11,26 @@ from typing import Dict
 class SessionManager:
     # Based on standard UTC time mappings for ICT Killzones
     KILLZONES = {
-        "Asia Range": (0, 4),
-        "London Open Killzone": (7, 9),
-        "London Close": (11, 12),
-        "NY AM Killzone": (13, 15),
-        "ICT Silver Bullet (PM)": (14, 15),
-        "NY PM / London Close": (17, 20),
+        "Asia Killzone": (0, 4),  # 00:00 to 04:00 UTC
+        "London Killzone": (6, 9),  # 06:00 to 09:00 UTC
+        "NY AM Killzone": (13.5, 15),  # 13:30 to 15:00 UTC
+        "NY Lunch Killzone": (16, 17),  # 16:00 to 17:00 UTC
+        "NY PM / London Close": (17.5, 20),  # 17:30 to 20:00 UTC
     }
 
     @staticmethod
     def get_active_killzone(dt_utc: datetime) -> str:
-        """Returns the active session killzone name based on the current UTC hour."""
+        """
+        Returns the active session killzone name based on the current UTC hour.
+        Uses decimal hours (e.g. 13.5 = 13:30) to correctly handle
+        sessions that start or end on the half-hour mark.
+        """
+        decimal_hour = dt_utc.hour + dt_utc.minute / 60
+
         for name, (start, end) in SessionManager.KILLZONES.items():
-            if start <= dt_utc.hour < end:
+            if start <= decimal_hour < end:
                 return name
+
         return "Out of Session"
 
     @staticmethod

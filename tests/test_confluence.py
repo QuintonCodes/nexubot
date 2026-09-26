@@ -49,7 +49,7 @@ async def test_scan_ltf_entry_success(
     mock_get_opposing_obs.return_value = []
     mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
-    mock_killzone.return_value = "London Open Killzone"
+    mock_killzone.return_value = "London Killzone"
 
     # Mock sweeps and structural shift to reach minimum confluence threshold (>= 70)
     mock_detect_sweep.return_value = LiquidityPool(
@@ -161,7 +161,7 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
     mock_get_opposing_obs.return_value = []
     mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
-    mock_killzone.return_value = "London Open Killzone"
+    mock_killzone.return_value = "London Killzone"
 
     mock_detect_sweep.return_value = LiquidityPool(
         symbol="XAUUSD",
@@ -271,7 +271,7 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     mock_get_opposing_obs.return_value = []
     mock_get_active_pools.return_value = []
     mock_is_duplicate.return_value = False
-    mock_killzone.return_value = "London Open Killzone"
+    mock_killzone.return_value = "London Killzone"
 
     mock_detect_sweep.return_value = LiquidityPool(
         symbol="XAUUSD",
