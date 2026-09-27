@@ -3,6 +3,7 @@ Telegram Bot Command Handlers.
 Routes user commands to the correct database queries or engine tasks.
 """
 
+import pandas as pd
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -112,7 +113,7 @@ async def cmd_bias(message: types.Message):
 
         bias_str = bias.upper() if bias else "RANGING"
         emoji = "🐂" if bias == "bullish" else "🐻" if bias == "bearish" else "⚖️"
-        text += f"<b>{tf.upper():<5}</b> : {emoji} {bias_str}\n"
+        text += f"<b>{tf.upper():<5}</b>: {emoji} {bias_str}\n"
 
     await message.reply(text)
 
@@ -123,15 +124,39 @@ async def cmd_session(message: types.Message):
     """Exposes Session Killzone tracking."""
     now_utc = datetime.now(timezone.utc)
     active = SessionManager.get_active_killzone(now_utc)
-
-    # Localize strictly for the Telegram output
     now_sast = now_utc.astimezone(ZoneInfo("Africa/Johannesburg"))
+    symbol = settings.SYMBOLS[0]
 
     msg = (
-        f"🕒 <b>SMC Killzone Tracker (UTC)</b>\n\n"
+        f"🕒 <b>SMC Killzone Tracker</b>\n\n"
         f"<b>Current Time (SAST):</b> {now_sast.strftime('%H:%M')}\n"
-        f"<b>Active Zone:</b> {active if active != 'Out of Session' else 'None (Ranging expected)'}"
+        f"<b>Current Time (UTC):</b> {now_utc.strftime('%H:%M')}\n"
+        f"<b>Active Zone:</b> {active}\n"
     )
+
+    # Strictly show Killzone Highs and Lows ONLY when currently inside an active Killzone
+    if active in SessionManager.KILLZONES:
+        df = await candle_store.get_candles(symbol, settings.ENTRY_TIMEFRAME)
+        if df.empty or "timestamp" not in df.columns:
+            df = await candle_store.get_candles(symbol, "15min")
+
+        kz_levels = SessionManager.get_current_session_range(df, now_utc)
+
+        if kz_levels:
+            msg += (
+                f"\n🎯 <b>{active} Liquidity Extremes ({symbol}):</b>\n"
+                f"<b>Session High:</b> {kz_levels['high']:,.2f}\n"
+                f"<b>Session Low:</b> {kz_levels['low']:,.2f}\n"
+                f"<b>Session Range:</b> {abs(kz_levels['high'] - kz_levels['low']):,.2f} pts\n"
+                f"<b>Current Price:</b> {kz_levels['last']:,.2f}\n"
+            )
+        else:
+            msg += "\n🎯 <b>Session Range:</b> Accumulating initial candles...\n"
+    elif active == "Market Closed":
+        msg += "\n🔒 <i>Market is closed for the weekend (Friday 22:00 UTC – Sunday 22:00 UTC).</i>"
+    else:
+        msg += "\n💤 <i>Currently out of session. Session High/Low tracking is inactive.</i>"
+
     await message.reply(msg)
 
 

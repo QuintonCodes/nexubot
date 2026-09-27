@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS liquidity_pools (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     symbol TEXT NOT NULL,
     timeframe TEXT NOT NULL,
-    pool_type TEXT NOT NULL CHECK (pool_type IN ('EQH', 'EQL')),
+    pool_type TEXT NOT NULL CHECK (pool_type IN ('EQH', 'EQL', 'KZ_HIGH', 'KZ_LOW')),
     price_level DECIMAL(18, 5) NOT NULL,
     swept BOOLEAN NOT NULL DEFAULT FALSE,
     origin_timestamp TIMESTAMPTZ NOT NULL,

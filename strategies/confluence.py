@@ -16,6 +16,7 @@ from strategies.smc import (
     calculate_ote_zone,
     detect_fair_value_gaps,
     detect_inducement,
+    detect_killzone_liquidity,
     detect_liquidity_pools,
     detect_liquidity_sweep,
     find_order_blocks,
@@ -95,6 +96,9 @@ class ConfluenceEngine:
 
     async def scan_htf(self) -> None:
         """Run every 4 hours. Updates overarching bias."""
+        if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+            return
+
         df = await candle_store.get_candles(self.symbol, self.htf)
         if len(df) < 20:
             return
@@ -105,6 +109,9 @@ class ConfluenceEngine:
 
     async def scan_mtf(self) -> None:
         """Run every 1 hour. Finds new Order Blocks and converts validated structures to Breakers."""
+        if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+            return
+
         df = await candle_store.get_candles(self.symbol, self.mtf)
         if len(df) < 20:
             return
@@ -130,6 +137,9 @@ class ConfluenceEngine:
 
     async def scan_mtf_confirmation(self) -> None:
         """Run every 15 minutes to evaluate MTF confirmation layer and detect local Order Blocks."""
+        if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+            return
+
         df = await candle_store.get_candles(self.symbol, self.mtf_conf)
         if len(df) < 20:
             return
@@ -153,6 +163,9 @@ class ConfluenceEngine:
 
     async def scan_ltf_entry(self) -> Optional[TradeSignal]:
         """Evaluates SMC confluence with decoupled 1H directional anchoring."""
+        if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+            return None
+
         df = await candle_store.get_candles(self.symbol, self.ltf)
         if len(df) < 20:
             return None
@@ -186,10 +199,12 @@ class ConfluenceEngine:
 
         # Fetch HTF Boundaries: Order Blocks (Barriers) and Liquidity Pools (Magnets)
         opposing_dir = "bearish" if trade_bias == "bullish" else "bullish"
-        target_pool_type = "EQH" if trade_bias == "bullish" else "EQL"
+        target_pool_types = ["EQH", "KZ_HIGH"] if trade_bias == "bullish" else ["EQL", "KZ_LOW"]
 
         opposing_htf_obs = await order_blocks.get_opposing_htf_obs(self.symbol, [self.htf, self.mtf], opposing_dir)
-        htf_pools = await liquidity_pools.get_active_pools(self.symbol, [self.htf, self.mtf], target_pool_type)
+        htf_pools = await liquidity_pools.get_active_pools(
+            self.symbol, [self.htf, self.mtf, self.ltf], target_pool_types
+        )
 
         nearest_barrier = None
         nearest_pool = None
@@ -250,8 +265,8 @@ class ConfluenceEngine:
                 factors.append(f"Runway Clear ({runaway_dist:.1f} pts to HTF POI)")
 
         if nearest_pool is not None:
-            factors.append(f"HTF Draw on Liquidity ({target_pool_type} @ {nearest_pool:.2f})")
-            confluence_score += 10  # Bonus points for a clear HTF magnet
+            factors.append(f"Draw on Liquidity @ {nearest_pool:.2f}")
+            confluence_score += 10
 
         # 4. Premium / Discount Evaluation (1H MTF Dealing Range)
         mtf_df = await candle_store.get_candles(self.symbol, self.mtf)
@@ -265,12 +280,17 @@ class ConfluenceEngine:
             pd_zone = "Equilibrium"
 
         pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
-        pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, pip_tol)
-        swept_pool = detect_liquidity_sweep(df, pools)
+        standard_pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, pip_tol)
+        kz_pools = detect_killzone_liquidity(df, self.symbol, self.ltf)
 
+        all_ltf_pools = standard_pools + kz_pools
+        for pool in all_ltf_pools:
+            await liquidity_pools.save_pool(pool)
+
+        swept_pool = detect_liquidity_sweep(df, all_ltf_pools)
         valid_sweep = swept_pool and (
-            (trade_bias == "bullish" and swept_pool.pool_type == "EQL")
-            or (trade_bias == "bearish" and swept_pool.pool_type == "EQH")
+            (trade_bias == "bullish" and swept_pool.pool_type in ["EQL", "KZ_LOW"])
+            or (trade_bias == "bearish" and swept_pool.pool_type in ["EQH", "KZ_HIGH"])
         )
 
         valid_ote = False
@@ -283,8 +303,9 @@ class ConfluenceEngine:
 
         if (trade_bias == "bullish" and pd_zone == "Premium") or (trade_bias == "bearish" and pd_zone == "Discount"):
             if not valid_sweep and not valid_ote:
-                logger.info("signal_rejected_pd_array", direction=trade_bias, pd_zone=pd_zone)
-                return None
+                logger.info("pd_array_penalty", direction=trade_bias, pd_zone=pd_zone)
+                factors.append(f"Sub-optimal PD Zone Penalty ({pd_zone})")
+                confluence_score -= 10
             else:
                 factors.append("PD Array Override (Liquidity Sweep / OTE)")
         else:
@@ -292,7 +313,7 @@ class ConfluenceEngine:
             confluence_score += 10
 
         active_session = SessionManager.get_active_killzone(datetime.now(timezone.utc))
-        if active_session != "Out of Session":
+        if active_session != "Out of Session" and active_session != "Market Closed":
             factors.append(f"Killzone Active ({active_session})")
             confluence_score += 5
 
@@ -373,7 +394,7 @@ class ConfluenceEngine:
             confluence_score += 10
 
         # Adjust score thresholds slightly to account for the PD array logic shift
-        if active_session == "Out of Session":
+        if active_session in ["Out of Session", "Market Closed"]:
             min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 75)
         else:
             min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 65)

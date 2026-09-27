@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from strategies.models import FVG, LiquidityPool, OrderBlock, OTEZone, SwingPoint, TradeSignal
+from strategies.sessions import SessionManager
 from utils.math_helpers import calculate_atr, calculate_rrr, fibonacci_levels, price_to_pips
 
 
@@ -269,6 +270,7 @@ def detect_liquidity_pools(
                                 touch_count=2,
                                 swept=False,
                                 sweep_timestamp=None,
+                                origin_timestamp=rh.timestamp,
                             )
                         )
                         break
@@ -290,9 +292,73 @@ def detect_liquidity_pools(
                                 touch_count=2,
                                 swept=False,
                                 sweep_timestamp=None,
+                                origin_timestamp=rl.timestamp,
                             )
                         )
                         break
+
+    return pools
+
+
+def detect_killzone_liquidity(df: pd.DataFrame, symbol: str, tf: str) -> List[LiquidityPool]:
+    """Detects historical Killzone highs and lows across the last 3 days to form liquidity pools."""
+    pools = []
+    if df.empty:
+        return pools
+
+    df_dates = df["timestamp"].dt.date
+    recent_dates = df_dates.unique()[-3:]
+
+    for date in recent_dates:
+        day_df = df[df_dates == date]
+        for kz_name, (start, end) in SessionManager.KILLZONES.items():
+
+            def in_kz(ts):
+                dh = ts.hour + ts.minute / 60.0
+                return start <= dh < end
+
+            kz_mask = day_df["timestamp"].apply(in_kz)
+            kz_candles = day_df[kz_mask]
+
+            if kz_candles.empty:
+                continue
+
+            # Check if Killzone has fully passed before establishing its high/low as a pool
+            abs_last_ts = df["timestamp"].iloc[-1]
+            if abs_last_ts.date() == date and (abs_last_ts.hour + abs_last_ts.minute / 60.0) < end:
+                continue
+
+            high_idx = kz_candles["high"].idxmax()
+            high_row = kz_candles.loc[high_idx]
+            pools.append(
+                LiquidityPool(
+                    symbol=symbol,
+                    timeframe=tf,
+                    pool_type="KZ_HIGH",
+                    price_level=high_row["high"],
+                    price_tolerance=0.0,
+                    touch_count=1,
+                    swept=False,
+                    sweep_timestamp=None,
+                    origin_timestamp=high_row["timestamp"],
+                )
+            )
+
+            low_idx = kz_candles["low"].idxmin()
+            low_row = kz_candles.loc[low_idx]
+            pools.append(
+                LiquidityPool(
+                    symbol=symbol,
+                    timeframe=tf,
+                    pool_type="KZ_LOW",
+                    price_level=low_row["low"],
+                    price_tolerance=0.0,
+                    touch_count=1,
+                    swept=False,
+                    sweep_timestamp=None,
+                    origin_timestamp=low_row["timestamp"],
+                )
+            )
 
     return pools
 
@@ -309,13 +375,13 @@ def detect_liquidity_sweep(df: pd.DataFrame, pools: List[LiquidityPool]) -> Opti
             continue
 
         for _, candle in recent_candles.iterrows():
-            if pool.pool_type == "EQH":
+            if pool.pool_type in ["EQH", "KZ_HIGH"]:
                 if candle["high"] > pool.price_level and candle["close"] < pool.price_level:
                     pool.swept = True
                     pool.sweep_timestamp = candle["timestamp"]
                     return pool
 
-            elif pool.pool_type == "EQL":
+            elif pool.pool_type in ["EQL", "KZ_LOW"]:
                 if candle["low"] < pool.price_level and candle["close"] > pool.price_level:
                     pool.swept = True
                     pool.sweep_timestamp = candle["timestamp"]

@@ -5,7 +5,7 @@ Tracks high-probability liquidity windows and daily/weekly opening gaps.
 
 import pandas as pd
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 
 class SessionManager:
@@ -15,16 +15,35 @@ class SessionManager:
         "London Killzone": (6, 9),  # 06:00 to 09:00 UTC
         "NY AM Killzone": (13.5, 15),  # 13:30 to 15:00 UTC
         "NY Lunch Killzone": (16, 17),  # 16:00 to 17:00 UTC
-        "NY PM / London Close": (17.5, 20),  # 17:30 to 20:00 UTC
+        "NY PM Killzone": (17.5, 20),  # 17:30 to 20:00 UTC
     }
+
+    @staticmethod
+    def is_market_open(current_time: datetime) -> bool:
+        """Evaluates if the current UTC time falls within active trading hours (24/5)."""
+        weekday: int = current_time.weekday()
+        hour: int = current_time.hour
+
+        # Friday after 22:00 UTC
+        if weekday == 4 and hour >= 22:
+            return False
+        # Saturday all day
+        if weekday == 5:
+            return False
+        # Sunday before 22:00 UTC
+        if weekday == 6 and hour < 22:
+            return False
+
+        return True
 
     @staticmethod
     def get_active_killzone(dt_utc: datetime) -> str:
         """
         Returns the active session killzone name based on the current UTC hour.
-        Uses decimal hours (e.g. 13.5 = 13:30) to correctly handle
-        sessions that start or end on the half-hour mark.
         """
+        if not SessionManager.is_market_open(dt_utc):
+            return "Market Closed"
+
         decimal_hour = dt_utc.hour + dt_utc.minute / 60
 
         for name, (start, end) in SessionManager.KILLZONES.items():
@@ -32,6 +51,35 @@ class SessionManager:
                 return name
 
         return "Out of Session"
+
+    @staticmethod
+    def get_current_session_range(df: pd.DataFrame, dt_utc: datetime) -> Optional[Dict[str, float]]:
+        """
+        Calculates the current session's high and low if within an active killzone.
+        Returns None if out of session, market closed, or if no candles exist for the active window.
+        """
+        active = SessionManager.get_active_killzone(dt_utc)
+        if active not in SessionManager.KILLZONES or df.empty or "timestamp" not in df.columns:
+            return None
+
+        start, end = SessionManager.KILLZONES[active]
+        ts_series = pd.to_datetime(df["timestamp"])
+        today_utc = dt_utc.date()
+        decimal_hour = ts_series.dt.hour + ts_series.dt.minute / 60.0
+
+        mask = (ts_series.dt.date == today_utc) & (decimal_hour >= start) & (decimal_hour < end)
+        kz_candles = df[mask]
+
+        if kz_candles.empty:
+            return None
+
+        return {
+            "session": active,
+            "high": float(kz_candles["high"].max()),
+            "low": float(kz_candles["low"].min()),
+            "open": float(kz_candles.iloc[0]["open"]),
+            "last": float(kz_candles.iloc[-1]["close"]),
+        }
 
     @staticmethod
     def get_daily_weekly_open(df: pd.DataFrame) -> Dict[str, float]:

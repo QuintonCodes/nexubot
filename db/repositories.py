@@ -269,22 +269,22 @@ class LiquidityPoolRepository:
         """
         db_pool = get_pool()
         async with db_pool.acquire() as conn:
-            origin = pool.sweep_timestamp or datetime.now(timezone.utc)
+            origin = pool.origin_timestamp or pool.sweep_timestamp or datetime.now(timezone.utc)
             await conn.execute(query, pool.symbol, pool.timeframe, pool.pool_type, pool.price_level, origin, False)
 
-    async def get_active_pools(self, symbol: str, timeframes: List[str], pool_type: str) -> List[Dict[str, Any]]:
-        """Queries active, unswept liquidity pools across specified HTF timeframes."""
+    async def get_active_pools(self, symbol: str, timeframes: List[str], pool_types: List[str]) -> List[Dict[str, Any]]:
+        """Queries active, unswept liquidity pools across specified timeframes and types (EQH, EQL, KZ_HIGH)."""
         query = """
             SELECT * FROM liquidity_pools
             WHERE symbol = $1
               AND timeframe = ANY($2::text[])
-              AND pool_type = $3
+              AND pool_type = ANY($3::text[])
               AND swept = FALSE
             ORDER BY origin_timestamp DESC;
         """
         pool = get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(query, symbol, timeframes, pool_type)
+            rows = await conn.fetch(query, symbol, timeframes, pool_types)
             return [dict(row) for row in rows]
 
 

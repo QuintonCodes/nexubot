@@ -24,7 +24,11 @@ from strategies.models import LiquidityPool, StructureEvent
 @patch("strategies.confluence.SessionManager.get_active_killzone")
 @patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
 @patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_killzone_liquidity")
+@patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_ltf_entry_success(
+    mock_is_market_open,
+    mock_detect_kz,
     mock_get_active_pools,
     mock_get_opposing_obs,
     mock_killzone,
@@ -40,6 +44,9 @@ async def test_scan_ltf_entry_success(
     bullish_bos_df,
 ):
     """Test that a signal is generated when price enters an active, HTF-aligned OB with high confluence."""
+    mock_is_market_open.return_value = True
+    mock_detect_kz.return_value = []
+
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
@@ -89,36 +96,62 @@ async def test_scan_ltf_entry_success(
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
-@patch("strategies.confluence.order_blocks.get_active_breaker_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
+@patch("strategies.confluence.signals.save_signal", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.save_pool", new_callable=AsyncMock)
 @patch("strategies.confluence.detect_liquidity_sweep")
+@patch("strategies.confluence.detect_choch")
+@patch("strategies.confluence.SessionManager.get_active_killzone")
 @patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
 @patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
-async def test_scan_ltf_entry_rejected_premium_discount(
+@patch("strategies.confluence.detect_killzone_liquidity")
+@patch("strategies.confluence.SessionManager.is_market_open")
+async def test_scan_ltf_entry_penalized_premium_discount(
+    mock_is_market_open,
+    mock_detect_kz,
     mock_get_active_pools,
     mock_get_opposing_obs,
+    mock_killzone,
+    mock_detect_choch,
     mock_detect_sweep,
-    mock_get_breakers,
+    mock_save_pool,
+    mock_save_signal,
+    mock_is_duplicate,
     mock_get_active_obs,
     mock_get_bias,
     mock_get_candles,
+    dummy_ob_dict,
     bullish_bos_df,
 ):
-    """Test signal rejection when price is in Premium for a bullish setup."""
+    """Test signal penalty when price is in Premium for a bullish setup."""
+    mock_is_market_open.return_value = True
+    mock_detect_kz.return_value = []
+
     test_df = bullish_bos_df.copy()
-    test_df.loc[test_df.index[-1], "close"] = 2650.0
+    test_df.loc[test_df.index[-1], "close"] = 2650.0  # Premium range
+
+    dummy_ob_dict["ob_low"] = 2640.0
+    dummy_ob_dict["ob_high"] = 2660.0
 
     mock_get_candles.return_value = test_df
     mock_get_bias.return_value = "bullish"
-    mock_get_active_obs.return_value = []
-    mock_get_breakers.return_value = []
+    mock_get_active_obs.return_value = [dummy_ob_dict]
     mock_get_opposing_obs.return_value = []
     mock_get_active_pools.return_value = []
+    mock_is_duplicate.return_value = False
+    mock_killzone.return_value = "London Killzone"
+
+    # Ensure NO sweep or OTE to trigger the penalty instead of an override
     mock_detect_sweep.return_value = None
+    mock_detect_choch.return_value = None
 
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
-    assert signal is None
+    # Base(20) + HTF Align(25) - PD Penalty(10) + Killzone(5) + OB Tap(25) = 65 (exact pass)
+    assert signal is not None
+    assert signal.confluence_score == 65
+    assert "Sub-optimal PD Zone Penalty (Premium)" in signal.confluence_factors
 
 
 @pytest.mark.asyncio
@@ -133,7 +166,11 @@ async def test_scan_ltf_entry_rejected_premium_discount(
 @patch("strategies.confluence.SessionManager.get_active_killzone")
 @patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
 @patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_killzone_liquidity")
+@patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_ltf_entry_accepted_premium_with_sweep(
+    mock_is_market_open,
+    mock_detect_kz,
     mock_get_active_pools,
     mock_get_opposing_obs,
     mock_killzone,
@@ -149,6 +186,9 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
     bullish_bos_df,
 ):
     """Test signal acceptance when price is in Premium for a bullish setup BUT there is a valid EQL sweep override."""
+    mock_is_market_open.return_value = True
+    mock_detect_kz.return_value = []
+
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2650.0  # Premium range
 
@@ -192,7 +232,11 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
 @patch("strategies.confluence.SessionManager.get_active_killzone")
 @patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
 @patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_killzone_liquidity")
+@patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_ltf_entry_low_confluence(
+    mock_is_market_open,
+    mock_detect_kz,
     mock_get_active_pools,
     mock_get_opposing_obs,
     mock_killzone,
@@ -204,6 +248,9 @@ async def test_scan_ltf_entry_low_confluence(
     bullish_bos_df,
 ):
     """Test signal rejection when confluence score is below threshold."""
+    mock_is_market_open.return_value = True
+    mock_detect_kz.return_value = []
+
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
@@ -239,7 +286,11 @@ async def test_scan_ltf_entry_low_confluence(
 @patch("strategies.confluence.SessionManager.get_active_killzone")
 @patch("strategies.confluence.order_blocks.get_opposing_htf_obs", new_callable=AsyncMock)
 @patch("strategies.confluence.liquidity_pools.get_active_pools", new_callable=AsyncMock)
+@patch("strategies.confluence.detect_killzone_liquidity")
+@patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_ltf_entry_breaker_block_fallback(
+    mock_is_market_open,
+    mock_detect_kz,
     mock_get_active_pools,
     mock_get_opposing_obs,
     mock_killzone,
@@ -256,6 +307,9 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     bullish_bos_df,
 ):
     """Test fallback to Breaker Block when no active OB is tapped."""
+    mock_is_market_open.return_value = True
+    mock_detect_kz.return_value = []
+
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
 
@@ -310,10 +364,19 @@ async def test_scan_ltf_entry_breaker_block_fallback(
 @patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.save_order_block", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.mark_as_breaker", new_callable=AsyncMock)
+@patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_htf_and_mtf_scans(
-    mock_mark_breaker, mock_save_ob, mock_save_event, mock_get_bias, mock_get_candles, bullish_bos_df
+    mock_is_market_open,
+    mock_mark_breaker,
+    mock_save_ob,
+    mock_save_event,
+    mock_get_bias,
+    mock_get_candles,
+    bullish_bos_df,
 ):
     """Test HTF bias updates and MTF confirmation sweeps."""
+    mock_is_market_open.return_value = True
+
     mock_get_candles.return_value = bullish_bos_df.iloc[:35].copy()
     mock_get_bias.return_value = "ranging"
 

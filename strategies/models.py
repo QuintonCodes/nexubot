@@ -58,12 +58,13 @@ class FVG:
 class LiquidityPool:
     symbol: str
     timeframe: str
-    pool_type: Literal["EQH", "EQL"]
+    pool_type: Literal["EQH", "EQL", "KZ_HIGH", "KZ_LOW"]
     price_level: float
     swept: bool
     price_tolerance: float
     touch_count: int
     sweep_timestamp: Optional[datetime]
+    origin_timestamp: Optional[datetime] = None
 
 
 @dataclass

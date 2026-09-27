@@ -6,17 +6,23 @@ Handles background REST API refreshes for HTF and MTF analysis.
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from datetime import datetime, timezone
 
 from config.settings import settings
 from data.twelve_data_client import TwelveDataClient
 from data.candle_store import candle_store
 from data.normalizer import normalize_ohlcv
 from strategies.confluence import ConfluenceEngine
+from strategies.sessions import SessionManager
 from utils.logger import logger
 
 
 async def refresh_htf_data(client: TwelveDataClient, symbol: str):
     """Refreshes the 4H Data and recalculates Macro Bias."""
+    if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+        logger.info("scheduler_skipped_market_closed", task="htf_refresh")
+        return
+
     logger.info("scheduler_running_htf_refresh")
     try:
         raw_df = await client.get_historical_ohlcv(symbol, settings.HTF_TIMEFRAMES[0], outputsize=200)
@@ -31,6 +37,10 @@ async def refresh_htf_data(client: TwelveDataClient, symbol: str):
 
 async def refresh_mtf_data(client: TwelveDataClient, symbol: str):
     """Refreshes the 1H Data and scans for new Order Blocks."""
+    if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+        logger.info("scheduler_skipped_market_closed", task="mtf_refresh")
+        return
+
     logger.info("scheduler_running_mtf_refresh")
     try:
         raw_df = await client.get_historical_ohlcv(symbol, settings.HTF_TIMEFRAMES[1], outputsize=200)
@@ -45,12 +55,15 @@ async def refresh_mtf_data(client: TwelveDataClient, symbol: str):
 
 async def refresh_mtf_15m_data(client: TwelveDataClient, symbol: str):
     """Refreshes the 15M Data to confirm intermediate structure sweeps."""
+    if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+        logger.info("scheduler_skipped_market_closed", task="mtf_15m_refresh")
+        return
+
     logger.info("scheduler_running_15m_refresh")
     try:
-        tf = "15min"
-        raw_df = await client.get_historical_ohlcv(symbol, tf, outputsize=200)
+        raw_df = await client.get_historical_ohlcv(symbol, settings.LTF_TIMEFRAMES[0], outputsize=200)
         norm_df = normalize_ohlcv(raw_df)
-        await candle_store.initialize(symbol, tf, norm_df)
+        await candle_store.initialize(symbol, settings.LTF_TIMEFRAMES[0], norm_df)
 
         engine = ConfluenceEngine(symbol)
         await engine.scan_mtf_confirmation()
