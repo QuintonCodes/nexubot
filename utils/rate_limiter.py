@@ -4,6 +4,7 @@ Tracks daily REST requests, resets at UTC midnight, and provides safety margins.
 Persists limits to PostgreSQL to maintain state across process restarts.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -17,36 +18,43 @@ class RateLimiter:
         self.max_daily_calls = max_daily_calls
         self.warning_threshold = warning_threshold
         self._db_initialized = False
+        self._init_lock = asyncio.Lock()
 
     async def _init_db(self) -> None:
         """Bootstraps the single-row rate limiter table if it doesn't exist."""
+        # Fast path to avoid lock overhead if already initialized
         if self._db_initialized:
             return
 
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            # Create a dedicated table with a CHECK constraint to enforce a single row
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS api_usage (
-                    id INT PRIMARY KEY DEFAULT 1,
-                    current_calls INTEGER NOT NULL DEFAULT 0,
-                    last_reset_date DATE NOT NULL,
-                    CHECK (id = 1)
-                );
-            """)
+        async with self._init_lock:
+            # Double-check inside lock to ensure a racing coroutine didn't already initialize
+            if self._db_initialized:
+                return
 
-            # Seed the initial row if the table is completely empty
-            now_date = datetime.now(timezone.utc).date()
-            await conn.execute(
-                """
-                INSERT INTO api_usage (id, current_calls, last_reset_date)
-                VALUES (1, 0, $1)
-                ON CONFLICT DO NOTHING;
-            """,
-                now_date,
-            )
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                # Create a dedicated table with a CHECK constraint to enforce a single row
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS api_usage (
+                        id INT PRIMARY KEY DEFAULT 1,
+                        current_calls INTEGER NOT NULL DEFAULT 0,
+                        last_reset_date DATE NOT NULL,
+                        CHECK (id = 1)
+                    );
+                """)
 
-        self._db_initialized = True
+                # Seed the initial row if the table is completely empty
+                now_date = datetime.now(timezone.utc).date()
+                await conn.execute(
+                    """
+                    INSERT INTO api_usage (id, current_calls, last_reset_date)
+                    VALUES (1, 0, $1)
+                    ON CONFLICT DO NOTHING;
+                """,
+                    now_date,
+                )
+
+            self._db_initialized = True
 
     async def _check_and_reset(self) -> None:
         """Resets the counter in the database if UTC midnight has passed."""

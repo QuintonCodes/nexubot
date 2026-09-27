@@ -38,7 +38,7 @@ async def monitor_active_signals(symbol: str, current_price: float) -> None:
             elif current_price >= sig["take_profit_1"]:
                 new_status, update_msg = "tp1_hit", f"✅ TP1 Hit! +{_calc_pips(sig, 1):.0f} pips 📈"
             elif current_price <= sig["stop_loss"]:
-                new_status, update_msg = "sl_hit", "❌ Setup Invalidated — SL Hit 🛑"
+                new_status, update_msg = "sl_hit", "❌ Setup Invalidated — SL Hit 🛑. Wait for the next setup."
         else:
             if current_price <= sig["take_profit_3"]:
                 new_status, update_msg = "tp3_hit", f"🏆 TP3 Hit! +{_calc_pips(sig, 3):.0f} pips 🎯"
@@ -47,11 +47,11 @@ async def monitor_active_signals(symbol: str, current_price: float) -> None:
             elif current_price <= sig["take_profit_1"]:
                 new_status, update_msg = "tp1_hit", f"✅ TP1 Hit! +{_calc_pips(sig, 1):.0f} pips 📈"
             elif current_price >= sig["stop_loss"]:
-                new_status, update_msg = "sl_hit", "❌ Setup Invalidated — SL Hit 🛑"
+                new_status, update_msg = "sl_hit", "❌ Setup Invalidated — SL Hit 🛑. Wait for the next setup."
 
         if new_status and new_status != sig["status"]:
-            await signals.update_signal_status(sig["id"], new_status)
-            if sig.get("telegram_message_id"):
+            updated = await signals.update_signal_status(sig["id"], new_status)
+            if updated and sig.get("telegram_message_id"):
                 await bot.send_message(
                     chat_id=settings.SIGNAL_CHANNEL_ID,
                     text=f"📊 <b>{sig['symbol']} Update</b>\n\n{update_msg}",

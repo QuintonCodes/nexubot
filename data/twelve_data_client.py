@@ -16,6 +16,11 @@ from utils.logger import logger
 from utils.rate_limiter import rate_limiter
 
 
+def _log_task_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception():
+        logger.error("background_task_failed", task=task.get_name(), error=str(task.exception()))
+
+
 class TwelveDataClient:
     def __init__(self):
         self.api_key = settings.TWELVE_DATA_API_KEY
@@ -70,13 +75,21 @@ class TwelveDataClient:
     async def _process_tick(self, tick: dict, on_candle_close: Callable[[str, str, pd.Series], Awaitable[None]]):
         """Aggregates real-time price ticks into M5 candles and triggers callbacks."""
         symbol = tick.get("symbol")
-        price = float(tick.get("price"))
-        tick_time = datetime.fromtimestamp(tick.get("timestamp"), tz=timezone.utc)
+        raw_ts = tick.get("timestamp")
+        price_raw = tick.get("price")
+
+        if raw_ts is None or price_raw is None:
+            logger.warning("malformed_tick_received", tick=tick)
+            return
+
+        tick_time = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
+        price = float(price_raw)
 
         # Lazy runtime import inside the execution scope to avoid circular initialization loops
         from strategies.pipeline import monitor_active_signals
 
-        asyncio.create_task(monitor_active_signals(symbol, price))
+        monitor_task = asyncio.create_task(monitor_active_signals(symbol, price), name="monitor_active_signals")
+        monitor_task.add_done_callback(_log_task_error)
 
         candle_start = self._get_candle_boundary(tick_time)
 
@@ -101,7 +114,10 @@ class TwelveDataClient:
             logger.info("candle_closed", symbol=symbol, timestamp=str(current["timestamp"]))
 
             # Fire the callback to the strategy engine asynchronously
-            asyncio.create_task(on_candle_close(symbol, settings.ENTRY_TIMEFRAME, closed_candle))
+            close_task = asyncio.create_task(
+                on_candle_close(symbol, settings.ENTRY_TIMEFRAME, closed_candle), name="on_candle_close"
+            )
+            close_task.add_done_callback(_log_task_error)
 
             # 2. Reset the active candle for the new boundary
             self.active_candles[symbol] = {

@@ -91,6 +91,7 @@ class ConfluenceEngine:
             if cisd:
                 await structure_events.save_event(cisd)
                 logger.info("structure_break", event_type="CISD", direction=cisd.direction, tf=tf)
+                return cisd.direction
 
         return current_bias
 
@@ -195,7 +196,7 @@ class ConfluenceEngine:
 
         target_cap = None
         runaway_dist = None
-        HTF_RUNWAY_MIN_POINTS = 10.0  # $10.00 buffer on XAU/USD (1,000 pips)
+        HTF_RUNWAY_MIN_POINTS = 5.0  # $5.00 buffer on XAU/USD (500 pips)
 
         # Fetch HTF Boundaries: Order Blocks (Barriers) and Liquidity Pools (Magnets)
         opposing_dir = "bearish" if trade_bias == "bullish" else "bullish"

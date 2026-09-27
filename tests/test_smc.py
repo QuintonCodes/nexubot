@@ -5,6 +5,7 @@ Run with: python -m pytest tests/test_smc.py -v
 
 import pandas as pd
 from datetime import datetime, timezone
+from pytest import approx
 
 from strategies.sessions import SessionManager
 from strategies.smc import (
@@ -69,17 +70,17 @@ def test_calculate_ote_zone():
     bull_zone = calculate_ote_zone(
         swing_low=2000.0, swing_high=2100.0, direction="bullish", symbol="XAU/USD", tf="5min"
     )
-    assert bull_zone.ote_entry == 2038.2  # 2100 - (100 * 0.618)
-    assert bull_zone.ote_mid == 2029.5
-    assert bull_zone.ote_top == 2021.4
+    assert bull_zone.ote_entry == approx(2038.2, abs=1e-6)  # 2100 - (100 * 0.618)
+    assert bull_zone.ote_mid == approx(2029.5, abs=1e-6)
+    assert bull_zone.ote_top == approx(2021.4, abs=1e-6)
 
     # Bearish (High to Low -> Retraces Upward into Premium)
     bear_zone = calculate_ote_zone(
         swing_low=2000.0, swing_high=2100.0, direction="bearish", symbol="XAU/USD", tf="5min"
     )
-    assert bear_zone.ote_entry == 2061.8  # 2000 + (100 * 0.618)
-    assert bear_zone.ote_mid == 2070.5
-    assert bear_zone.ote_top == 2078.6
+    assert bear_zone.ote_entry == approx(2061.8, abs=1e-6)  # 2000 + (100 * 0.618)
+    assert bear_zone.ote_mid == approx(2070.5, abs=1e-6)
+    assert bear_zone.ote_top == approx(2078.6, abs=1e-6)
 
 
 def test_calculate_ote_zone_with_retracement_df(ote_retracement_df):

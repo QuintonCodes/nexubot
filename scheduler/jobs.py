@@ -5,7 +5,6 @@ Handles background REST API refreshes for HTF and MTF analysis.
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timezone
 
 from config.settings import settings
@@ -76,10 +75,10 @@ def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     symbol = settings.SYMBOLS[0]
 
-    # HTF Refresh: Every 4 hours
+    # HTF Refresh: Every 4 hours aligned to 4H candle boundaries (+2 min for TwelveData finalization)
     scheduler.add_job(
         refresh_htf_data,
-        trigger=IntervalTrigger(hours=4),
+        trigger=CronTrigger(hour="0,4,8,12,16,20", minute=2),
         args=[client, symbol],
         id="htf_refresh",
         replace_existing=True,

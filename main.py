@@ -95,6 +95,9 @@ async def main() -> None:
             name="Telegram_Bot_Polling",
         )
 
+        # Populate tasks list to ensure background tasks are properly tracked and cancelled on shutdown
+        tasks = [ws_task, bot_task]
+
         # 5. Monitor tasks and termination signal concurrently
         stop_waiter = asyncio.create_task(stop_event.wait(), name="Termination_Signal_Watcher")
         done, _ = await asyncio.wait(
