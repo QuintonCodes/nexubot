@@ -17,6 +17,11 @@ from utils.math_helpers import price_to_pips
 if TYPE_CHECKING:
     from data.twelve_data_client import TwelveDataClient
 
+# Define a state hierarchy to lock in the highest achieved milestone.
+# This ensures that once a trade hits a take profit level (e.g., TP3),
+# market pullbacks won't downgrade its status back to TP1 or active.
+STATUS_RANK = {"active": 0, "tp1_hit": 1, "tp2_hit": 2, "tp3_hit": 3, "sl_hit": 99}  # Terminal state
+
 
 def _calc_pips(sig: dict, tp_level: int) -> float:
     # Routes calculations through the verified math_helpers engine to prevent multiplier mismatches
@@ -49,7 +54,11 @@ async def monitor_active_signals(symbol: str, current_price: float) -> None:
             elif current_price >= sig["stop_loss"]:
                 new_status, update_msg = "sl_hit", "❌ Setup Invalidated — SL Hit 🛑. Wait for the next setup."
 
-        if new_status and new_status != sig["status"]:
+        # Fetch numeric ranks for comparison
+        current_rank = STATUS_RANK.get(sig.get("status", "active"), 0)
+        new_rank = STATUS_RANK.get(new_status, 0) if new_status else 0
+
+        if new_status and new_rank > current_rank:
             updated = await signals.update_signal_status(sig["id"], new_status)
             if updated and sig.get("telegram_message_id"):
                 await bot.send_message(

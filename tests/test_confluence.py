@@ -148,9 +148,9 @@ async def test_scan_ltf_entry_penalized_premium_discount(
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
-    # Base(20) + HTF Align(25) - PD Penalty(10) + Killzone(5) + OB Tap(25) = 65 (exact pass)
+    # Base(25) + HTF Align(25) - PD Penalty(5) + Killzone(5) + OB Tap(25) = 75 (exact pass)
     assert signal is not None
-    assert signal.confluence_score == 65
+    assert signal.confluence_score == 75
     assert "Sub-optimal PD Zone Penalty (Premium)" in signal.confluence_factors
 
 

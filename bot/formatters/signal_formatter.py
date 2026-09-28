@@ -11,16 +11,16 @@ def format_signal_for_channel(signal: TradeSignal) -> str:
     """Clean public format — only actionable trade information for subscribers."""
     direction_emoji = "🟢 BUY" if signal.direction == "buy" else "🔴 SELL"
 
-    return f"""╔══════════════════════════════╗
+    return f"""╔═════════════════════╗
 ║  {direction_emoji} — {signal.symbol}
-╚══════════════════════════════╝
+╚═════════════════════╝
 
-📈 <b>ENTRY:</b>    {signal.entry_price:,.2f}
+📈 <b>ENTRY:</b> {signal.entry_price:,.2f}
 🛑 <b>STOP LOSS:</b> {signal.stop_loss:,.2f}
 
-🎯 <b>TP1:</b>  {signal.take_profit_1:,.2f}
-💰 <b>TP2:</b>  {signal.take_profit_2:,.2f}
-🏆 <b>TP3:</b>  {signal.take_profit_3:,.2f}
+🎯 <b>TP1:</b> {signal.take_profit_1:,.2f}
+💰 <b>TP2:</b> {signal.take_profit_2:,.2f}
+🏆 <b>TP3:</b> {signal.take_profit_3:,.2f}
 
 ⚠️ <i>Risk accordingly to your risk management · Manage your position.</i>"""
 
@@ -48,9 +48,9 @@ def format_signal_for_admin(signal: TradeSignal) -> str:
     rr_tp2 = abs(signal.take_profit_2 - signal.entry_price) / sl_dist if sl_dist > 0 else 0
     rr_tp3 = abs(signal.take_profit_3 - signal.entry_price) / sl_dist if sl_dist > 0 else 0
 
-    msg = f"""╔══════════════════════════════╗
+    msg = f"""╔═════════════════════╗
 ║  {emoji} — {signal.symbol}
-╚══════════════════════════════╝
+╚═════════════════════╝
 
 {type_badge}
 📐 <b>Setup:</b> {signal.signal_type}

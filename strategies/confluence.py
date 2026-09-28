@@ -254,7 +254,7 @@ class ConfluenceEngine:
 
         # 3. Factor & Confluence Setup
         factors = []
-        confluence_score = 20
+        confluence_score = 25
 
         if is_pro_htf:
             factors.append(f"Full MTF/HTF Alignment ({htf_bias.upper()})")
@@ -306,7 +306,7 @@ class ConfluenceEngine:
             if not valid_sweep and not valid_ote:
                 logger.info("pd_array_penalty", direction=trade_bias, pd_zone=pd_zone)
                 factors.append(f"Sub-optimal PD Zone Penalty ({pd_zone})")
-                confluence_score -= 10
+                confluence_score -= 5
             else:
                 factors.append("PD Array Override (Liquidity Sweep / OTE)")
         else:
@@ -396,7 +396,7 @@ class ConfluenceEngine:
 
         # Adjust score thresholds slightly to account for the PD array logic shift
         if active_session in ["Out of Session", "Market Closed"]:
-            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 75)
+            min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE_OOS", 70)
         else:
             min_required_score = getattr(settings, "MIN_CONFLUENCE_SCORE", 65)
 

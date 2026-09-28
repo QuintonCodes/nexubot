@@ -186,12 +186,22 @@ async def cmd_signals(message: types.Message):
         await message.reply("No recent signals found in the database.")
         return
 
+    # Map raw database statuses to cleaner, user-friendly labels
+    status_map = {
+        "active": "⏳ Active",
+        "tp1_hit": "✅ TP1 Hit",
+        "tp2_hit": "✅ TP2 Hit",
+        "tp3_hit": "🏆 TP3 Hit",
+        "sl_hit": "🛑 SL Hit",
+    }
+
     text = f"📊 <b>Recent Signals ({symbol}):</b>\n\n"
     for sig in recent:
         dir_emoji = "🟢 BUY" if sig["direction"] == "buy" else "🔴 SELL"
-        status = sig.get("status", "active").upper()
+        raw_status = sig.get("status", "active").lower()
+        status_display = status_map.get(raw_status, raw_status.upper())
 
-        text += f"<b>{dir_emoji}</b> @ {sig['entry_price']:,.2f} | <b>{status}</b>\n"
+        text += f"<b>{dir_emoji}</b> @ {sig['entry_price']:,.2f} | <b>{status_display}</b>\n"
         text += f"Model: {sig['entry_model']} (Score: {sig['confluence_score']})\n"
         text += f"⏰ {sig['timestamp'].strftime('%Y-%m-%d %H:%M UTC')}\n\n"
 
