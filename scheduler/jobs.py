@@ -5,6 +5,7 @@ Handles background REST API refreshes for HTF and MTF analysis.
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timezone
 
 from config.settings import settings
@@ -12,6 +13,7 @@ from data.twelve_data_client import TwelveDataClient
 from data.candle_store import candle_store
 from data.normalizer import normalize_ohlcv
 from strategies.confluence import ConfluenceEngine
+from strategies.pipeline import monitor_active_signals
 from strategies.sessions import SessionManager
 from utils.logger import logger
 
@@ -70,6 +72,20 @@ async def refresh_mtf_15m_data(client: TwelveDataClient, symbol: str):
         logger.error("mtf_15m_refresh_failed", error=str(e))
 
 
+async def track_active_signals(client: TwelveDataClient, symbol: str):
+    """Fetches the latest live price and delegates active trade monitoring."""
+    if not SessionManager.is_market_open(datetime.now(timezone.utc)):
+        return
+
+    try:
+        # Fetch current live tick price
+        price = await client.get_realtime_price(symbol)
+        if price:
+            await monitor_active_signals(symbol, price)
+    except Exception as e:
+        logger.error("signal_tracking_failed", error=str(e))
+
+
 def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
     """Configures and returns the AsyncIOScheduler."""
     scheduler = AsyncIOScheduler()
@@ -99,6 +115,15 @@ def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
         trigger=CronTrigger(minute="1,16,31,46"),
         args=[client, symbol],
         id="mtf_15m_refresh",
+        replace_existing=True,
+    )
+
+    # Real-Time Signal Tracking: Runs every 20 seconds to catch TP/SL hits
+    scheduler.add_job(
+        track_active_signals,
+        trigger=IntervalTrigger(seconds=20),
+        args=[client, symbol],
+        id="signal_monitor",
         replace_existing=True,
     )
 

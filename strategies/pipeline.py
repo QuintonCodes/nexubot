@@ -59,8 +59,8 @@ async def monitor_active_signals(symbol: str, current_price: float) -> None:
         new_rank = STATUS_RANK.get(new_status, 0) if new_status else 0
 
         if new_status and new_rank > current_rank:
-            updated = await signals.update_signal_status(sig["id"], new_status)
-            if updated and sig.get("telegram_message_id"):
+            await signals.update_signal_status(sig["id"], new_status)
+            if sig.get("telegram_message_id"):
                 await bot.send_message(
                     chat_id=settings.SIGNAL_CHANNEL_ID,
                     text=f"📊 <b>{sig['symbol']} Update</b>\n\n{update_msg}",
@@ -88,6 +88,12 @@ async def bootstrap_historical_data(client: TwelveDataClient, symbol: str):
 async def on_candle_close(symbol: str, timeframe: str, candle: pd.Series) -> None:
     """Callback fired by WebSocket tick aggregator precisely on 5-minute rollovers."""
     await candle_store.add_candle(symbol, timeframe, candle)
+
+    # Prevent overlapping signals by checking for active/unresolved trades
+    active_trades = await signals.get_active_signals(symbol)
+    if active_trades:
+        logger.info("signal_suppressed_active_trade", symbol=symbol, count=len(active_trades))
+        return
 
     engine = ConfluenceEngine(symbol)
     signal = await engine.scan_ltf_entry()

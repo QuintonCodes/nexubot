@@ -409,10 +409,29 @@ def generate_trade_signal(
     """Assembles a valid TradeSignal, smartly calculating dynamic RR Take Profits."""
     sl_pips_diff = abs(entry_price - stop_loss)
 
-    # Dynamic RR scales linearly with setup strength (Score 70 = 3.5R, Score 100 = 5.0R)
-    dynamic_rr = max(3.0, confluence_score / 20.0)
+    # Dynamic RR scales linearly with setup strength
+    dynamic_rr = max(3.0, confluence_score / 25.0)
 
+    # 1. Base TP3 Distance
     tp3_distance = sl_pips_diff * dynamic_rr
+
+    # 2. Apply Target Cap to Distance
+    if target_cap is not None:
+        max_tp_distance = abs(target_cap - entry_price)
+        tp3_distance = min(tp3_distance, max_tp_distance)
+
+    # 3. Ensure R:R Never Drops Below 1.5
+    # If the capped TP limits the RR to < 1.5, mathematically tighten the SL
+    # proportional to the available TP distance to guarantee a minimum 1.5 RR.
+    min_rr = 1.5
+    if tp3_distance < (sl_pips_diff * min_rr):
+        sl_pips_diff = tp3_distance / min_rr
+        if direction == "buy":
+            stop_loss = entry_price - sl_pips_diff
+        else:
+            stop_loss = entry_price + sl_pips_diff
+
+    # 4. Spaced TP Levels (Prevents Collapsing / Overlapping TPs)
     tp1_distance = tp3_distance * 0.30  # TP1 captures 30% of the total target move
     tp2_distance = tp3_distance * 0.60  # TP2 captures 60% of the total target move
 
@@ -420,21 +439,10 @@ def generate_trade_signal(
         tp3 = entry_price + tp3_distance
         tp2 = entry_price + tp2_distance
         tp1 = entry_price + tp1_distance
-
-        # Cap targets if an opposing macro boundary exists
-        if target_cap is not None and target_cap > entry_price:
-            tp3 = min(tp3, target_cap)
-            tp2 = min(tp2, target_cap)
-            tp1 = min(tp1, target_cap)
     else:
         tp3 = entry_price - tp3_distance
         tp2 = entry_price - tp2_distance
         tp1 = entry_price - tp1_distance
-
-        if target_cap is not None and target_cap < entry_price:
-            tp3 = max(tp3, target_cap)
-            tp2 = max(tp2, target_cap)
-            tp1 = max(tp1, target_cap)
 
     actual_rrr = calculate_rrr(entry_price, stop_loss, tp3)
 

@@ -237,7 +237,7 @@ class SignalRepository:
     async def get_active_signals(self, symbol: str) -> List[Dict[str, Any]]:
         query = """
             SELECT * FROM signals
-            WHERE symbol = $1 AND status = 'active'
+            WHERE symbol = $1 AND status IN ('active', 'tp1_hit', 'tp2_hit')
             AND timestamp >= NOW() - INTERVAL '48 hours';
         """
         pool = get_pool()

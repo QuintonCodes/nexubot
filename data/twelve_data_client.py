@@ -67,6 +67,31 @@ class TwelveDataClient:
 
                 return pd.DataFrame(data["values"])
 
+    async def get_realtime_price(self, symbol: str) -> Optional[float]:
+        """Fetches the current real-time price via REST API for active trade monitoring."""
+        await rate_limiter.acquire()
+
+        params = {
+            "symbol": symbol,
+            "apikey": self.api_key,
+        }
+
+        url = f"{self.rest_base_url}/price"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    data = await response.json()
+
+                    if "price" not in data:
+                        logger.error("twelvedata_price_error", response=data)
+                        return None
+
+                    return float(data["price"])
+        except Exception as e:
+            logger.error("twelvedata_price_request_failed", error=str(e))
+            return None
+
     def _get_candle_boundary(self, dt: datetime) -> datetime:
         """Rounds a datetime down to the nearest multiple of the interval (e.g., 5min)."""
         minute = dt.minute - (dt.minute % self.interval_minutes)
