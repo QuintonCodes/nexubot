@@ -43,11 +43,6 @@ def format_signal_for_admin(signal: TradeSignal) -> str:
     if signal.runaway_distance is not None:
         runway_line = f"🎯 <b>Runway to HTF POI:</b> {signal.runaway_distance:.1f} pts"
 
-    sl_dist = abs(signal.entry_price - signal.stop_loss)
-    rr_tp1 = abs(signal.take_profit_1 - signal.entry_price) / sl_dist if sl_dist > 0 else 0
-    rr_tp2 = abs(signal.take_profit_2 - signal.entry_price) / sl_dist if sl_dist > 0 else 0
-    rr_tp3 = abs(signal.take_profit_3 - signal.entry_price) / sl_dist if sl_dist > 0 else 0
-
     msg = f"""╔═════════════════════╗
 ║  {emoji} — {signal.symbol}
 ╚═════════════════════╝
@@ -60,11 +55,11 @@ def format_signal_for_admin(signal: TradeSignal) -> str:
 {runway_line}
 
 ──────────────────────────────
-📈 <b>ENTRY:</b>  {signal.entry_price:,.2f}
-🛑 <b>STOP LOSS:</b>  {signal.stop_loss:,.2f}
-🎯 <b>TP1:</b>  {signal.take_profit_1:,.2f}  (+1:{rr_tp1:.1f}R)
-💰 <b>TP2:</b>  {signal.take_profit_2:,.2f}  (+1:{rr_tp2:.1f}R)
-🏆 <b>TP3:</b>  {signal.take_profit_3:,.2f}  (+1:{rr_tp3:.1f}R)
+📈 <b>ENTRY:</b> {signal.entry_price:,.2f}
+🛑 <b>STOP LOSS:</b> {signal.stop_loss:,.2f}
+🎯 <b>TP1:</b> {signal.take_profit_1:,.2f}
+💰 <b>TP2:</b> {signal.take_profit_2:,.2f}
+🏆 <b>TP3:</b> {signal.take_profit_3:,.2f}
 ──────────────────────────────
 
 📊 <b>Confluence Factors:</b>

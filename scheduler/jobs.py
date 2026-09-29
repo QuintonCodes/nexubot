@@ -12,6 +12,7 @@ from config.settings import settings
 from data.twelve_data_client import TwelveDataClient
 from data.candle_store import candle_store
 from data.normalizer import normalize_ohlcv
+from db.repositories import signals
 from strategies.confluence import ConfluenceEngine
 from strategies.pipeline import monitor_active_signals
 from strategies.sessions import SessionManager
@@ -73,12 +74,20 @@ async def refresh_mtf_15m_data(client: TwelveDataClient, symbol: str):
 
 
 async def track_active_signals(client: TwelveDataClient, symbol: str):
-    """Fetches the latest live price and delegates active trade monitoring."""
+    """
+    Fetches the latest live price and delegates trade management.
+    Short-circuits if no unresolved signals exist in the database.
+    """
     if not SessionManager.is_market_open(datetime.now(timezone.utc)):
         return
 
     try:
-        # Fetch current live tick price
+        # Step 1: Verify whether unresolved signals exist before calling Twelve Data
+        active_signals = await signals.get_active_signals(symbol)
+        if not active_signals:
+            return  # Zero REST API calls consumed when no trades are open
+
+        # Step 2: Fetch current price and delegate to pipeline
         price = await client.get_realtime_price(symbol)
         if price:
             await monitor_active_signals(symbol, price)
@@ -118,10 +127,10 @@ def setup_scheduler(client: TwelveDataClient) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # Real-Time Signal Tracking: Runs every 20 seconds to catch TP/SL hits
+    # Real-Time Signal Tracking: Runs every 150s (24 calls/hr) to stay strictly within the 800 daily REST limit
     scheduler.add_job(
         track_active_signals,
-        trigger=IntervalTrigger(seconds=20),
+        trigger=IntervalTrigger(seconds=150),
         args=[client, symbol],
         id="signal_monitor",
         replace_existing=True,

@@ -110,12 +110,6 @@ class TwelveDataClient:
         tick_time = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
         price = float(price_raw)
 
-        # Lazy runtime import inside the execution scope to avoid circular initialization loops
-        from strategies.pipeline import monitor_active_signals
-
-        monitor_task = asyncio.create_task(monitor_active_signals(symbol, price), name="monitor_active_signals")
-        monitor_task.add_done_callback(_log_task_error)
-
         candle_start = self._get_candle_boundary(tick_time)
 
         # Initialize candle state for the symbol if it doesn't exist
