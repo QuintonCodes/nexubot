@@ -137,6 +137,7 @@ class StructureEventRepository:
     """Tracks Market Structure Shifts, BOS, and CHoCH events."""
 
     async def save_event(self, event: StructureEvent) -> None:
+        """Saves a structure event to the database, avoiding duplicates."""
         query = """
             INSERT INTO structure_events
             (symbol, timeframe, event_type, direction, price_level, timestamp, confirmed)
@@ -174,6 +175,7 @@ class SignalRepository:
     """Handles persistence and deduplication of trade signals."""
 
     async def save_signal(self, signal: TradeSignal) -> None:
+        """Saves a trade signal to the database, avoiding duplicates based on signal_id."""
         query = """
             INSERT INTO signals (
                 id, symbol, timeframe, direction, entry_model, session, pd_zone,
@@ -223,6 +225,7 @@ class SignalRepository:
             return count > 0
 
     async def get_recent_signals(self, symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetches the most recent trade signals for a given symbol, ordered by timestamp descending."""
         query = """
             SELECT * FROM signals
             WHERE symbol = $1
@@ -235,6 +238,7 @@ class SignalRepository:
             return [dict(row) for row in rows]
 
     async def get_active_signals(self, symbol: str) -> List[Dict[str, Any]]:
+        """Fetches all active trade signals for a given symbol that are not yet closed or expired."""
         query = """
             SELECT * FROM signals
             WHERE symbol = $1 AND status IN ('active', 'tp1_hit', 'tp2_hit')
@@ -246,12 +250,14 @@ class SignalRepository:
             return [dict(row) for row in rows]
 
     async def update_signal_status(self, signal_id: str, status: str) -> None:
+        """Updates the status of a trade signal (e.g., active, closed, expired)."""
         query = "UPDATE signals SET status = $2 WHERE id = $1;"
         pool = get_pool()
         async with pool.acquire() as conn:
             await conn.execute(query, signal_id, status)
 
     async def update_telegram_message_id(self, signal_id: str, message_id: int) -> None:
+        """Updates the Telegram message ID associated with a trade signal."""
         query = "UPDATE signals SET telegram_message_id = $2 WHERE id = $1;"
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -262,18 +268,32 @@ class LiquidityPoolRepository:
     """Persists EQH/EQL state for sweep detection."""
 
     async def save_pool(self, pool: LiquidityPool) -> None:
+        """Saves a liquidity pool or updates it as swept if a conflict occurs."""
         query = """
-            INSERT INTO liquidity_pools (symbol, timeframe, pool_type, price_level, origin_timestamp, swept)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (symbol, timeframe, pool_type, origin_timestamp) DO NOTHING;
+            INSERT INTO liquidity_pools (symbol, timeframe, pool_type, price_level, origin_timestamp, swept, sweep_timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (symbol, timeframe, pool_type, origin_timestamp)
+            DO UPDATE SET
+                swept = EXCLUDED.swept,
+                sweep_timestamp = EXCLUDED.sweep_timestamp
+            WHERE liquidity_pools.swept = FALSE;
         """
         db_pool = get_pool()
         async with db_pool.acquire() as conn:
             origin = pool.origin_timestamp or pool.sweep_timestamp or datetime.now(timezone.utc)
-            await conn.execute(query, pool.symbol, pool.timeframe, pool.pool_type, pool.price_level, origin, False)
+            await conn.execute(
+                query,
+                pool.symbol,
+                pool.timeframe,
+                pool.pool_type,
+                pool.price_level,
+                origin,
+                pool.swept,
+                pool.sweep_timestamp,
+            )
 
     async def get_active_pools(self, symbol: str, timeframes: List[str], pool_types: List[str]) -> List[Dict[str, Any]]:
-        """Queries active, unswept liquidity pools across specified timeframes and types (EQH, EQL, KZ_HIGH)."""
+        """Queries active, unswept liquidity pools across specified timeframes and types (EQH, EQL, KZ_HIGH, KZ_LOW)."""
         query = """
             SELECT * FROM liquidity_pools
             WHERE symbol = $1

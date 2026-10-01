@@ -93,7 +93,7 @@ def find_order_blocks(
     for last_swing in relevant_swings:
         search_idx = last_swing.candle_index
         lookback_limit = max(0, search_idx - 20)
-        atr_val = calculate_atr(df.iloc[: search_idx + 1]) if search_idx > 14 else 2.0
+        atr_val = calculate_atr(df.iloc[: search_idx + 1]) if search_idx > 14 else calculate_atr(df)
 
         if direction == "bullish":
             for i in range(search_idx, lookback_limit, -1):
@@ -107,7 +107,7 @@ def find_order_blocks(
                 # Displacement Validation
                 displacement_valid = False
                 for j in range(i + 1, min(i + 6, len(df))):
-                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
+                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.0):
                         displacement_valid = True
                         break
                 if not displacement_valid:
@@ -127,7 +127,7 @@ def find_order_blocks(
                 score = 0.4 + fvg_boost
                 if bwr > 0.6:
                     score += 0.2  # High body-to-wick ratio
-                if displacement_pips > (atr_val * 1.2):
+                if displacement_pips > (atr_val * 2.0):
                     score += 0.2  # Strong displacement impulse
 
                 ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
@@ -159,7 +159,7 @@ def find_order_blocks(
                 # Displacement Validation
                 displacement_valid = False
                 for j in range(i + 1, min(i + 6, len(df))):
-                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 0.8):
+                    if abs(df["close"].iloc[j] - df["open"].iloc[j]) > (atr_val * 1.0):
                         displacement_valid = True
                         break
                 if not displacement_valid:
@@ -178,7 +178,7 @@ def find_order_blocks(
                 score = 0.4 + fvg_boost
                 if bwr > 0.6:
                     score += 0.2
-                if displacement_pips > (atr_val * 1.2):
+                if displacement_pips > (atr_val * 2.0):
                     score += 0.2
 
                 ob_high, ob_low = df["high"].iloc[i], df["low"].iloc[i]
