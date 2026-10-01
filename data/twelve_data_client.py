@@ -53,6 +53,7 @@ class TwelveDataClient:
             "outputsize": outputsize,
             "apikey": self.api_key,
             "format": "JSON",
+            "timezone": "UTC",
         }
 
         url = f"{self.rest_base_url}/time_series"
