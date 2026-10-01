@@ -3,7 +3,7 @@ import signal as os_signal
 import sys
 from typing import List, Optional
 
-from bot.dispatcher import start_bot
+from bot.dispatcher import bot, start_bot
 from config.settings import settings
 from data.twelve_data_client import client, TwelveDataClient
 from db.database import close_pool, init_pool
@@ -46,6 +46,13 @@ async def shutdown(
     if running_tasks:
         await asyncio.gather(*running_tasks, return_exceptions=True)
         logger.info("background_tasks_cancelled")
+
+    # Close Bot aiohttp session cleanly
+    try:
+        await bot.session.close()
+        logger.info("telegram_bot_session_closed")
+    except Exception as e:
+        logger.error("error_closing_telegram_session", error=str(e))
 
     # 4. Drain PostgreSQL asyncpg connection pool
     try:

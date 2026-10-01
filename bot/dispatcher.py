@@ -49,4 +49,6 @@ async def broadcast_signal(message_html: str, signal_id: Optional[str] = None) -
 async def start_bot():
     """Starts the Telegram polling loop."""
     logger.info("telegram_bot_polling_started")
-    await dp.start_polling(bot)
+    # Clears any deadlocks or pending backlogged queries
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, handle_signals=False)
