@@ -15,6 +15,7 @@ from strategies.models import LiquidityPool, StructureEvent
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.save_signal", new_callable=AsyncMock)
@@ -38,6 +39,7 @@ async def test_scan_ltf_entry_success(
     mock_save_signal,
     mock_is_duplicate,
     mock_get_active_obs,
+    mock_save_event,
     mock_get_bias,
     mock_get_candles,
     dummy_ob_dict,
@@ -95,6 +97,7 @@ async def test_scan_ltf_entry_success(
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.save_signal", new_callable=AsyncMock)
@@ -118,6 +121,7 @@ async def test_scan_ltf_entry_penalized_premium_discount(
     mock_save_signal,
     mock_is_duplicate,
     mock_get_active_obs,
+    mock_save_event,
     mock_get_bias,
     mock_get_candles,
     dummy_ob_dict,
@@ -148,15 +152,16 @@ async def test_scan_ltf_entry_penalized_premium_discount(
     engine = ConfluenceEngine(settings.SYMBOLS[0])
     signal = await engine.scan_ltf_entry()
 
-    # Base(25) + HTF Align(25) - PD Penalty(5) + Killzone(5) + OB Tap(25) = 75 (exact pass)
+    # Base(20) + HTF Align(15) - PD Penalty(3) + Killzone(8) + OB Tap(25) = 65 (exact pass)
     assert signal is not None
-    assert signal.confluence_score == 75
+    assert signal.confluence_score == 65
     assert "Sub-optimal PD Zone Penalty (Premium)" in signal.confluence_factors
 
 
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.save_signal", new_callable=AsyncMock)
@@ -180,6 +185,7 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
     mock_save_signal,
     mock_is_duplicate,
     mock_get_active_obs,
+    mock_save_event,
     mock_get_bias,
     mock_get_candles,
     dummy_ob_dict,
@@ -227,6 +233,7 @@ async def test_scan_ltf_entry_accepted_premium_with_sweep(
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
 @patch("strategies.confluence.SessionManager.get_active_killzone")
@@ -242,6 +249,7 @@ async def test_scan_ltf_entry_low_confluence(
     mock_killzone,
     mock_is_duplicate,
     mock_get_active_obs,
+    mock_save_event,
     mock_get_bias,
     mock_get_candles,
     dummy_ob_dict,
@@ -276,6 +284,7 @@ async def test_scan_ltf_entry_low_confluence(
 @pytest.mark.asyncio
 @patch("strategies.confluence.candle_store.get_candles", new_callable=AsyncMock)
 @patch("strategies.confluence.structure_events.get_latest_bias", new_callable=AsyncMock)
+@patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.get_active_breaker_blocks", new_callable=AsyncMock)
 @patch("strategies.confluence.signals.is_duplicate", new_callable=AsyncMock)
@@ -301,6 +310,7 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     mock_is_duplicate,
     mock_get_breakers,
     mock_get_active_obs,
+    mock_save_event,
     mock_get_bias,
     mock_get_candles,
     dummy_breaker_dict,
@@ -364,9 +374,13 @@ async def test_scan_ltf_entry_breaker_block_fallback(
 @patch("strategies.confluence.structure_events.save_event", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.save_order_block", new_callable=AsyncMock)
 @patch("strategies.confluence.order_blocks.mark_as_breaker", new_callable=AsyncMock)
+@patch("strategies.confluence.order_blocks.get_active_order_blocks", new_callable=AsyncMock)
+@patch("strategies.confluence.liquidity_pools.save_pool", new_callable=AsyncMock)
 @patch("strategies.confluence.SessionManager.is_market_open")
 async def test_scan_htf_and_mtf_scans(
     mock_is_market_open,
+    mock_save_pool,
+    mock_get_active_obs,
     mock_mark_breaker,
     mock_save_ob,
     mock_save_event,
@@ -376,6 +390,8 @@ async def test_scan_htf_and_mtf_scans(
 ):
     """Test HTF bias updates and MTF confirmation sweeps."""
     mock_is_market_open.return_value = True
+
+    mock_get_active_obs.return_value = []
 
     mock_get_candles.return_value = bullish_bos_df.iloc[:35].copy()
     mock_get_bias.return_value = "ranging"

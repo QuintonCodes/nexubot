@@ -405,44 +405,72 @@ def generate_trade_signal(
     signal_type: str = "SMC_Confluence",
     target_cap: Optional[float] = None,
     runaway_distance: Optional[float] = None,
+    target_levels: Optional[List[float]] = None,
+    atr_value: Optional[float] = None,
+    max_reach: Optional[float] = None,
 ) -> TradeSignal:
     """Assembles a valid TradeSignal, smartly calculating dynamic RR Take Profits."""
     sl_pips_diff = abs(entry_price - stop_loss)
 
-    # Dynamic RR scales linearly with setup strength
-    dynamic_rr = max(3.0, confluence_score / 25.0)
+    # Legacy fallback for callers missing the new optional params
+    if atr_value is None or max_reach is None:
+        atr_value = sl_pips_diff
+        max_reach = 3.0 * sl_pips_diff
 
-    # 1. Base TP3 Distance
-    tp3_distance = sl_pips_diff * dynamic_rr
+    min_dist = 0.5 * atr_value
 
-    # 2. Apply Target Cap to Distance
-    if target_cap is not None:
-        max_tp_distance = abs(target_cap - entry_price)
-        tp3_distance = min(tp3_distance, max_tp_distance)
+    # 1 & 2. Keep relevant levels and apply hard cap
+    valid_targets = []
+    if target_levels:
+        for t in target_levels:
+            dist = t - entry_price if direction == "buy" else entry_price - t
+            if dist > min_dist and dist <= max_reach:
+                if target_cap is not None:
+                    cap_dist = target_cap - entry_price if direction == "buy" else entry_price - target_cap
+                    if dist <= cap_dist:
+                        valid_targets.append(t)
+                else:
+                    valid_targets.append(t)
 
-    # 3. Ensure R:R Never Drops Below 1.5
-    # If the capped TP limits the RR to < 1.5, mathematically tighten the SL
-    # proportional to the available TP distance to guarantee a minimum 1.5 RR.
-    min_rr = 1.5
-    if tp3_distance < (sl_pips_diff * min_rr):
-        sl_pips_diff = tp3_distance / min_rr
-        if direction == "buy":
-            stop_loss = entry_price - sl_pips_diff
+        # Include cap itself as a valid target rung
+        if target_cap is not None:
+            cap_dist = target_cap - entry_price if direction == "buy" else entry_price - target_cap
+            if cap_dist > min_dist and cap_dist <= max_reach:
+                valid_targets.append(target_cap)
+
+    # 3. Sort distances properly and space them out
+    valid_targets = sorted(list(set(valid_targets)), reverse=(direction == "sell"))
+    merged_targets = []
+    for t in valid_targets:
+        if not merged_targets:
+            merged_targets.append(t)
         else:
-            stop_loss = entry_price + sl_pips_diff
+            prev_t = merged_targets[-1]
+            if abs(t - prev_t) >= min_dist:
+                merged_targets.append(t)
 
-    # 4. Spaced TP Levels (Prevents Collapsing / Overlapping TPs)
-    tp1_distance = tp3_distance * 0.30  # TP1 captures 30% of the total target move
-    tp2_distance = tp3_distance * 0.60  # TP2 captures 60% of the total target move
-
-    if direction == "buy":
-        tp3 = entry_price + tp3_distance
-        tp2 = entry_price + tp2_distance
-        tp1 = entry_price + tp1_distance
+    # 4. Assign Target distributions (TP1 nearest, TP3 furthest)
+    if len(merged_targets) >= 3:
+        tp1 = merged_targets[0]
+        tp2 = merged_targets[len(merged_targets) // 2]
+        tp3 = merged_targets[-1]
+        if len(merged_targets) == 3:
+            tp2 = merged_targets[1]
+    elif len(merged_targets) == 2:
+        tp1 = merged_targets[0]
+        tp3 = merged_targets[1]
+        tp2 = (tp1 + tp3) / 2.0
+    elif len(merged_targets) == 1:
+        tp3 = merged_targets[0]
+        dist = tp3 - entry_price if direction == "buy" else entry_price - tp3
+        tp1 = entry_price + dist * 0.33 if direction == "buy" else entry_price - dist * 0.33
+        tp2 = entry_price + dist * 0.66 if direction == "buy" else entry_price - dist * 0.66
     else:
-        tp3 = entry_price - tp3_distance
-        tp2 = entry_price - tp2_distance
-        tp1 = entry_price - tp1_distance
+        # 0 levels fallback: Target max_reach purely proportionally
+        tp3 = entry_price + max_reach if direction == "buy" else entry_price - max_reach
+        dist = tp3 - entry_price if direction == "buy" else entry_price - tp3
+        tp1 = entry_price + dist * 0.33 if direction == "buy" else entry_price - dist * 0.33
+        tp2 = entry_price + dist * 0.66 if direction == "buy" else entry_price - dist * 0.66
 
     actual_rrr = calculate_rrr(entry_price, stop_loss, tp3)
 

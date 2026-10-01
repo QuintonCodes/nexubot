@@ -46,52 +46,57 @@ class ConfluenceEngine:
         if current_bias is None:
             current_bias = await structure_events.get_latest_bias(self.symbol, tf)
 
-        # 1. HTF/MTF Path: Extract bias cleanly through full continuous replay to catch structural bias on cold start
-        if tf != self.ltf:
-            new_bias = classify_structure(df, swings)
-            if new_bias != current_bias and new_bias != "ranging":
-                synthetic_event = StructureEvent(
-                    symbol=self.symbol,
-                    timeframe=tf,
-                    event_type="BOS",
-                    direction=new_bias,
-                    price_level=swings[-1].price if swings else 0.0,
-                    timestamp=df.iloc[-1]["timestamp"],
-                    confirmed=True,
-                )
-                await structure_events.save_event(synthetic_event)
-            return new_bias
-
-        # 2. LTF Path: Relies on localized candle breaks for precision event tracking
         if current_bias is None:
             current_bias = classify_structure(df, swings)
+
+        event_fired = False
 
         bos = detect_bos(df, swings, current_bias or "ranging", self.symbol, tf)
         if bos:
             await structure_events.save_event(bos)
             logger.info("structure_break", event_type="BOS", direction=bos.direction, tf=tf)
-            return bos.direction
+            current_bias = bos.direction
+            event_fired = True
+        else:
+            mss = detect_mss(df, swings, current_bias or "ranging", self.symbol, tf)
+            if mss:
+                await structure_events.save_event(mss)
+                logger.info("structure_break", event_type="MSS", direction=mss.direction, tf=tf)
+                current_bias = mss.direction
+                event_fired = True
+            else:
+                choch = detect_choch(df, swings, current_bias or "ranging", self.symbol, tf)
+                if choch:
+                    await structure_events.save_event(choch)
+                    logger.info("structure_break", event_type="CHoCH", direction=choch.direction, tf=tf)
+                    current_bias = choch.direction
+                    event_fired = True
 
-        mss = detect_mss(df, swings, current_bias or "ranging", self.symbol, tf)
-        if mss:
-            await structure_events.save_event(mss)
-            logger.info("structure_break", event_type="MSS", direction=mss.direction, tf=tf)
-            return mss.direction
-
-        choch = detect_choch(df, swings, current_bias or "ranging", self.symbol, tf)
-        if choch:
-            await structure_events.save_event(choch)
-            logger.info("structure_break", event_type="CHoCH", direction=choch.direction, tf=tf)
-            return choch.direction
-
-        # Optional: Secondary validation to trace structural reversals natively against existing OB zones
+        # Secondary validation to trace structural reversals natively against existing OB zones
         active_obs = await order_blocks.get_active_order_blocks(self.symbol, tf)
         for ob in active_obs:
             cisd = detect_cisd(df, ob, self.symbol, tf)
             if cisd:
                 await structure_events.save_event(cisd)
                 logger.info("structure_break", event_type="CISD", direction=cisd.direction, tf=tf)
-                return cisd.direction
+                current_bias = cisd.direction
+                event_fired = True
+
+        # 2. HTF/MTF Path: Extract bias cleanly through full continuous replay to catch missed structural shifts
+        if not event_fired and tf != self.ltf:
+            new_bias = classify_structure(df, swings)
+            if new_bias != current_bias and new_bias != "ranging":
+                synthetic_event = StructureEvent(
+                    symbol=self.symbol,
+                    timeframe=tf,
+                    event_type="CHoCH",  # A shift in bias is functionally a Change of Character
+                    direction=new_bias,
+                    price_level=swings[-1].price if swings else 0.0,
+                    timestamp=df.iloc[-1]["timestamp"],
+                    confirmed=True,
+                )
+                await structure_events.save_event(synthetic_event)
+                current_bias = new_bias
 
         return current_bias
 
@@ -170,6 +175,10 @@ class ConfluenceEngine:
         df = await candle_store.get_candles(self.symbol, self.ltf)
         if len(df) < 20:
             return None
+
+        # Extract the trailing LTF bias and continuously record structure breaks natively
+        current_ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf)
+        await self._update_structure_state(df, self.ltf, current_ltf_bias)
 
         current_price = df.iloc[-1]["close"]
         swings_ltf = detect_swings(df)
@@ -254,20 +263,20 @@ class ConfluenceEngine:
 
         # 3. Factor & Confluence Setup
         factors = []
-        confluence_score = 25
+        confluence_score = 20
 
         if is_pro_htf:
             factors.append(f"Full MTF/HTF Alignment ({htf_bias.upper()})")
-            confluence_score += 25
+            confluence_score += 15
         else:
             factors.append("Intraday Retracement (1H/15M Aligned)")
-            confluence_score += 15
+            confluence_score += 5
             if runaway_dist is not None:
                 factors.append(f"Runway Clear ({runaway_dist:.1f} pts to HTF POI)")
 
         if nearest_pool is not None:
             factors.append(f"Draw on Liquidity @ {nearest_pool:.2f}")
-            confluence_score += 10
+            confluence_score += 4
 
         # 4. Premium / Discount Evaluation (1H MTF Dealing Range)
         mtf_df = await candle_store.get_candles(self.symbol, self.mtf)
@@ -306,17 +315,17 @@ class ConfluenceEngine:
             if not valid_sweep and not valid_ote:
                 logger.info("pd_array_penalty", direction=trade_bias, pd_zone=pd_zone)
                 factors.append(f"Sub-optimal PD Zone Penalty ({pd_zone})")
-                confluence_score -= 5
+                confluence_score -= 3
             else:
                 factors.append("PD Array Override (Liquidity Sweep / OTE)")
         else:
             factors.append(f"Optimal PD Zone ({pd_zone})")
-            confluence_score += 10
+            confluence_score += 5
 
         active_session = SessionManager.get_active_killzone(datetime.now(timezone.utc))
         if active_session != "Out of Session" and active_session != "Market Closed":
             factors.append(f"Killzone Active ({active_session})")
-            confluence_score += 5
+            confluence_score += 8
 
         # 5. Order Block & Breaker Identification (Aligned with trade_bias)
         valid_ob = None
@@ -361,18 +370,21 @@ class ConfluenceEngine:
         cisd_event = detect_cisd(df, valid_ob, self.symbol, self.ltf)
         if cisd_event:
             factors.append("CISD Confirmed")
-            confluence_score += 15
+            confluence_score += 6
             await structure_events.save_event(cisd_event)
 
         fvgs = detect_fair_value_gaps(df.tail(10), self.symbol, self.ltf)
-        if any(f.direction == trade_bias and is_within_range(current_price, f.bottom, f.top) for f in fvgs):
+        matched_fvg = next(
+            (f for f in fvgs if f.direction == trade_bias and is_within_range(current_price, f.bottom, f.top)), None
+        )
+        if matched_fvg:
             entry_model = "OB + FVG Combo"
             factors.append("FVG Tap Confirmed")
-            confluence_score += 10
+            confluence_score += 4
 
         if valid_sweep:
             factors.append(f"Liquidity Sweep ({swept_pool.pool_type})")
-            confluence_score += 20
+            confluence_score += 5
             await liquidity_pools.save_pool(swept_pool)
 
         idm = detect_inducement(swings_ltf, trade_bias)
@@ -381,18 +393,18 @@ class ConfluenceEngine:
             or (trade_bias == "bearish" and current_price > idm.price)
         ):
             factors.append("Inducement (IDM) Swept")
-            confluence_score += 15
+            confluence_score += 3
 
         if valid_ote:
             entry_model = "OTE Retracement Tap"
             factors.append(ote_entry_model_text)
-            confluence_score += 20
+            confluence_score += 3
 
-        ltf_bias = await structure_events.get_latest_bias(self.symbol, self.ltf) or trade_bias
-        ltf_choch = detect_choch(df, swings_ltf, ltf_bias, self.symbol, self.ltf)
+        # Use the pre-update trailing bias to check if the current candle triggered the CHoCH
+        ltf_choch = detect_choch(df, swings_ltf, current_ltf_bias or trade_bias, self.symbol, self.ltf)
         if ltf_choch and ltf_choch.direction == trade_bias:
             factors.append("LTF CHoCH Confirmed")
-            confluence_score += 10
+            confluence_score += 2
 
         # Adjust score thresholds slightly to account for the PD array logic shift
         if active_session in ["Out of Session", "Market Closed"]:
@@ -405,18 +417,88 @@ class ConfluenceEngine:
             return None
 
         # 7. Assemble Trade Signal
-        atr_val = calculate_atr(df)
-        sl_buffer = atr_val * 0.5
+        # a) Spike-resistant ATR
+        if len(df) >= 15:
+            high_low = df["high"] - df["low"]
+            high_close = (df["high"] - df["close"].shift()).abs()
+            low_close = (df["low"] - df["close"].shift()).abs()
+            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            atr_series = tr.rolling(14).mean().dropna()
+            atr_val = (
+                min(atr_series.iloc[-1], atr_series.tail(100).median()) if not atr_series.empty else calculate_atr(df)
+            )
+        else:
+            atr_val = calculate_atr(df)
+
+        sl_cushion = atr_val * 0.5
         trade_dir = "buy" if valid_ob["direction"] == "bullish" else "sell"
-        stop_loss = (
-            float(valid_ob["ob_low"]) - sl_buffer if trade_dir == "buy" else float(valid_ob["ob_high"]) + sl_buffer
-        )
+        ob_low, ob_high = float(valid_ob["ob_low"]), float(valid_ob["ob_high"])
+
+        # b) Build candidate invalidation levels
+        candidates = []
+        if valid_sweep and swept_pool.sweep_timestamp:
+            post_sweep = df[df["timestamp"] >= swept_pool.sweep_timestamp]
+            if not post_sweep.empty:
+                candidates.append(post_sweep["low"].min() if trade_dir == "buy" else post_sweep["high"].max())
+
+        if valid_ote and ltf_lows and ltf_highs:
+            candidates.append(ltf_lows[-1].price if trade_dir == "buy" else ltf_highs[-1].price)
+
+        if matched_fvg:
+            candidates.append(matched_fvg.bottom if trade_dir == "buy" else matched_fvg.top)
+
+        if trade_dir == "buy":
+            candidates.extend([s.price for s in swings_ltf if s.type == "low" and s.price < current_price][-3:])
+        else:
+            candidates.extend([s.price for s in swings_ltf if s.type == "high" and s.price > current_price][-3:])
+
+        candidates.append((ob_low + ob_high) / 2.0)
+        candidates.append(ob_low if trade_dir == "buy" else ob_high)
+
+        # c) Keep candidates farther than 0.5*atr_val, pick closest to entry
+        valid_candidates = []
+        for c in candidates:
+            dist = current_price - c if trade_dir == "buy" else c - current_price
+            if dist > sl_cushion:
+                valid_candidates.append(c)
+
+        if valid_candidates:
+            if trade_dir == "buy":
+                chosen_sl_level = max(valid_candidates)
+                stop_loss = chosen_sl_level - sl_cushion
+            else:
+                chosen_sl_level = min(valid_candidates)
+                stop_loss = chosen_sl_level + sl_cushion
+        else:
+            stop_loss = (ob_low - sl_cushion) if trade_dir == "buy" else (ob_high + sl_cushion)
 
         # Check Deduplication
         is_dup = await signals.is_duplicate(self.symbol, self.ltf, trade_dir, settings.SIGNAL_COOLDOWN_MINUTES)
         if is_dup:
             logger.info("signal_suppressed_duplicate", symbol=self.symbol)
             return None
+
+        # Build precise target structure inline
+        target_levels = []
+        for p in htf_pools:
+            target_levels.append(float(p["price_level"]))
+
+        for p in all_ltf_pools:
+            if not p.swept and p.pool_type in target_pool_types:
+                target_levels.append(p.price_level)
+
+        if trade_bias == "bullish":
+            target_levels.extend([s.price for s in mtf_highs])
+            if mtf_highs and mtf_lows:
+                target_levels.append((mtf_highs[-1].price + mtf_lows[-1].price) / 2.0)
+            target_levels = [t for t in target_levels if t > current_price]
+        else:
+            target_levels.extend([s.price for s in mtf_lows])
+            if mtf_highs and mtf_lows:
+                target_levels.append((mtf_highs[-1].price + mtf_lows[-1].price) / 2.0)
+            target_levels = [t for t in target_levels if t < current_price]
+
+        max_reach = 1.5 * calculate_atr(mtf_df)
 
         signal = generate_trade_signal(
             symbol=self.symbol,
@@ -431,8 +513,11 @@ class ConfluenceEngine:
             session=active_session,
             pd_zone=pd_zone,
             signal_type=signal_type,
-            target_cap=target_cap,
+            target_cap=nearest_barrier,
             runaway_distance=runaway_dist,
+            target_levels=target_levels,
+            atr_value=atr_val,
+            max_reach=max_reach,
         )
 
         await signals.save_signal(signal)
