@@ -47,7 +47,20 @@ async def test_scan_ltf_entry_success(
 ):
     """Test that a signal is generated when price enters an active, HTF-aligned OB with high confluence."""
     mock_is_market_open.return_value = True
-    mock_detect_kz.return_value = []
+
+    # Inject a synthetic pool so all_ltf_pools triggers the save_pool iteration loop
+    dummy_pool = LiquidityPool(
+        symbol="XAUUSD",
+        timeframe="5min",
+        pool_type="KZ_LOW",
+        price_level=2490.0,
+        price_tolerance=0.0,
+        touch_count=1,
+        swept=False,
+        sweep_timestamp=None,
+        origin_timestamp=datetime.now(timezone.utc),
+    )
+    mock_detect_kz.return_value = [dummy_pool]
 
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
@@ -91,7 +104,7 @@ async def test_scan_ltf_entry_success(
     assert "Full MTF/HTF Alignment (BULLISH)" in signal.confluence_factors
 
     mock_save_signal.assert_called_once()
-    mock_save_pool.assert_called_once()
+    mock_save_pool.assert_called()
 
 
 @pytest.mark.asyncio
@@ -318,7 +331,19 @@ async def test_scan_ltf_entry_breaker_block_fallback(
 ):
     """Test fallback to Breaker Block when no active OB is tapped."""
     mock_is_market_open.return_value = True
-    mock_detect_kz.return_value = []
+
+    dummy_pool = LiquidityPool(
+        symbol="XAUUSD",
+        timeframe="5min",
+        pool_type="KZ_LOW",
+        price_level=2490.0,
+        price_tolerance=0.0,
+        touch_count=1,
+        swept=False,
+        sweep_timestamp=None,
+        origin_timestamp=datetime.now(timezone.utc),
+    )
+    mock_detect_kz.return_value = [dummy_pool]
 
     test_df = bullish_bos_df.copy()
     test_df.loc[test_df.index[-1], "close"] = 2500.0
@@ -364,7 +389,7 @@ async def test_scan_ltf_entry_breaker_block_fallback(
     assert signal.entry_model == "1h Breaker Block Retest"
     assert "1h Breaker Block Tap" in signal.confluence_factors
 
-    mock_save_pool.assert_called_once()
+    mock_save_pool.assert_called()
     mock_save_signal.assert_called_once()
 
 

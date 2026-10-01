@@ -246,55 +246,66 @@ def calculate_ote_zone(
 
 
 def detect_liquidity_pools(
-    swings: List[SwingPoint], symbol: str, tf: str, pip_tolerance: float = 40.0
+    swings: List[SwingPoint], symbol: str, tf: str, pip_tolerance: float = 10.0
 ) -> List[LiquidityPool]:
     """Scans historical swings to find Equal Highs (EQH) and Equal Lows (EQL)."""
     pools = []
+
+    # Standard swings are already shielded from the live candle by the 'lookback' window in detect_swings.
     highs = [s for s in swings if s.type == "high"]
     lows = [s for s in swings if s.type == "low"]
 
     # Detect EQH across the last 4 major highs
     if len(highs) >= 2:
         recent_highs = highs[-4:] if len(highs) > 4 else highs
+        detected_eqh = []
         for rh in reversed(recent_highs):
             for ph in reversed(highs):
                 if rh.candle_index > ph.candle_index and (rh.candle_index - ph.candle_index > 3):
                     if price_to_pips(abs(rh.price - ph.price), symbol) <= pip_tolerance:
-                        pools.append(
-                            LiquidityPool(
-                                symbol=symbol,
-                                timeframe=tf,
-                                pool_type="EQH",
-                                price_level=max(rh.price, ph.price),
-                                price_tolerance=pip_tolerance,
-                                touch_count=2,
-                                swept=False,
-                                sweep_timestamp=None,
-                                origin_timestamp=rh.timestamp,
+                        price_lvl = max(rh.price, ph.price)
+                        # Ensure we don't output 4 overlapping pools for the same price level
+                        if not any(price_to_pips(abs(price_lvl - p), symbol) <= pip_tolerance for p in detected_eqh):
+                            detected_eqh.append(price_lvl)
+                            pools.append(
+                                LiquidityPool(
+                                    symbol=symbol,
+                                    timeframe=tf,
+                                    pool_type="EQH",
+                                    price_level=price_lvl,
+                                    price_tolerance=pip_tolerance,
+                                    touch_count=2,
+                                    swept=False,
+                                    sweep_timestamp=None,
+                                    origin_timestamp=rh.timestamp,
+                                )
                             )
-                        )
                         break
 
     # Detect EQL
     if len(lows) >= 2:
         recent_lows = lows[-4:] if len(lows) > 4 else lows
+        detected_eql = []
         for rl in reversed(recent_lows):
             for pl in reversed(lows):
                 if rl.candle_index > pl.candle_index and (rl.candle_index - pl.candle_index > 3):
                     if price_to_pips(abs(rl.price - pl.price), symbol) <= pip_tolerance:
-                        pools.append(
-                            LiquidityPool(
-                                symbol=symbol,
-                                timeframe=tf,
-                                pool_type="EQL",
-                                price_level=min(rl.price, pl.price),
-                                price_tolerance=pip_tolerance,
-                                touch_count=2,
-                                swept=False,
-                                sweep_timestamp=None,
-                                origin_timestamp=rl.timestamp,
+                        price_lvl = min(rl.price, pl.price)
+                        if not any(price_to_pips(abs(price_lvl - p), symbol) <= pip_tolerance for p in detected_eql):
+                            detected_eql.append(price_lvl)
+                            pools.append(
+                                LiquidityPool(
+                                    symbol=symbol,
+                                    timeframe=tf,
+                                    pool_type="EQL",
+                                    price_level=price_lvl,
+                                    price_tolerance=pip_tolerance,
+                                    touch_count=2,
+                                    swept=False,
+                                    sweep_timestamp=None,
+                                    origin_timestamp=rl.timestamp,
+                                )
                             )
-                        )
                         break
 
     return pools
@@ -369,6 +380,7 @@ def detect_liquidity_sweep(df: pd.DataFrame, pools: List[LiquidityPool]) -> Opti
         return None
 
     recent_candles = df.tail(3)
+    first_swept = None
 
     for pool in pools:
         if pool.swept:
@@ -379,15 +391,19 @@ def detect_liquidity_sweep(df: pd.DataFrame, pools: List[LiquidityPool]) -> Opti
                 if candle["high"] > pool.price_level and candle["close"] < pool.price_level:
                     pool.swept = True
                     pool.sweep_timestamp = candle["timestamp"]
-                    return pool
+                    if first_swept is None:
+                        first_swept = pool
+                    break
 
             elif pool.pool_type in ["EQL", "KZ_LOW"]:
                 if candle["low"] < pool.price_level and candle["close"] > pool.price_level:
                     pool.swept = True
                     pool.sweep_timestamp = candle["timestamp"]
-                    return pool
+                    if first_swept is None:
+                        first_swept = pool
+                    break
 
-    return None
+    return first_swept
 
 
 def generate_trade_signal(

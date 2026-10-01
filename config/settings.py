@@ -63,7 +63,7 @@ class Settings(BaseSettings):
         default=30, ge=1, description="Suppression window to prevent duplicate alerts within the same zone."
     )
     XAUUSD_PIP_TOLERANCE: float = Field(
-        default=40.0,
+        default=10.0,
         gt=0.0,
         description="Pip tolerance for Equal Highs (EQH) and Equal Lows (EQL) on XAUUSD (40 pips = $4.00).",
     )

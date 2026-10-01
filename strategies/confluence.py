@@ -126,8 +126,8 @@ class ConfluenceEngine:
         current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf)
         bias = await self._update_structure_state(df, self.mtf, current_bias)
 
-        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
-        pools = detect_liquidity_pools(swings, self.symbol, self.mtf, pip_tol)
+        liq_pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 10.0)
+        pools = detect_liquidity_pools(swings, self.symbol, self.mtf, liq_pip_tol)
         for pool in pools:
             await liquidity_pools.save_pool(pool)
 
@@ -154,8 +154,8 @@ class ConfluenceEngine:
         current_bias = await structure_events.get_latest_bias(self.symbol, self.mtf_conf)
         bias = await self._update_structure_state(df, self.mtf_conf, current_bias)
 
-        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
-        pools = detect_liquidity_pools(swings, self.symbol, self.mtf_conf, pip_tol)
+        liq_pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 10.0)
+        pools = detect_liquidity_pools(swings, self.symbol, self.mtf_conf, liq_pip_tol)
         for pool in pools:
             await liquidity_pools.save_pool(pool)
 
@@ -289,15 +289,19 @@ class ConfluenceEngine:
         else:
             pd_zone = "Equilibrium"
 
-        pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 40.0)
-        standard_pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, pip_tol)
+        liq_pip_tol = getattr(settings, "XAUUSD_PIP_TOLERANCE", 10.0)
+        standard_pools = detect_liquidity_pools(swings_ltf, self.symbol, self.ltf, liq_pip_tol)
         kz_pools = detect_killzone_liquidity(df, self.symbol, self.ltf)
 
         all_ltf_pools = standard_pools + kz_pools
+
+        # Determine sweeps BEFORE saving them to the DB, so the True flag writes cleanly.
+        swept_pool = detect_liquidity_sweep(df, all_ltf_pools)
+
+        # Save pools globally regardless of the trade bias
         for pool in all_ltf_pools:
             await liquidity_pools.save_pool(pool)
 
-        swept_pool = detect_liquidity_sweep(df, all_ltf_pools)
         valid_sweep = swept_pool and (
             (trade_bias == "bullish" and swept_pool.pool_type in ["EQL", "KZ_LOW"])
             or (trade_bias == "bearish" and swept_pool.pool_type in ["EQH", "KZ_HIGH"])
@@ -385,7 +389,6 @@ class ConfluenceEngine:
         if valid_sweep:
             factors.append(f"Liquidity Sweep ({swept_pool.pool_type})")
             confluence_score += 5
-            await liquidity_pools.save_pool(swept_pool)
 
         idm = detect_inducement(swings_ltf, trade_bias)
         if idm and (
